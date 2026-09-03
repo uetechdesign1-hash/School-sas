@@ -1,4 +1,4 @@
-"use client";
+
 
 import {
   FormEvent,
@@ -922,6 +922,10 @@ export default function ReceiptPage() {
           transaction.reference_id
         );
 
+        if (!payment) {
+          throw new Error("Fee payment could not be found.");
+        }
+
         setPaymentMethod(payment.payment_method);
         setReferenceNumber(payment.reference_number || "");
         setNotes(payment.notes || "");
@@ -1432,7 +1436,7 @@ export default function ReceiptPage() {
 
       resetPaymentFields();
 
-      await loadHistory(schoolId);
+      await loadHistory(schoolId!);
     } catch (err: any) {
       console.error("RECEIPT RECORDING ERROR:", err);
 
@@ -1557,6 +1561,10 @@ export default function ReceiptPage() {
         const payment = await getPayment(
           transaction.reference_id
         );
+
+        if (!payment) {
+          throw new Error("Fee payment could not be found.");
+        }
 
         const oldBillId = payment.bill_id;
 

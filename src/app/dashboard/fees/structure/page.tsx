@@ -1,4 +1,4 @@
-"use client";
+
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
@@ -287,9 +287,25 @@ export default function FeeStructurePage() {
         (categoryResult.data || []) as FeeCategory[],
       );
 
-      setStructures(
-        (structureResult.data || []) as FeeStructure[],
-      );
+      const normalizedStructures = (
+        structureResult.data || []
+      ).map((structure) => ({
+        ...structure,
+        academic_year: Array.isArray(structure.academic_year)
+          ? structure.academic_year[0] ?? null
+          : structure.academic_year ?? null,
+        school_class: Array.isArray(structure.school_class)
+          ? structure.school_class[0] ?? null
+          : structure.school_class ?? null,
+        items: (structure.items || []).map((item) => ({
+          ...item,
+          category: Array.isArray(item.category)
+            ? item.category[0] ?? null
+            : item.category ?? null,
+        })),
+      })) as unknown as FeeStructure[];
+
+      setStructures(normalizedStructures);
     } catch (error) {
       console.error("FEE STRUCTURE LOAD ERROR:", error);
 
