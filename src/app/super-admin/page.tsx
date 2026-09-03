@@ -16,8 +16,19 @@ type School = {
   status: string;
   plan_code: string | null;
   student_limit: number | null;
+  starts_on: string | null;
   expires_on: string | null;
   created_at: string;
+  email: string | null;
+  phone: string | null;
+  address: string | null;
+  city: string | null;
+  state: string | null;
+  postal_code: string | null;
+  owner_user_id?: string | null;
+  owner_name?: string | null;
+  owner_phone?: string | null;
+  owner_email?: string | null;
 };
 
 type FormData = {
@@ -81,13 +92,29 @@ export default function SuperAdminPage() {
   const [editingSchool, setEditingSchool] =
     useState<School | null>(null);
 
+  const [editLoading, setEditLoading] =
+    useState(false);
+
+  const [savingSchool, setSavingSchool] =
+    useState(false);
+
   const [editForm, setEditForm] = useState({
-    name: "",
-    code: "",
+    schoolName: "",
+    schoolCode: "",
+    schoolEmail: "",
+    schoolPhone: "",
+    address: "",
+    city: "",
+    state: "",
+    postalCode: "",
     planCode: "starter",
     studentLimit: "300",
-    status: "trial",
+    startsOn: "",
     expiresOn: "",
+    status: "trial",
+    ownerName: "",
+    ownerPhone: "",
+    ownerEmail: "",
   });
 
   const [resetSchool, setResetSchool] =
@@ -95,9 +122,6 @@ export default function SuperAdminPage() {
 
   const [resetPassword, setResetPassword] =
     useState("");
-
-  const [savingSchool, setSavingSchool] =
-    useState(false);
 
   const [resettingPassword, setResettingPassword] =
     useState(false);
@@ -210,7 +234,7 @@ export default function SuperAdminPage() {
     } = await supabase
       .from("schools")
       .select(
-        "id, name, code, school_code, status, plan_code, student_limit, expires_on, created_at"
+        "id, name, code, school_code, status, plan_code, student_limit, starts_on, expires_on, email, phone, address, city, state, postal_code, created_at"
       )
       .order(
         "created_at",
@@ -480,22 +504,78 @@ export default function SuperAdminPage() {
   // EDIT SCHOOL
   // --------------------------------------------------
 
-  function openEditSchool(school: School) {
+  async function openEditSchool(school: School) {
     setErrorMessage("");
     setSuccessMessage("");
+    setEditLoading(true);
 
     setEditForm({
-      name: school.name || "",
-      code: school.code || school.school_code || "",
+      schoolName: school.name || "",
+      schoolCode: school.code || school.school_code || "",
+      schoolEmail: school.email || "",
+      schoolPhone: school.phone || "",
+      address: school.address || "",
+      city: school.city || "",
+      state: school.state || "",
+      postalCode: school.postal_code || "",
       planCode: school.plan_code || "starter",
-      studentLimit: String(school.student_limit || 300),
+      studentLimit: String(school.student_limit ?? 300),
+      startsOn: school.starts_on || "",
+      expiresOn: school.expires_on || "",
       status: school.status || "trial",
-      expiresOn: school.expires_on
-        ? String(school.expires_on).slice(0, 10)
-        : "",
+      ownerName: "",
+      ownerPhone: "",
+      ownerEmail: "",
     });
 
     setEditingSchool(school);
+
+    try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
+      if (!session?.access_token) {
+        throw new Error("Your login session has expired. Please log in again.");
+      }
+
+      const response = await fetch(
+        "/api/super-admin/schools/manage",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${session.access_token}`,
+          },
+          body: JSON.stringify({
+            action: "get",
+            schoolId: school.id,
+          }),
+        },
+      );
+
+      const result = await response.json();
+
+      if (!response.ok || !result?.success) {
+        throw new Error(result?.error || "Unable to load school owner details.");
+      }
+
+      setEditForm((current) => ({
+        ...current,
+        ownerName: result.owner?.name || "",
+        ownerPhone: result.owner?.phone || "",
+        ownerEmail: result.owner?.email || "",
+      }));
+    } catch (error) {
+      console.error("LOAD SCHOOL EDIT ERROR:", error);
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Unable to load school owner details.",
+      );
+    } finally {
+      setEditLoading(false);
+    }
   }
 
   function closeEditSchool() {
@@ -504,7 +584,9 @@ export default function SuperAdminPage() {
     setErrorMessage("");
   }
 
-  async function handleUpdateSchool(event: FormEvent<HTMLFormElement>) {
+  async function handleUpdateSchool(
+    event: FormEvent<HTMLFormElement>,
+  ) {
     event.preventDefault();
 
     if (!editingSchool) return;
@@ -512,19 +594,19 @@ export default function SuperAdminPage() {
     setErrorMessage("");
     setSuccessMessage("");
 
-    if (!editForm.name.trim()) {
-      setErrorMessage("Please enter the school name.");
+    const studentLimit = Number(editForm.studentLimit);
+
+    if (!editForm.schoolName.trim()) {
+      setErrorMessage("School name is required.");
       return;
     }
 
-    if (!editForm.code.trim()) {
-      setErrorMessage("Please enter the school code.");
+    if (!editForm.schoolCode.trim()) {
+      setErrorMessage("School code is required.");
       return;
     }
 
-    const limit = Number(editForm.studentLimit);
-
-    if (!Number.isFinite(limit) || limit < 1) {
+    if (!Number.isFinite(studentLimit) || studentLimit < 1) {
       setErrorMessage("Student limit must be at least 1.");
       return;
     }
@@ -532,32 +614,62 @@ export default function SuperAdminPage() {
     setSavingSchool(true);
 
     try {
-      const { error } = await supabase
-        .from("schools")
-        .update({
-          name: editForm.name.trim(),
-          code: editForm.code.trim().toUpperCase(),
-          plan_code: editForm.planCode,
-          student_limit: limit,
-          status: editForm.status,
-          expires_on: editForm.expiresOn || null,
-        })
-        .eq("id", editingSchool.id);
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
 
-      if (error) {
-        console.error("UPDATE SCHOOL ERROR:", error);
-        throw error;
+      if (!session?.access_token) {
+        throw new Error("Your login session has expired. Please log in again.");
+      }
+
+      const response = await fetch(
+        "/api/super-admin/schools/manage",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${session.access_token}`,
+          },
+          body: JSON.stringify({
+            action: "update",
+            schoolId: editingSchool.id,
+            school: {
+              name: editForm.schoolName.trim(),
+              code: editForm.schoolCode.trim().toUpperCase(),
+              email: editForm.schoolEmail.trim() || null,
+              phone: editForm.schoolPhone.trim() || null,
+              address: editForm.address.trim() || null,
+              city: editForm.city.trim() || null,
+              state: editForm.state.trim() || null,
+              postal_code: editForm.postalCode.trim() || null,
+              plan_code: editForm.planCode,
+              student_limit: studentLimit,
+              starts_on: editForm.startsOn || null,
+              expires_on: editForm.expiresOn || null,
+              status: editForm.status,
+            },
+            owner: {
+              name: editForm.ownerName.trim(),
+              phone: editForm.ownerPhone.trim() || null,
+            },
+          }),
+        },
+      );
+
+      const result = await response.json();
+
+      if (!response.ok || !result?.success) {
+        throw new Error(result?.error || "Unable to update school.");
       }
 
       setEditingSchool(null);
       setSuccessMessage(
-        `${editForm.name.trim()} school data updated successfully.`,
+        `${editForm.schoolName.trim()} updated successfully.`,
       );
 
       await loadSchools();
     } catch (error) {
       console.error("UPDATE SCHOOL ERROR:", error);
-
       setErrorMessage(
         error instanceof Error
           ? error.message
@@ -569,7 +681,7 @@ export default function SuperAdminPage() {
   }
 
   // --------------------------------------------------
-  // RESET SCHOOL OWNER PASSWORD
+  // RESET OWNER PASSWORD
   // --------------------------------------------------
 
   function openResetPassword(school: School) {
@@ -583,10 +695,9 @@ export default function SuperAdminPage() {
     if (resettingPassword) return;
     setResetSchool(null);
     setResetPassword("");
-    setErrorMessage("");
   }
 
-  async function handleResetSchoolPassword(
+  async function handleResetPassword(
     event: FormEvent<HTMLFormElement>,
   ) {
     event.preventDefault();
@@ -597,9 +708,7 @@ export default function SuperAdminPage() {
     setSuccessMessage("");
 
     if (resetPassword.length < 8) {
-      setErrorMessage(
-        "New password must contain at least 8 characters.",
-      );
+      setErrorMessage("Password must contain at least 8 characters.");
       return;
     }
 
@@ -610,19 +719,20 @@ export default function SuperAdminPage() {
         data: { session },
       } = await supabase.auth.getSession();
 
+      if (!session?.access_token) {
+        throw new Error("Your login session has expired. Please log in again.");
+      }
+
       const response = await fetch(
-        "/api/super-admin/reset-school-owner-password",
+        "/api/super-admin/schools/manage",
         {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            ...(session?.access_token
-              ? {
-                  Authorization: `Bearer ${session.access_token}`,
-                }
-              : {}),
+            Authorization: `Bearer ${session.access_token}`,
           },
           body: JSON.stringify({
+            action: "reset_password",
             schoolId: resetSchool.id,
             password: resetPassword,
           }),
@@ -632,24 +742,20 @@ export default function SuperAdminPage() {
       const result = await response.json();
 
       if (!response.ok || !result?.success) {
-        throw new Error(
-          result?.error || "Unable to reset school owner password.",
-        );
+        throw new Error(result?.error || "Unable to reset owner password.");
       }
 
       setResetSchool(null);
       setResetPassword("");
-
       setSuccessMessage(
-        `Password reset successfully for ${resetSchool.name} owner.`,
+        `Owner password reset successfully for ${resetSchool.name}.`,
       );
     } catch (error) {
-      console.error("RESET SCHOOL OWNER PASSWORD ERROR:", error);
-
+      console.error("RESET OWNER PASSWORD ERROR:", error);
       setErrorMessage(
         error instanceof Error
           ? error.message
-          : "Unable to reset school owner password.",
+          : "Unable to reset owner password.",
       );
     } finally {
       setResettingPassword(false);
@@ -902,7 +1008,7 @@ export default function SuperAdminPage() {
             </div>
           ) : (
             <div className="mt-6 overflow-x-auto">
-              <table className="w-full min-w-[700px] text-left">
+              <table className="w-full min-w-[1050px] text-left">
                 <thead>
                   <tr className="border-b border-slate-200">
                     <th className="px-4 py-3 text-xs font-semibold uppercase text-slate-400">
@@ -928,6 +1034,7 @@ export default function SuperAdminPage() {
                     <th className="px-4 py-3 text-xs font-semibold uppercase text-slate-400">
                       Expiry
                     </th>
+
                     <th className="px-4 py-3 text-xs font-semibold uppercase text-slate-400">
                       Actions
                     </th>
@@ -991,7 +1098,7 @@ export default function SuperAdminPage() {
                           <div className="flex flex-wrap gap-2">
                             <button
                               type="button"
-                              onClick={() => openEditSchool(school)}
+                              onClick={() => void openEditSchool(school)}
                               className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-100"
                             >
                               Edit
@@ -1029,14 +1136,15 @@ export default function SuperAdminPage() {
             }
           }}
         >
-          <div className="w-full max-w-2xl rounded-3xl bg-white shadow-2xl">
-            <div className="flex items-center justify-between border-b border-slate-200 px-6 py-5">
+          <div className="max-h-[94vh] w-full max-w-3xl overflow-y-auto rounded-3xl bg-white shadow-2xl">
+            <div className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-200 bg-white px-6 py-5">
               <div>
                 <h2 className="text-xl font-bold text-slate-900">
                   Edit School
                 </h2>
                 <p className="mt-1 text-sm text-slate-500">
-                  Update school subscription and basic data.
+                  Edit all school information. Owner login email and password
+                  are managed separately.
                 </p>
               </div>
 
@@ -1059,121 +1167,306 @@ export default function SuperAdminPage() {
                 </div>
               )}
 
-              <div className="grid gap-4 sm:grid-cols-2">
-                <Input
-                  label="School Name *"
-                  value={editForm.name}
-                  onChange={(value) =>
-                    setEditForm((current) => ({
-                      ...current,
-                      name: value,
-                    }))
-                  }
-                  placeholder="School name"
-                  disabled={savingSchool}
-                />
+              {editLoading ? (
+                <div className="py-12 text-center text-sm text-slate-500">
+                  Loading school owner details...
+                </div>
+              ) : (
+                <>
+                  <div>
+                    <h3 className="text-base font-bold text-slate-900">
+                      School Information
+                    </h3>
 
-                <Input
-                  label="School Code *"
-                  value={editForm.code}
-                  onChange={(value) =>
-                    setEditForm((current) => ({
-                      ...current,
-                      code: value.toUpperCase(),
-                    }))
-                  }
-                  placeholder="SCH001"
-                  disabled={savingSchool}
-                />
+                    <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                      <Input
+                        label="School Name *"
+                        value={editForm.schoolName}
+                        onChange={(value) =>
+                          setEditForm((current) => ({
+                            ...current,
+                            schoolName: value,
+                          }))
+                        }
+                        placeholder="ABC Public School"
+                        disabled={savingSchool}
+                      />
 
-                <Select
-                  label="Plan"
-                  value={editForm.planCode}
-                  onChange={(value) =>
-                    setEditForm((current) => ({
-                      ...current,
-                      planCode: value,
-                    }))
-                  }
-                  disabled={savingSchool}
-                  options={[
-                    { value: "starter", label: "Starter" },
-                    { value: "professional", label: "Professional" },
-                    { value: "enterprise", label: "Enterprise" },
-                  ]}
-                />
+                      <Input
+                        label="School Code *"
+                        value={editForm.schoolCode}
+                        onChange={(value) =>
+                          setEditForm((current) => ({
+                            ...current,
+                            schoolCode: value.toUpperCase(),
+                          }))
+                        }
+                        placeholder="ABC001"
+                        disabled={savingSchool}
+                      />
 
-                <Input
-                  label="Student Limit"
-                  type="number"
-                  value={editForm.studentLimit}
-                  onChange={(value) =>
-                    setEditForm((current) => ({
-                      ...current,
-                      studentLimit: value,
-                    }))
-                  }
-                  placeholder="300"
-                  disabled={savingSchool}
-                />
+                      <Input
+                        label="School Email"
+                        type="email"
+                        value={editForm.schoolEmail}
+                        onChange={(value) =>
+                          setEditForm((current) => ({
+                            ...current,
+                            schoolEmail: value,
+                          }))
+                        }
+                        placeholder="school@example.com"
+                        disabled={savingSchool}
+                      />
 
-                <Select
-                  label="Status"
-                  value={editForm.status}
-                  onChange={(value) =>
-                    setEditForm((current) => ({
-                      ...current,
-                      status: value,
-                    }))
-                  }
-                  disabled={savingSchool}
-                  options={[
-                    { value: "trial", label: "Trial" },
-                    { value: "active", label: "Active" },
-                    { value: "suspended", label: "Suspended" },
-                    { value: "expired", label: "Expired" },
-                  ]}
-                />
+                      <Input
+                        label="School Phone"
+                        value={editForm.schoolPhone}
+                        onChange={(value) =>
+                          setEditForm((current) => ({
+                            ...current,
+                            schoolPhone: value,
+                          }))
+                        }
+                        placeholder="9876543210"
+                        disabled={savingSchool}
+                      />
 
-                <Input
-                  label="Expires On"
-                  type="date"
-                  value={editForm.expiresOn}
-                  onChange={(value) =>
-                    setEditForm((current) => ({
-                      ...current,
-                      expiresOn: value,
-                    }))
-                  }
-                  disabled={savingSchool}
-                />
-              </div>
+                      <div className="sm:col-span-2">
+                        <Input
+                          label="Address"
+                          value={editForm.address}
+                          onChange={(value) =>
+                            setEditForm((current) => ({
+                              ...current,
+                              address: value,
+                            }))
+                          }
+                          placeholder="School address"
+                          disabled={savingSchool}
+                        />
+                      </div>
 
-              <div className="mt-7 flex justify-end gap-3 border-t border-slate-200 pt-6">
-                <button
-                  type="button"
-                  onClick={closeEditSchool}
-                  disabled={savingSchool}
-                  className="rounded-xl border border-slate-300 px-5 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-                >
-                  Cancel
-                </button>
+                      <Input
+                        label="City"
+                        value={editForm.city}
+                        onChange={(value) =>
+                          setEditForm((current) => ({
+                            ...current,
+                            city: value,
+                          }))
+                        }
+                        placeholder="Hyderabad"
+                        disabled={savingSchool}
+                      />
 
-                <button
-                  type="submit"
-                  disabled={savingSchool}
-                  className="rounded-xl bg-blue-600 px-6 py-3 text-sm font-semibold text-white hover:bg-blue-700 disabled:bg-blue-400"
-                >
-                  {savingSchool ? "Saving..." : "Save Changes"}
-                </button>
-              </div>
+                      <Input
+                        label="State"
+                        value={editForm.state}
+                        onChange={(value) =>
+                          setEditForm((current) => ({
+                            ...current,
+                            state: value,
+                          }))
+                        }
+                        placeholder="Telangana"
+                        disabled={savingSchool}
+                      />
+
+                      <Input
+                        label="Postal Code"
+                        value={editForm.postalCode}
+                        onChange={(value) =>
+                          setEditForm((current) => ({
+                            ...current,
+                            postalCode: value,
+                          }))
+                        }
+                        placeholder="500001"
+                        disabled={savingSchool}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="mt-8 border-t border-slate-200 pt-7">
+                    <h3 className="text-base font-bold text-slate-900">
+                      Subscription
+                    </h3>
+
+                    <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                      <Select
+                        label="Plan"
+                        value={editForm.planCode}
+                        onChange={(value) =>
+                          setEditForm((current) => ({
+                            ...current,
+                            planCode: value,
+                          }))
+                        }
+                        disabled={savingSchool}
+                        options={[
+                          { value: "starter", label: "Starter" },
+                          {
+                            value: "professional",
+                            label: "Professional",
+                          },
+                          {
+                            value: "enterprise",
+                            label: "Enterprise",
+                          },
+                        ]}
+                      />
+
+                      <Input
+                        label="Student Limit"
+                        type="number"
+                        value={editForm.studentLimit}
+                        onChange={(value) =>
+                          setEditForm((current) => ({
+                            ...current,
+                            studentLimit: value,
+                          }))
+                        }
+                        placeholder="300"
+                        disabled={savingSchool}
+                      />
+
+                      <Input
+                        label="Starts On"
+                        type="date"
+                        value={editForm.startsOn}
+                        onChange={(value) =>
+                          setEditForm((current) => ({
+                            ...current,
+                            startsOn: value,
+                          }))
+                        }
+                        disabled={savingSchool}
+                      />
+
+                      <Input
+                        label="Expires On"
+                        type="date"
+                        value={editForm.expiresOn}
+                        onChange={(value) =>
+                          setEditForm((current) => ({
+                            ...current,
+                            expiresOn: value,
+                          }))
+                        }
+                        disabled={savingSchool}
+                      />
+
+                      <Select
+                        label="Status"
+                        value={editForm.status}
+                        onChange={(value) =>
+                          setEditForm((current) => ({
+                            ...current,
+                            status: value,
+                          }))
+                        }
+                        disabled={savingSchool}
+                        options={[
+                          { value: "trial", label: "Trial" },
+                          { value: "active", label: "Active" },
+                          {
+                            value: "suspended",
+                            label: "Suspended",
+                          },
+                          {
+                            value: "expired",
+                            label: "Expired",
+                          },
+                        ]}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="mt-8 border-t border-slate-200 pt-7">
+                    <div className="flex items-start justify-between gap-4">
+                      <div>
+                        <h3 className="text-base font-bold text-slate-900">
+                          School Owner Details
+                        </h3>
+                        <p className="mt-1 text-sm text-slate-500">
+                          Name and phone can be corrected here. Login email
+                          and password are intentionally separate.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                      <Input
+                        label="Owner Name"
+                        value={editForm.ownerName}
+                        onChange={(value) =>
+                          setEditForm((current) => ({
+                            ...current,
+                            ownerName: value,
+                          }))
+                        }
+                        placeholder="School Owner"
+                        disabled={savingSchool}
+                      />
+
+                      <Input
+                        label="Owner Phone"
+                        value={editForm.ownerPhone}
+                        onChange={(value) =>
+                          setEditForm((current) => ({
+                            ...current,
+                            ownerPhone: value,
+                          }))
+                        }
+                        placeholder="9876543210"
+                        disabled={savingSchool}
+                      />
+
+                      <div className="sm:col-span-2">
+                        <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+                          <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                            Owner Login Email
+                          </p>
+                          <p className="mt-1 text-sm font-semibold text-slate-800">
+                            {editForm.ownerEmail || "No owner email found"}
+                          </p>
+                          <p className="mt-1 text-xs text-slate-500">
+                            Email changes are not included in school-data
+                            editing. Use a dedicated login-management flow.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-8 flex flex-col-reverse gap-3 border-t border-slate-200 pt-6 sm:flex-row sm:justify-end">
+                    <button
+                      type="button"
+                      onClick={closeEditSchool}
+                      disabled={savingSchool}
+                      className="rounded-xl border border-slate-300 px-5 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                    >
+                      Cancel
+                    </button>
+
+                    <button
+                      type="submit"
+                      disabled={savingSchool}
+                      className="rounded-xl bg-blue-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-200 hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-400"
+                    >
+                      {savingSchool ? "Saving Changes..." : "Save Changes"}
+                    </button>
+                  </div>
+                </>
+              )}
             </form>
           </div>
         </div>
       )}
 
       {/* ==================================================
-          RESET SCHOOL OWNER PASSWORD MODAL
+          RESET OWNER PASSWORD MODAL
       ================================================== */}
 
       {resetSchool && (
@@ -1189,10 +1482,10 @@ export default function SuperAdminPage() {
             <div className="flex items-center justify-between border-b border-slate-200 px-6 py-5">
               <div>
                 <h2 className="text-xl font-bold text-slate-900">
-                  Reset School Owner Password
+                  Reset Owner Password
                 </h2>
                 <p className="mt-1 text-sm text-slate-500">
-                  School: {resetSchool.name}
+                  {resetSchool.name}
                 </p>
               </div>
 
@@ -1206,7 +1499,7 @@ export default function SuperAdminPage() {
               </button>
             </div>
 
-            <form onSubmit={handleResetSchoolPassword} className="p-6">
+            <form onSubmit={handleResetPassword} className="p-6">
               {errorMessage && (
                 <div className="mb-5 rounded-xl border border-red-200 bg-red-50 px-4 py-3">
                   <p className="text-sm font-medium text-red-700">
@@ -1215,9 +1508,9 @@ export default function SuperAdminPage() {
                 </div>
               )}
 
-              <div className="rounded-xl bg-amber-50 p-4 text-sm text-amber-800">
-                This changes the password for the owner login assigned to this
-                school. The school data and owner email will remain unchanged.
+              <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+                This changes only the school owner's password. The school
+                information and login email are not changed.
               </div>
 
               <div className="mt-5">
@@ -1246,9 +1539,7 @@ export default function SuperAdminPage() {
                   disabled={resettingPassword}
                   className="rounded-xl bg-amber-600 px-6 py-3 text-sm font-semibold text-white hover:bg-amber-700 disabled:bg-amber-400"
                 >
-                  {resettingPassword
-                    ? "Resetting..."
-                    : "Reset Password"}
+                  {resettingPassword ? "Resetting..." : "Reset Password"}
                 </button>
               </div>
             </form>
