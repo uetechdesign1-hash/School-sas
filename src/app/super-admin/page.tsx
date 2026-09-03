@@ -17,6 +17,47 @@ type School = {
   plan_code: string | null;
   student_limit: number | null;
   expires_on: string | null;
+  created_at: string;
+};
+
+type FormData = {
+  schoolName: string;
+  schoolCode: string;
+  schoolEmail: string;
+  schoolPhone: string;
+  address: string;
+  city: string;
+  state: string;
+  postalCode: string;
+  planCode: string;
+  studentLimit: string;
+  startsOn: string;
+  expiresOn: string;
+
+  ownerName: string;
+  ownerEmail: string;
+  ownerPhone: string;
+  ownerPassword: string;
+};
+
+const emptyForm: FormData = {
+  schoolName: "",
+  schoolCode: "",
+  schoolEmail: "",
+  schoolPhone: "",
+  address: "",
+  city: "",
+  state: "",
+  postalCode: "",
+  planCode: "starter",
+  studentLimit: "300",
+  startsOn: new Date().toISOString().slice(0, 10),
+  expiresOn: "",
+
+  ownerName: "",
+  ownerEmail: "",
+  ownerPhone: "",
+  ownerPassword: "",
 };
 
 export default function SuperAdminPage() {
@@ -27,15 +68,42 @@ export default function SuperAdminPage() {
   const [creating, setCreating] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
 
-  const [userName, setUserName] = useState("");
   const [userEmail, setUserEmail] = useState("");
+  const [userName, setUserName] = useState("");
 
   const [schools, setSchools] = useState<School[]>(
     []
   );
 
-  const [showCreate, setShowCreate] =
+  const [showCreateModal, setShowCreateModal] =
     useState(false);
+
+  const [editingSchool, setEditingSchool] =
+    useState<School | null>(null);
+
+  const [editForm, setEditForm] = useState({
+    name: "",
+    code: "",
+    planCode: "starter",
+    studentLimit: "300",
+    status: "trial",
+    expiresOn: "",
+  });
+
+  const [resetSchool, setResetSchool] =
+    useState<School | null>(null);
+
+  const [resetPassword, setResetPassword] =
+    useState("");
+
+  const [savingSchool, setSavingSchool] =
+    useState(false);
+
+  const [resettingPassword, setResettingPassword] =
+    useState(false);
+
+  const [form, setForm] =
+    useState<FormData>(emptyForm);
 
   const [errorMessage, setErrorMessage] =
     useState("");
@@ -44,51 +112,22 @@ export default function SuperAdminPage() {
     useState("");
 
   // --------------------------------------------------
-  // FORM
-  // --------------------------------------------------
-
-  const [schoolName, setSchoolName] =
-    useState("");
-
-  const [schoolCode, setSchoolCode] =
-    useState("");
-
-  const [schoolEmail, setSchoolEmail] =
-    useState("");
-
-  const [schoolPhone, setSchoolPhone] =
-    useState("");
-
-  const [studentLimit, setStudentLimit] =
-    useState("300");
-
-  const [ownerName, setOwnerName] =
-    useState("");
-
-  const [ownerEmail, setOwnerEmail] =
-    useState("");
-
-  const [ownerPhone, setOwnerPhone] =
-    useState("");
-
-  const [ownerPassword, setOwnerPassword] =
-    useState("");
-
-  // --------------------------------------------------
   // LOAD ADMIN
   // --------------------------------------------------
 
   useEffect(() => {
-    let active = true;
+    let mounted = true;
 
     async function loadAdmin() {
       try {
         const {
-          data: { user },
-          error: authError,
+          data: {
+            user,
+          },
+          error: userError,
         } = await supabase.auth.getUser();
 
-        if (authError || !user) {
+        if (userError || !user) {
           router.replace(
             "/super-admin/login"
           );
@@ -122,7 +161,7 @@ export default function SuperAdminPage() {
           return;
         }
 
-        if (!active) return;
+        if (!mounted) return;
 
         setUserEmail(
           user.email || ""
@@ -141,11 +180,13 @@ export default function SuperAdminPage() {
           error
         );
 
-        router.replace(
-          "/super-admin/login"
-        );
+        if (mounted) {
+          router.replace(
+            "/super-admin/login"
+          );
+        }
       } finally {
-        if (active) {
+        if (mounted) {
           setLoading(false);
         }
       }
@@ -154,7 +195,7 @@ export default function SuperAdminPage() {
     loadAdmin();
 
     return () => {
-      active = false;
+      mounted = false;
     };
   }, []);
 
@@ -169,11 +210,14 @@ export default function SuperAdminPage() {
     } = await supabase
       .from("schools")
       .select(
-        "id,name,code,school_code,status,plan_code,student_limit,expires_on"
+        "id, name, code, school_code, status, plan_code, student_limit, expires_on, created_at"
       )
-      .order("created_at", {
-        ascending: false,
-      });
+      .order(
+        "created_at",
+        {
+          ascending: false,
+        }
+      );
 
     if (error) {
       console.error(
@@ -190,37 +234,47 @@ export default function SuperAdminPage() {
   }
 
   // --------------------------------------------------
-  // OPEN CREATE MODAL
+  // OPEN CREATE SCHOOL
   // --------------------------------------------------
 
   function openCreateSchool() {
     setErrorMessage("");
     setSuccessMessage("");
 
-    setSchoolName("");
-    setSchoolCode("");
-    setSchoolEmail("");
-    setSchoolPhone("");
+    setForm({
+      ...emptyForm,
+      startsOn:
+        new Date()
+          .toISOString()
+          .slice(0, 10),
+    });
 
-    setStudentLimit("300");
-
-    setOwnerName("");
-    setOwnerEmail("");
-    setOwnerPhone("");
-    setOwnerPassword("");
-
-    setShowCreate(true);
+    setShowCreateModal(true);
   }
 
   // --------------------------------------------------
-  // CLOSE CREATE MODAL
+  // CLOSE CREATE SCHOOL
   // --------------------------------------------------
 
   function closeCreateSchool() {
     if (creating) return;
 
-    setShowCreate(false);
+    setShowCreateModal(false);
     setErrorMessage("");
+  }
+
+  // --------------------------------------------------
+  // FORM CHANGE
+  // --------------------------------------------------
+
+  function updateField(
+    field: keyof FormData,
+    value: string
+  ) {
+    setForm((current) => ({
+      ...current,
+      [field]: value,
+    }));
   }
 
   // --------------------------------------------------
@@ -235,37 +289,39 @@ export default function SuperAdminPage() {
     setErrorMessage("");
     setSuccessMessage("");
 
-    if (!schoolName.trim()) {
+    if (!form.schoolName.trim()) {
       setErrorMessage(
         "Please enter the school name."
       );
       return;
     }
 
-    if (!schoolCode.trim()) {
+    if (!form.schoolCode.trim()) {
       setErrorMessage(
         "Please enter the school code."
       );
       return;
     }
 
-    if (!ownerName.trim()) {
+    if (!form.ownerName.trim()) {
       setErrorMessage(
         "Please enter the owner name."
       );
       return;
     }
 
-    if (!ownerEmail.trim()) {
+    if (!form.ownerEmail.trim()) {
       setErrorMessage(
         "Please enter the owner email."
       );
       return;
     }
 
-    if (ownerPassword.length < 8) {
+    if (
+      form.ownerPassword.length < 8
+    ) {
       setErrorMessage(
-        "Owner password must be at least 8 characters."
+        "Owner password must contain at least 8 characters."
       );
       return;
     }
@@ -273,227 +329,330 @@ export default function SuperAdminPage() {
     setCreating(true);
 
     try {
-      // ---------------------------------------------
-      // GET CURRENT SESSION
-      // ---------------------------------------------
+      /*
+       * The logged-in Supabase session is automatically
+       * attached by supabase.functions.invoke().
+       */
 
       const {
-        data: sessionData,
-        error: sessionError,
-      } = await supabase.auth.getSession();
-
-      if (sessionError) {
-        throw sessionError;
-      }
-
-      const session =
-        sessionData.session;
-
-      if (!session) {
-        throw new Error(
-          "Your session has expired. Please sign in again."
-        );
-      }
-
-      // ---------------------------------------------
-      // SUPABASE PUBLIC KEY
-      // ---------------------------------------------
-
-      const publishableKey =
-        process.env
-          .NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
-
-      if (!publishableKey) {
-        throw new Error(
-          "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY is missing from .env.local."
-        );
-      }
-
-      // ---------------------------------------------
-      // DIRECT EDGE FUNCTION CALL
-      // ---------------------------------------------
-
-      const controller =
-        new AbortController();
-
-      const timeoutId =
-        window.setTimeout(() => {
-          controller.abort();
-        }, 30000);
-
-      const response =
-        await fetch(
-          "https://fwalrrwjtqgpirfiraso.supabase.co/functions/v1/create-school",
+        data,
+        error,
+      } =
+        await supabase.functions.invoke(
+          "create-school",
           {
-            method: "POST",
-
-            headers: {
-              "Content-Type":
-                "application/json",
-
-              Authorization:
-                `Bearer ${session.access_token}`,
-
-              apikey:
-                publishableKey,
-            },
-
-            body: JSON.stringify({
+            body: {
               school_name:
-                schoolName.trim(),
+                form.schoolName.trim(),
 
               school_code:
-                schoolCode
+                form.schoolCode
                   .trim()
                   .toUpperCase(),
 
               email:
-                schoolEmail.trim() ||
+                form.schoolEmail.trim() ||
                 null,
 
               phone:
-                schoolPhone.trim() ||
+                form.schoolPhone.trim() ||
+                null,
+
+              address:
+                form.address.trim() ||
+                null,
+
+              city:
+                form.city.trim() ||
+                null,
+
+              state:
+                form.state.trim() ||
+                null,
+
+              postal_code:
+                form.postalCode.trim() ||
                 null,
 
               plan_code:
-                "starter",
+                form.planCode,
 
               student_limit:
                 Number(
-                  studentLimit || "300"
+                  form.studentLimit || 300
                 ),
 
+              starts_on:
+                form.startsOn || null,
+
+              expires_on:
+                form.expiresOn || null,
+
               owner_name:
-                ownerName.trim(),
+                form.ownerName.trim(),
 
               owner_email:
-                ownerEmail
+                form.ownerEmail
                   .trim()
                   .toLowerCase(),
 
               owner_phone:
-                ownerPhone.trim() ||
+                form.ownerPhone.trim() ||
                 null,
 
               owner_password:
-                ownerPassword,
-            }),
-
-            signal:
-              controller.signal,
+                form.ownerPassword,
+            },
           }
         );
 
-      window.clearTimeout(
-        timeoutId
-      );
-
-      // ---------------------------------------------
-      // READ RESPONSE
-      // ---------------------------------------------
-
-      const text =
-        await response.text();
-
-      let result: {
-        success?: boolean;
-        error?: string;
-        message?: string;
-      } = {};
-
-      try {
-        result = text
-          ? JSON.parse(text)
-          : {};
-      } catch {
-        result = {
-          error: text,
-        };
-      }
-
-      console.log(
-        "CREATE SCHOOL HTTP STATUS:",
-        response.status
-      );
-
-      console.log(
-        "CREATE SCHOOL RESPONSE:",
-        result
-      );
-
-      // ---------------------------------------------
-      // ERROR
-      // ---------------------------------------------
-
-      if (!response.ok) {
-        throw new Error(
-          result.error ||
-            result.message ||
-            `Server returned HTTP ${response.status}.`
+      if (error) {
+        console.error(
+          "CREATE SCHOOL FUNCTION ERROR:",
+          error
         );
+
+        let message =
+          error.message ||
+          "Unable to create school.";
+
+        /*
+         * Supabase Edge Functions sometimes
+         * return the actual JSON error in
+         * error.context.
+         */
+
+        try {
+          if (
+            error.context &&
+            typeof error.context.json ===
+              "function"
+          ) {
+            const body =
+              await error.context.json();
+
+            if (body?.error) {
+              message = body.error;
+            }
+          }
+        } catch {
+          // Keep original error message.
+        }
+
+        setErrorMessage(message);
+        return;
       }
 
-      if (
-        result.success === false
-      ) {
-        throw new Error(
-          result.error ||
+      if (!data?.success) {
+        setErrorMessage(
+          data?.error ||
             "School creation failed."
         );
+        return;
       }
-
-      // ---------------------------------------------
-      // SUCCESS
-      // ---------------------------------------------
 
       setSuccessMessage(
         "School and owner created successfully."
       );
 
+      setShowCreateModal(false);
+
+      setForm(emptyForm);
+
       await loadSchools();
-
-      // Clear form
-
-      setSchoolName("");
-      setSchoolCode("");
-      setSchoolEmail("");
-      setSchoolPhone("");
-
-      setStudentLimit("300");
-
-      setOwnerName("");
-      setOwnerEmail("");
-      setOwnerPhone("");
-      setOwnerPassword("");
-
-      // Close after success
-
-      window.setTimeout(() => {
-        setShowCreate(false);
-        setSuccessMessage("");
-      }, 1200);
     } catch (error) {
       console.error(
         "CREATE SCHOOL ERROR:",
         error
       );
 
-      if (
-        error instanceof DOMException &&
-        error.name === "AbortError"
-      ) {
-        setErrorMessage(
-          "The request timed out after 30 seconds. Check the create-school Edge Function logs."
-        );
-      } else {
-        setErrorMessage(
-          error instanceof Error
-            ? error.message
-            : "Unable to create school."
-        );
-      }
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Unable to create school."
+      );
     } finally {
       setCreating(false);
+    }
+  }
+
+  // --------------------------------------------------
+  // EDIT SCHOOL
+  // --------------------------------------------------
+
+  function openEditSchool(school: School) {
+    setErrorMessage("");
+    setSuccessMessage("");
+
+    setEditForm({
+      name: school.name || "",
+      code: school.code || school.school_code || "",
+      planCode: school.plan_code || "starter",
+      studentLimit: String(school.student_limit || 300),
+      status: school.status || "trial",
+      expiresOn: school.expires_on
+        ? String(school.expires_on).slice(0, 10)
+        : "",
+    });
+
+    setEditingSchool(school);
+  }
+
+  function closeEditSchool() {
+    if (savingSchool) return;
+    setEditingSchool(null);
+    setErrorMessage("");
+  }
+
+  async function handleUpdateSchool(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!editingSchool) return;
+
+    setErrorMessage("");
+    setSuccessMessage("");
+
+    if (!editForm.name.trim()) {
+      setErrorMessage("Please enter the school name.");
+      return;
+    }
+
+    if (!editForm.code.trim()) {
+      setErrorMessage("Please enter the school code.");
+      return;
+    }
+
+    const limit = Number(editForm.studentLimit);
+
+    if (!Number.isFinite(limit) || limit < 1) {
+      setErrorMessage("Student limit must be at least 1.");
+      return;
+    }
+
+    setSavingSchool(true);
+
+    try {
+      const { error } = await supabase
+        .from("schools")
+        .update({
+          name: editForm.name.trim(),
+          code: editForm.code.trim().toUpperCase(),
+          plan_code: editForm.planCode,
+          student_limit: limit,
+          status: editForm.status,
+          expires_on: editForm.expiresOn || null,
+        })
+        .eq("id", editingSchool.id);
+
+      if (error) {
+        console.error("UPDATE SCHOOL ERROR:", error);
+        throw error;
+      }
+
+      setEditingSchool(null);
+      setSuccessMessage(
+        `${editForm.name.trim()} school data updated successfully.`,
+      );
+
+      await loadSchools();
+    } catch (error) {
+      console.error("UPDATE SCHOOL ERROR:", error);
+
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Unable to update school.",
+      );
+    } finally {
+      setSavingSchool(false);
+    }
+  }
+
+  // --------------------------------------------------
+  // RESET SCHOOL OWNER PASSWORD
+  // --------------------------------------------------
+
+  function openResetPassword(school: School) {
+    setErrorMessage("");
+    setSuccessMessage("");
+    setResetPassword("");
+    setResetSchool(school);
+  }
+
+  function closeResetPassword() {
+    if (resettingPassword) return;
+    setResetSchool(null);
+    setResetPassword("");
+    setErrorMessage("");
+  }
+
+  async function handleResetSchoolPassword(
+    event: FormEvent<HTMLFormElement>,
+  ) {
+    event.preventDefault();
+
+    if (!resetSchool) return;
+
+    setErrorMessage("");
+    setSuccessMessage("");
+
+    if (resetPassword.length < 8) {
+      setErrorMessage(
+        "New password must contain at least 8 characters.",
+      );
+      return;
+    }
+
+    setResettingPassword(true);
+
+    try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
+      const response = await fetch(
+        "/api/super-admin/reset-school-owner-password",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(session?.access_token
+              ? {
+                  Authorization: `Bearer ${session.access_token}`,
+                }
+              : {}),
+          },
+          body: JSON.stringify({
+            schoolId: resetSchool.id,
+            password: resetPassword,
+          }),
+        },
+      );
+
+      const result = await response.json();
+
+      if (!response.ok || !result?.success) {
+        throw new Error(
+          result?.error || "Unable to reset school owner password.",
+        );
+      }
+
+      setResetSchool(null);
+      setResetPassword("");
+
+      setSuccessMessage(
+        `Password reset successfully for ${resetSchool.name} owner.`,
+      );
+    } catch (error) {
+      console.error("RESET SCHOOL OWNER PASSWORD ERROR:", error);
+
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Unable to reset school owner password.",
+      );
+    } finally {
+      setResettingPassword(false);
     }
   }
 
@@ -513,15 +672,20 @@ export default function SuperAdminPage() {
         "SIGN OUT ERROR:",
         error
       );
+    } finally {
+      router.replace(
+        "/super-admin/login"
+      );
+      router.refresh();
     }
-
-    window.location.href =
-      "/super-admin/login";
   }
 
   // --------------------------------------------------
   // STATS
   // --------------------------------------------------
+
+  const totalSchools =
+    schools.length;
 
   const activeSchools =
     schools.filter(
@@ -535,6 +699,9 @@ export default function SuperAdminPage() {
         school.status === "trial"
     ).length;
 
+  const today =
+    new Date();
+
   const expiringSoon =
     schools.filter((school) => {
       if (!school.expires_on) {
@@ -544,11 +711,15 @@ export default function SuperAdminPage() {
       const expiry =
         new Date(
           school.expires_on
-        ).getTime();
+        );
+
+      const diff =
+        expiry.getTime() -
+        today.getTime();
 
       const days =
-        (expiry - Date.now()) /
-        86400000;
+        diff /
+        (1000 * 60 * 60 * 24);
 
       return (
         days >= 0 &&
@@ -562,7 +733,7 @@ export default function SuperAdminPage() {
 
   if (loading) {
     return (
-      <main className="flex min-h-screen items-center justify-center bg-slate-100">
+      <main className="min-h-screen bg-slate-100 flex items-center justify-center">
         <div className="rounded-2xl bg-white px-8 py-6 shadow">
           <p className="text-sm text-slate-600">
             Loading Super Admin...
@@ -573,7 +744,7 @@ export default function SuperAdminPage() {
   }
 
   // --------------------------------------------------
-  // DASHBOARD
+  // PAGE
   // --------------------------------------------------
 
   return (
@@ -596,7 +767,7 @@ export default function SuperAdminPage() {
             type="button"
             onClick={handleSignOut}
             disabled={signingOut}
-            className="rounded-xl border border-slate-300 bg-white px-5 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+            className="rounded-xl border border-slate-300 bg-white px-5 py-2.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {signingOut
               ? "Signing Out..."
@@ -627,7 +798,7 @@ export default function SuperAdminPage() {
         <section className="mt-7 grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
           <StatCard
             title="Schools"
-            value={schools.length}
+            value={totalSchools}
           />
 
           <StatCard
@@ -658,18 +829,18 @@ export default function SuperAdminPage() {
               Create and manage customer schools.
             </p>
 
+            {/* THIS BUTTON NOW OPENS THE MODAL */}
+
             <button
               type="button"
-              onClick={
-                openCreateSchool
-              }
-              className="mt-6 cursor-pointer rounded-xl bg-blue-600 px-5 py-3 font-semibold text-white shadow-lg shadow-blue-200 hover:bg-blue-700"
+              onClick={openCreateSchool}
+              className="mt-6 rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-200 transition hover:bg-blue-700 active:scale-[0.99]"
             >
               + Create School
             </button>
           </div>
 
-          {/* ADMIN */}
+          {/* ADMIN ACCOUNT */}
 
           <div className="rounded-2xl bg-white p-6 shadow-sm">
             <h2 className="text-xl font-bold text-slate-900">
@@ -677,7 +848,7 @@ export default function SuperAdminPage() {
             </h2>
 
             <div className="mt-5 rounded-xl bg-slate-50 p-4">
-              <p className="text-xs uppercase tracking-wide text-slate-400">
+              <p className="text-xs font-medium uppercase tracking-wide text-slate-400">
                 Email
               </p>
 
@@ -685,7 +856,7 @@ export default function SuperAdminPage() {
                 {userEmail}
               </p>
 
-              <p className="mt-5 text-xs uppercase tracking-wide text-slate-400">
+              <p className="mt-5 text-xs font-medium uppercase tracking-wide text-slate-400">
                 Role
               </p>
 
@@ -696,7 +867,7 @@ export default function SuperAdminPage() {
           </div>
         </section>
 
-        {/* SCHOOL LIST */}
+        {/* SCHOOLS */}
 
         <section className="mt-7 rounded-2xl bg-white p-6 shadow-sm">
           <div className="flex items-center justify-between">
@@ -712,9 +883,7 @@ export default function SuperAdminPage() {
 
             <button
               type="button"
-              onClick={
-                loadSchools
-              }
+              onClick={loadSchools}
               className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
             >
               Refresh
@@ -724,7 +893,7 @@ export default function SuperAdminPage() {
           {schools.length === 0 ? (
             <div className="mt-6 rounded-xl border border-dashed border-slate-300 p-10 text-center">
               <p className="font-medium text-slate-700">
-                No schools created yet.
+                No schools yet
               </p>
 
               <p className="mt-1 text-sm text-slate-500">
@@ -736,24 +905,31 @@ export default function SuperAdminPage() {
               <table className="w-full min-w-[700px] text-left">
                 <thead>
                   <tr className="border-b border-slate-200">
-                    <th className="px-4 py-3 text-xs uppercase text-slate-400">
+                    <th className="px-4 py-3 text-xs font-semibold uppercase text-slate-400">
                       School
                     </th>
 
-                    <th className="px-4 py-3 text-xs uppercase text-slate-400">
+                    <th className="px-4 py-3 text-xs font-semibold uppercase text-slate-400">
                       Code
                     </th>
 
-                    <th className="px-4 py-3 text-xs uppercase text-slate-400">
+                    <th className="px-4 py-3 text-xs font-semibold uppercase text-slate-400">
                       Plan
                     </th>
 
-                    <th className="px-4 py-3 text-xs uppercase text-slate-400">
-                      Limit
+                    <th className="px-4 py-3 text-xs font-semibold uppercase text-slate-400">
+                      Students
                     </th>
 
-                    <th className="px-4 py-3 text-xs uppercase text-slate-400">
+                    <th className="px-4 py-3 text-xs font-semibold uppercase text-slate-400">
                       Status
+                    </th>
+
+                    <th className="px-4 py-3 text-xs font-semibold uppercase text-slate-400">
+                      Expiry
+                    </th>
+                    <th className="px-4 py-3 text-xs font-semibold uppercase text-slate-400">
+                      Actions
                     </th>
                   </tr>
                 </thead>
@@ -763,10 +939,12 @@ export default function SuperAdminPage() {
                     (school) => (
                       <tr
                         key={school.id}
-                        className="border-b border-slate-100"
+                        className="border-b border-slate-100 last:border-0"
                       >
-                        <td className="px-4 py-4 font-semibold text-slate-900">
-                          {school.name}
+                        <td className="px-4 py-4">
+                          <p className="font-semibold text-slate-900">
+                            {school.name}
+                          </p>
                         </td>
 
                         <td className="px-4 py-4 text-sm text-slate-600">
@@ -786,9 +964,47 @@ export default function SuperAdminPage() {
                         </td>
 
                         <td className="px-4 py-4">
-                          <span className="rounded-full bg-green-100 px-3 py-1 text-xs font-semibold text-green-700">
+                          <span
+                            className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${
+                              school.status ===
+                              "active"
+                                ? "bg-green-100 text-green-700"
+                                : school.status ===
+                                  "trial"
+                                ? "bg-blue-100 text-blue-700"
+                                : "bg-slate-100 text-slate-600"
+                            }`}
+                          >
                             {school.status}
                           </span>
+                        </td>
+
+                        <td className="px-4 py-4 text-sm text-slate-600">
+                          {school.expires_on
+                            ? new Date(
+                                school.expires_on
+                              ).toLocaleDateString()
+                            : "-"}
+                        </td>
+
+                        <td className="px-4 py-4">
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={() => openEditSchool(school)}
+                              className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-100"
+                            >
+                              Edit
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => openResetPassword(school)}
+                              className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-700 hover:bg-amber-100"
+                            >
+                              Reset Password
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     )
@@ -801,23 +1017,262 @@ export default function SuperAdminPage() {
       </div>
 
       {/* ==================================================
+          EDIT SCHOOL MODAL
+      ================================================== */}
+
+      {editingSchool && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 px-4 py-6"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              closeEditSchool();
+            }
+          }}
+        >
+          <div className="w-full max-w-2xl rounded-3xl bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-200 px-6 py-5">
+              <div>
+                <h2 className="text-xl font-bold text-slate-900">
+                  Edit School
+                </h2>
+                <p className="mt-1 text-sm text-slate-500">
+                  Update school subscription and basic data.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={closeEditSchool}
+                disabled={savingSchool}
+                className="flex h-10 w-10 items-center justify-center rounded-full text-xl text-slate-500 hover:bg-slate-100 disabled:opacity-50"
+              >
+                ×
+              </button>
+            </div>
+
+            <form onSubmit={handleUpdateSchool} className="p-6">
+              {errorMessage && (
+                <div className="mb-6 rounded-xl border border-red-200 bg-red-50 px-4 py-3">
+                  <p className="text-sm font-medium text-red-700">
+                    {errorMessage}
+                  </p>
+                </div>
+              )}
+
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Input
+                  label="School Name *"
+                  value={editForm.name}
+                  onChange={(value) =>
+                    setEditForm((current) => ({
+                      ...current,
+                      name: value,
+                    }))
+                  }
+                  placeholder="School name"
+                  disabled={savingSchool}
+                />
+
+                <Input
+                  label="School Code *"
+                  value={editForm.code}
+                  onChange={(value) =>
+                    setEditForm((current) => ({
+                      ...current,
+                      code: value.toUpperCase(),
+                    }))
+                  }
+                  placeholder="SCH001"
+                  disabled={savingSchool}
+                />
+
+                <Select
+                  label="Plan"
+                  value={editForm.planCode}
+                  onChange={(value) =>
+                    setEditForm((current) => ({
+                      ...current,
+                      planCode: value,
+                    }))
+                  }
+                  disabled={savingSchool}
+                  options={[
+                    { value: "starter", label: "Starter" },
+                    { value: "professional", label: "Professional" },
+                    { value: "enterprise", label: "Enterprise" },
+                  ]}
+                />
+
+                <Input
+                  label="Student Limit"
+                  type="number"
+                  value={editForm.studentLimit}
+                  onChange={(value) =>
+                    setEditForm((current) => ({
+                      ...current,
+                      studentLimit: value,
+                    }))
+                  }
+                  placeholder="300"
+                  disabled={savingSchool}
+                />
+
+                <Select
+                  label="Status"
+                  value={editForm.status}
+                  onChange={(value) =>
+                    setEditForm((current) => ({
+                      ...current,
+                      status: value,
+                    }))
+                  }
+                  disabled={savingSchool}
+                  options={[
+                    { value: "trial", label: "Trial" },
+                    { value: "active", label: "Active" },
+                    { value: "suspended", label: "Suspended" },
+                    { value: "expired", label: "Expired" },
+                  ]}
+                />
+
+                <Input
+                  label="Expires On"
+                  type="date"
+                  value={editForm.expiresOn}
+                  onChange={(value) =>
+                    setEditForm((current) => ({
+                      ...current,
+                      expiresOn: value,
+                    }))
+                  }
+                  disabled={savingSchool}
+                />
+              </div>
+
+              <div className="mt-7 flex justify-end gap-3 border-t border-slate-200 pt-6">
+                <button
+                  type="button"
+                  onClick={closeEditSchool}
+                  disabled={savingSchool}
+                  className="rounded-xl border border-slate-300 px-5 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+
+                <button
+                  type="submit"
+                  disabled={savingSchool}
+                  className="rounded-xl bg-blue-600 px-6 py-3 text-sm font-semibold text-white hover:bg-blue-700 disabled:bg-blue-400"
+                >
+                  {savingSchool ? "Saving..." : "Save Changes"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ==================================================
+          RESET SCHOOL OWNER PASSWORD MODAL
+      ================================================== */}
+
+      {resetSchool && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 px-4 py-6"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              closeResetPassword();
+            }
+          }}
+        >
+          <div className="w-full max-w-lg rounded-3xl bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-200 px-6 py-5">
+              <div>
+                <h2 className="text-xl font-bold text-slate-900">
+                  Reset School Owner Password
+                </h2>
+                <p className="mt-1 text-sm text-slate-500">
+                  School: {resetSchool.name}
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={closeResetPassword}
+                disabled={resettingPassword}
+                className="flex h-10 w-10 items-center justify-center rounded-full text-xl text-slate-500 hover:bg-slate-100 disabled:opacity-50"
+              >
+                ×
+              </button>
+            </div>
+
+            <form onSubmit={handleResetSchoolPassword} className="p-6">
+              {errorMessage && (
+                <div className="mb-5 rounded-xl border border-red-200 bg-red-50 px-4 py-3">
+                  <p className="text-sm font-medium text-red-700">
+                    {errorMessage}
+                  </p>
+                </div>
+              )}
+
+              <div className="rounded-xl bg-amber-50 p-4 text-sm text-amber-800">
+                This changes the password for the owner login assigned to this
+                school. The school data and owner email will remain unchanged.
+              </div>
+
+              <div className="mt-5">
+                <Input
+                  label="New Password *"
+                  type="password"
+                  value={resetPassword}
+                  onChange={setResetPassword}
+                  placeholder="Minimum 8 characters"
+                  disabled={resettingPassword}
+                />
+              </div>
+
+              <div className="mt-7 flex justify-end gap-3 border-t border-slate-200 pt-6">
+                <button
+                  type="button"
+                  onClick={closeResetPassword}
+                  disabled={resettingPassword}
+                  className="rounded-xl border border-slate-300 px-5 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+
+                <button
+                  type="submit"
+                  disabled={resettingPassword}
+                  className="rounded-xl bg-amber-600 px-6 py-3 text-sm font-semibold text-white hover:bg-amber-700 disabled:bg-amber-400"
+                >
+                  {resettingPassword
+                    ? "Resetting..."
+                    : "Reset Password"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ==================================================
           CREATE SCHOOL MODAL
       ================================================== */}
 
-      {showCreate && (
+      {showCreateModal && (
         <div
-          className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/60 px-4 py-6"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 px-4 py-6"
           onMouseDown={(event) => {
             if (
               event.target ===
-              event.currentTarget &&
-              !creating
+              event.currentTarget
             ) {
               closeCreateSchool();
             }
           }}
         >
-          <div className="max-h-[92vh] w-full max-w-2xl overflow-y-auto rounded-3xl bg-white shadow-2xl">
+          <div className="max-h-[92vh] w-full max-w-3xl overflow-y-auto rounded-3xl bg-white shadow-2xl">
             {/* MODAL HEADER */}
 
             <div className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-200 bg-white px-6 py-5">
@@ -827,138 +1282,261 @@ export default function SuperAdminPage() {
                 </h2>
 
                 <p className="mt-1 text-sm text-slate-500">
-                  Create school and owner login.
+                  Create the school and its owner login.
                 </p>
               </div>
 
               <button
                 type="button"
-                onClick={
-                  closeCreateSchool
-                }
+                onClick={closeCreateSchool}
                 disabled={creating}
-                className="text-2xl text-slate-500 hover:text-slate-900 disabled:opacity-50"
+                className="flex h-10 w-10 items-center justify-center rounded-full text-xl text-slate-500 hover:bg-slate-100 disabled:opacity-50"
               >
                 ×
               </button>
             </div>
 
             <form
-              onSubmit={
-                handleCreateSchool
-              }
+              onSubmit={handleCreateSchool}
               className="p-6"
             >
               {/* ERROR */}
 
               {errorMessage && (
-                <div className="mb-5 rounded-xl border border-red-200 bg-red-50 px-4 py-3">
+                <div className="mb-6 rounded-xl border border-red-200 bg-red-50 px-4 py-3">
                   <p className="text-sm font-medium text-red-700">
                     {errorMessage}
                   </p>
                 </div>
               )}
 
-              {/* SUCCESS */}
-
-              {successMessage && (
-                <div className="mb-5 rounded-xl border border-green-200 bg-green-50 px-4 py-3">
-                  <p className="text-sm font-medium text-green-700">
-                    {successMessage}
-                  </p>
-                </div>
-              )}
-
               {/* SCHOOL INFORMATION */}
 
-              <h3 className="font-bold text-slate-900">
-                School Information
-              </h3>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">
+                  School Information
+                </h3>
 
-              <div className="mt-4 grid gap-4 sm:grid-cols-2">
-                <Input
-                  label="School Name *"
-                  value={schoolName}
-                  onChange={
-                    setSchoolName
-                  }
-                  placeholder="Digi School"
-                  disabled={creating}
-                />
+                <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                  <Input
+                    label="School Name *"
+                    value={form.schoolName}
+                    onChange={(value) =>
+                      updateField(
+                        "schoolName",
+                        value
+                      )
+                    }
+                    placeholder="ABC Public School"
+                    disabled={creating}
+                  />
 
-                <Input
-                  label="School Code *"
-                  value={schoolCode}
-                  onChange={(value) =>
-                    setSchoolCode(
-                      value.toUpperCase()
-                    )
-                  }
-                  placeholder="DIGI001"
-                  disabled={creating}
-                />
+                  <Input
+                    label="School Code *"
+                    value={form.schoolCode}
+                    onChange={(value) =>
+                      updateField(
+                        "schoolCode",
+                        value.toUpperCase()
+                      )
+                    }
+                    placeholder="ABC001"
+                    disabled={creating}
+                  />
 
-                <Input
-                  label="School Email"
-                  type="email"
-                  value={schoolEmail}
-                  onChange={
-                    setSchoolEmail
-                  }
-                  placeholder="school@example.com"
-                  disabled={creating}
-                />
+                  <Input
+                    label="School Email"
+                    type="email"
+                    value={form.schoolEmail}
+                    onChange={(value) =>
+                      updateField(
+                        "schoolEmail",
+                        value
+                      )
+                    }
+                    placeholder="school@example.com"
+                    disabled={creating}
+                  />
 
-                <Input
-                  label="School Phone"
-                  value={schoolPhone}
-                  onChange={
-                    setSchoolPhone
-                  }
-                  placeholder="9876543210"
-                  disabled={creating}
-                />
+                  <Input
+                    label="School Phone"
+                    value={form.schoolPhone}
+                    onChange={(value) =>
+                      updateField(
+                        "schoolPhone",
+                        value
+                      )
+                    }
+                    placeholder="9876543210"
+                    disabled={creating}
+                  />
 
-                <Input
-                  label="Student Limit"
-                  type="number"
-                  value={studentLimit}
-                  onChange={
-                    setStudentLimit
-                  }
-                  placeholder="300"
-                  disabled={creating}
-                />
+                  <div className="sm:col-span-2">
+                    <Input
+                      label="Address"
+                      value={form.address}
+                      onChange={(value) =>
+                        updateField(
+                          "address",
+                          value
+                        )
+                      }
+                      placeholder="School address"
+                      disabled={creating}
+                    />
+                  </div>
+
+                  <Input
+                    label="City"
+                    value={form.city}
+                    onChange={(value) =>
+                      updateField(
+                        "city",
+                        value
+                      )
+                    }
+                    placeholder="Hyderabad"
+                    disabled={creating}
+                  />
+
+                  <Input
+                    label="State"
+                    value={form.state}
+                    onChange={(value) =>
+                      updateField(
+                        "state",
+                        value
+                      )
+                    }
+                    placeholder="Telangana"
+                    disabled={creating}
+                  />
+
+                  <Input
+                    label="Postal Code"
+                    value={form.postalCode}
+                    onChange={(value) =>
+                      updateField(
+                        "postalCode",
+                        value
+                      )
+                    }
+                    placeholder="500001"
+                    disabled={creating}
+                  />
+                </div>
+              </div>
+
+              {/* PLAN */}
+
+              <div className="mt-8 border-t border-slate-200 pt-7">
+                <h3 className="text-base font-bold text-slate-900">
+                  Subscription
+                </h3>
+
+                <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                  <Select
+                    label="Plan"
+                    value={form.planCode}
+                    onChange={(value) =>
+                      updateField(
+                        "planCode",
+                        value
+                      )
+                    }
+                    disabled={creating}
+                    options={[
+                      {
+                        value: "starter",
+                        label: "Starter",
+                      },
+                      {
+                        value: "professional",
+                        label: "Professional",
+                      },
+                      {
+                        value: "enterprise",
+                        label: "Enterprise",
+                      },
+                    ]}
+                  />
+
+                  <Input
+                    label="Student Limit"
+                    type="number"
+                    value={form.studentLimit}
+                    onChange={(value) =>
+                      updateField(
+                        "studentLimit",
+                        value
+                      )
+                    }
+                    placeholder="300"
+                    disabled={creating}
+                  />
+
+                  <Input
+                    label="Starts On"
+                    type="date"
+                    value={form.startsOn}
+                    onChange={(value) =>
+                      updateField(
+                        "startsOn",
+                        value
+                      )
+                    }
+                    disabled={creating}
+                  />
+
+                  <Input
+                    label="Expires On"
+                    type="date"
+                    value={form.expiresOn}
+                    onChange={(value) =>
+                      updateField(
+                        "expiresOn",
+                        value
+                      )
+                    }
+                    disabled={creating}
+                  />
+                </div>
               </div>
 
               {/* OWNER */}
 
               <div className="mt-8 border-t border-slate-200 pt-7">
-                <h3 className="font-bold text-slate-900">
+                <h3 className="text-base font-bold text-slate-900">
                   School Owner Login
                 </h3>
 
                 <p className="mt-1 text-sm text-slate-500">
-                  These credentials will be used by the school owner.
+                  These credentials will be used by the school owner to log in.
                 </p>
 
                 <div className="mt-4 grid gap-4 sm:grid-cols-2">
                   <Input
                     label="Owner Name *"
-                    value={ownerName}
-                    onChange={
-                      setOwnerName
+                    value={form.ownerName}
+                    onChange={(value) =>
+                      updateField(
+                        "ownerName",
+                        value
+                      )
                     }
-                    placeholder="Dharani"
+                    placeholder="School Owner"
                     disabled={creating}
                   />
 
                   <Input
                     label="Owner Email *"
                     type="email"
-                    value={ownerEmail}
-                    onChange={
-                      setOwnerEmail
+                    value={form.ownerEmail}
+                    onChange={(value) =>
+                      updateField(
+                        "ownerEmail",
+                        value
+                      )
                     }
                     placeholder="owner@example.com"
                     disabled={creating}
@@ -966,20 +1544,26 @@ export default function SuperAdminPage() {
 
                   <Input
                     label="Owner Phone"
-                    value={ownerPhone}
-                    onChange={
-                      setOwnerPhone
+                    value={form.ownerPhone}
+                    onChange={(value) =>
+                      updateField(
+                        "ownerPhone",
+                        value
+                      )
                     }
                     placeholder="9876543210"
                     disabled={creating}
                   />
 
                   <Input
-                    label="Password *"
+                    label="Temporary Password *"
                     type="password"
-                    value={ownerPassword}
-                    onChange={
-                      setOwnerPassword
+                    value={form.ownerPassword}
+                    onChange={(value) =>
+                      updateField(
+                        "ownerPassword",
+                        value
+                      )
                     }
                     placeholder="Minimum 8 characters"
                     disabled={creating}
@@ -989,14 +1573,12 @@ export default function SuperAdminPage() {
 
               {/* ACTIONS */}
 
-              <div className="mt-8 flex justify-end gap-3 border-t border-slate-200 pt-6">
+              <div className="mt-8 flex flex-col-reverse gap-3 border-t border-slate-200 pt-6 sm:flex-row sm:justify-end">
                 <button
                   type="button"
-                  onClick={
-                    closeCreateSchool
-                  }
+                  onClick={closeCreateSchool}
                   disabled={creating}
-                  className="rounded-xl border border-slate-300 px-5 py-3 font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                  className="rounded-xl border border-slate-300 px-5 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
                 >
                   Cancel
                 </button>
@@ -1004,11 +1586,11 @@ export default function SuperAdminPage() {
                 <button
                   type="submit"
                   disabled={creating}
-                  className="rounded-xl bg-blue-600 px-6 py-3 font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-400"
+                  className="rounded-xl bg-blue-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-200 hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-400"
                 >
                   {creating
-                    ? "Creating..."
-                    : "Create School"}
+                    ? "Creating School..."
+                    : "Create School + Owner"}
                 </button>
               </div>
             </form>
@@ -1019,9 +1601,9 @@ export default function SuperAdminPage() {
   );
 }
 
-// =====================================================
+// --------------------------------------------------
 // STAT CARD
-// =====================================================
+// --------------------------------------------------
 
 function StatCard({
   title,
@@ -1043,9 +1625,9 @@ function StatCard({
   );
 }
 
-// =====================================================
+// --------------------------------------------------
 // INPUT
-// =====================================================
+// --------------------------------------------------
 
 function Input({
   label,
@@ -1072,14 +1654,61 @@ function Input({
         type={type}
         value={value}
         onChange={(event) =>
-          onChange(
-            event.target.value
-          )
+          onChange(event.target.value)
         }
         placeholder={placeholder}
         disabled={disabled}
-        className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm text-slate-900 outline-none placeholder:text-slate-400 focus:border-blue-500 focus:ring-4 focus:ring-blue-100 disabled:bg-slate-100"
+        className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-blue-500 focus:ring-4 focus:ring-blue-100 disabled:bg-slate-100"
       />
+    </div>
+  );
+}
+
+// --------------------------------------------------
+// SELECT
+// --------------------------------------------------
+
+function Select({
+  label,
+  value,
+  onChange,
+  options,
+  disabled = false,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  options: {
+    value: string;
+    label: string;
+  }[];
+  disabled?: boolean;
+}) {
+  return (
+    <div>
+      <label className="mb-2 block text-sm font-semibold text-slate-700">
+        {label}
+      </label>
+
+      <select
+        value={value}
+        onChange={(event) =>
+          onChange(event.target.value)
+        }
+        disabled={disabled}
+        className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm text-slate-900 outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100 disabled:bg-slate-100"
+      >
+        {options.map(
+          (option) => (
+            <option
+              key={option.value}
+              value={option.value}
+            >
+              {option.label}
+            </option>
+          )
+        )}
+      </select>
     </div>
   );
 }
