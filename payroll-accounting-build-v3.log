@@ -1,0 +1,15 @@
+
+> school-saas@0.1.0 build
+> next build
+
+▲ Next.js 16.3.2 (Turbopack)
+- Environments: .env.local
+✓ Running next.config.ts took 50ms
+
+  Creating an optimized production build ...
+✓ Compiled successfully in 3.5s
+  Running TypeScript ...
+src/app/accounting/payment/page.tsx(1049,38): error TS2304: Cannot find name 'run'.
+src/app/accounting/payment/page.tsx(1110,16): error TS2552: Cannot find name 'selectedPayrollStaff'. Did you mean 'selectedPayrollItem'?
+Failed to type check.
+

@@ -11,6 +11,10 @@ function json(
 }
 
 export async function POST(request: NextRequest) {
+  let createdUserId: string | null = null;
+  let createdSchoolUser = false;
+  let createdProfile = false;
+
   try {
     // =====================================================
     // ENVIRONMENT
@@ -204,6 +208,10 @@ export async function POST(request: NextRequest) {
         ? body.password
         : "";
 
+    // =====================================================
+    // VALIDATION
+    // =====================================================
+
     if (!staffId) {
       return json(
         {
@@ -224,7 +232,11 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (!email.includes("@")) {
+    if (
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(
+        email
+      )
+    ) {
       return json(
         {
           success: false,
@@ -281,7 +293,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (!callerSchool) {
+    if (!callerSchool?.school_id) {
       return json(
         {
           success: false,
@@ -297,7 +309,7 @@ export async function POST(request: NextRequest) {
     // =====================================================
 
     const role =
-      String(callerSchool.role)
+      String(callerSchool.role || "")
         .toLowerCase();
 
     if (
@@ -371,7 +383,29 @@ export async function POST(request: NextRequest) {
     }
 
     // =====================================================
-    // EXISTING LOGIN?
+    // CHECK STAFF STATUS
+    // =====================================================
+
+    const staffStatus =
+      String(staff.status || "")
+        .toLowerCase();
+
+    if (
+      staffStatus &&
+      staffStatus !== "active"
+    ) {
+      return json(
+        {
+          success: false,
+          error:
+            "Login cannot be created for an inactive staff member.",
+        },
+        409
+      );
+    }
+
+    // =====================================================
+    // EXISTING LOGIN
     // =====================================================
 
     if (staff.user_id) {
@@ -390,7 +424,6 @@ export async function POST(request: NextRequest) {
     // =====================================================
 
     let existingUser = null;
-
     let page = 1;
 
     while (true) {
@@ -422,8 +455,8 @@ export async function POST(request: NextRequest) {
 
       const found =
         users.users.find(
-          (u) =>
-            u.email?.toLowerCase() ===
+          (user) =>
+            user.email?.toLowerCase() ===
             email
         );
 
@@ -506,11 +539,11 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const userId =
+    createdUserId =
       authData.user.id;
 
     // =====================================================
-    // CREATE PROFILE
+    // CREATE / UPDATE PROFILE
     // =====================================================
 
     const {
@@ -519,7 +552,7 @@ export async function POST(request: NextRequest) {
       .from("profiles")
       .upsert(
         {
-          id: userId,
+          id: createdUserId,
           full_name: fullName,
           phone: staff.phone || null,
         },
@@ -534,19 +567,12 @@ export async function POST(request: NextRequest) {
         profileError
       );
 
-      await supabaseAdmin.auth.admin.deleteUser(
-        userId
-      );
-
-      return json(
-        {
-          success: false,
-          error:
-            `Profile creation failed: ${profileError.message}`,
-        },
-        500
+      throw new Error(
+        `Profile creation failed: ${profileError.message}`
       );
     }
+
+    createdProfile = true;
 
     // =====================================================
     // CREATE SCHOOL USER
@@ -557,7 +583,7 @@ export async function POST(request: NextRequest) {
     } = await supabaseAdmin
       .from("school_users")
       .insert({
-        user_id: userId,
+        user_id: createdUserId,
         school_id: staff.school_id,
         role: "staff",
         is_active: true,
@@ -569,24 +595,12 @@ export async function POST(request: NextRequest) {
         schoolUserError
       );
 
-      await supabaseAdmin
-        .from("profiles")
-        .delete()
-        .eq("id", userId);
-
-      await supabaseAdmin.auth.admin.deleteUser(
-        userId
-      );
-
-      return json(
-        {
-          success: false,
-          error:
-            `School account creation failed: ${schoolUserError.message}`,
-        },
-        500
+      throw new Error(
+        `School account creation failed: ${schoolUserError.message}`
       );
     }
+
+    createdSchoolUser = true;
 
     // =====================================================
     // LINK STAFF
@@ -597,7 +611,7 @@ export async function POST(request: NextRequest) {
     } = await supabaseAdmin
       .from("staff")
       .update({
-        user_id: userId,
+        user_id: createdUserId,
         updated_at:
           new Date().toISOString(),
       })
@@ -605,7 +619,8 @@ export async function POST(request: NextRequest) {
       .eq(
         "school_id",
         staff.school_id
-      );
+      )
+      .is("user_id", null);
 
     if (updateStaffError) {
       console.error(
@@ -613,31 +628,40 @@ export async function POST(request: NextRequest) {
         updateStaffError
       );
 
-      await supabaseAdmin
-        .from("school_users")
-        .delete()
-        .eq("user_id", userId)
-        .eq(
-          "school_id",
-          staff.school_id
-        );
-
-      await supabaseAdmin
-        .from("profiles")
-        .delete()
-        .eq("id", userId);
-
-      await supabaseAdmin.auth.admin.deleteUser(
-        userId
+      throw new Error(
+        `Staff linking failed: ${updateStaffError.message}`
       );
+    }
 
-      return json(
-        {
-          success: false,
-          error:
-            `Staff linking failed: ${updateStaffError.message}`,
-        },
-        500
+    // =====================================================
+    // VERIFY STAFF LINK
+    // =====================================================
+
+    const {
+      data: linkedStaff,
+      error: verifyStaffError,
+    } = await supabaseAdmin
+      .from("staff")
+      .select("id, user_id")
+      .eq("id", staff.id)
+      .eq(
+        "school_id",
+        staff.school_id
+      )
+      .maybeSingle();
+
+    if (verifyStaffError) {
+      throw new Error(
+        `Unable to verify staff account link: ${verifyStaffError.message}`
+      );
+    }
+
+    if (
+      !linkedStaff ||
+      linkedStaff.user_id !== createdUserId
+    ) {
+      throw new Error(
+        "Staff login account was created but could not be linked to the staff record."
       );
     }
 
@@ -648,12 +672,22 @@ export async function POST(request: NextRequest) {
     return json(
       {
         success: true,
+
         message:
-          "Teacher login account created and linked successfully.",
-        user_id: userId,
-        staff_id: staff.id,
-        school_id: staff.school_id,
-        staff_name: fullName,
+          "Staff login account created and linked successfully.",
+
+        user_id:
+          createdUserId,
+
+        staff_id:
+          staff.id,
+
+        school_id:
+          staff.school_id,
+
+        staff_name:
+          fullName,
+
         email,
       },
       200
@@ -664,12 +698,123 @@ export async function POST(request: NextRequest) {
       error
     );
 
+    // =====================================================
+    // ROLLBACK
+    // =====================================================
+
+    if (createdUserId) {
+      try {
+        // Never remove an existing staff link.
+        // This only attempts cleanup for the newly
+        // created account.
+
+        if (createdSchoolUser) {
+          const supabaseUrl =
+            process.env
+              .NEXT_PUBLIC_SUPABASE_URL;
+
+          const serviceRoleKey =
+            process.env
+              .SUPABASE_SERVICE_ROLE_KEY;
+
+          if (
+            supabaseUrl &&
+            serviceRoleKey
+          ) {
+            const cleanupClient =
+              createClient(
+                supabaseUrl,
+                serviceRoleKey,
+                {
+                  auth: {
+                    autoRefreshToken:
+                      false,
+                    persistSession:
+                      false,
+                  },
+                }
+              );
+
+            await cleanupClient
+              .from("school_users")
+              .delete()
+              .eq(
+                "user_id",
+                createdUserId
+              );
+
+            if (createdProfile) {
+              await cleanupClient
+                .from("profiles")
+                .delete()
+                .eq(
+                  "id",
+                  createdUserId
+                );
+            }
+
+            await cleanupClient.auth.admin
+              .deleteUser(
+                createdUserId
+              );
+          }
+        } else {
+          const supabaseUrl =
+            process.env
+              .NEXT_PUBLIC_SUPABASE_URL;
+
+          const serviceRoleKey =
+            process.env
+              .SUPABASE_SERVICE_ROLE_KEY;
+
+          if (
+            supabaseUrl &&
+            serviceRoleKey
+          ) {
+            const cleanupClient =
+              createClient(
+                supabaseUrl,
+                serviceRoleKey,
+                {
+                  auth: {
+                    autoRefreshToken:
+                      false,
+                    persistSession:
+                      false,
+                  },
+                }
+              );
+
+            if (createdProfile) {
+              await cleanupClient
+                .from("profiles")
+                .delete()
+                .eq(
+                  "id",
+                  createdUserId
+                );
+            }
+
+            await cleanupClient.auth.admin
+              .deleteUser(
+                createdUserId
+              );
+          }
+        }
+      } catch (rollbackError) {
+        console.error(
+          "CREATE LOGIN ROLLBACK ERROR:",
+          rollbackError
+        );
+      }
+    }
+
     return json(
       {
         success: false,
         error:
           error?.message ||
-          "Unexpected server error.",
+          "Unexpected server error while creating staff login.",
       },
       500
     );

@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -85,7 +85,7 @@ function today() {
 function formatTime(
   value: string | null
 ) {
-  if (!value) return "—";
+  if (!value) return "â€”";
 
   const date =
     new Date(value);
@@ -95,7 +95,7 @@ function formatTime(
       date.getTime()
     )
   ) {
-    return "—";
+    return "â€”";
   }
 
   return date.toLocaleTimeString(
@@ -115,7 +115,7 @@ function formatMinutes(
     value === null ||
     value === undefined
   ) {
-    return "—";
+    return "â€”";
   }
 
   const hours =
@@ -138,7 +138,7 @@ function distanceText(
     value === null ||
     value === undefined
   ) {
-    return "—";
+    return "â€”";
   }
 
   if (value < 1000) {
@@ -400,7 +400,7 @@ export default function StaffAttendancePage() {
       );
 
       setMessage(
-        `GPS ready. Accuracy ±${Math.round(
+        `GPS ready. Accuracy Â±${Math.round(
           current.accuracy
         )} m`
       );
@@ -420,6 +420,125 @@ export default function StaffAttendancePage() {
       setLocating(false);
     }
   }
+
+  /* =====================================================
+     ENSURE EMPLOYEE BRIDGE
+     ===================================================== */
+
+  const ensureEmployeeRecord = useCallback(async (staffRow: Staff) => {
+    const { data: authData, error: authError } =
+      await supabase.auth.getUser();
+
+    if (authError) throw authError;
+
+    const user = authData.user;
+
+    if (!user) {
+      throw new Error("Your login session has expired. Please log in again.");
+    }
+
+    const employeeCode = String(staffRow.employee_no || "").trim();
+    const fullName = staffName(staffRow).trim();
+
+    /*
+     * The attendance RPC uses the separate employees master.
+     * Staff is the portal master, so make sure the corresponding Employee
+     * record exists before calling the secure attendance RPC.
+     *
+     * We match by the real Employees.employee_code and by user_id.
+     * We never change the Staff record or the attendance table here.
+     */
+    const { data: byUser, error: byUserError } = await supabase
+      .from("employees")
+      .select("id, school_id, user_id, employee_code")
+      .eq("school_id", staffRow.school_id)
+      .eq("user_id", user.id)
+      .maybeSingle();
+
+    if (byUserError) {
+      throw new Error(
+        `Unable to verify employee record: ${byUserError.message}`,
+      );
+    }
+
+    if (byUser?.id) {
+      return byUser;
+    }
+
+    let employee: {
+      id: string;
+      school_id: string;
+      user_id: string | null;
+      employee_code: string | null;
+    } | null = null;
+
+    if (employeeCode) {
+      const { data: byCode, error: byCodeError } = await supabase
+        .from("employees")
+        .select("id, school_id, user_id, employee_code")
+        .eq("school_id", staffRow.school_id)
+        .eq("employee_code", employeeCode)
+        .maybeSingle();
+
+      if (byCodeError) {
+        throw new Error(
+          `Unable to find employee ${employeeCode}: ${byCodeError.message}`,
+        );
+      }
+
+      employee = byCode;
+    }
+
+    if (employee?.id) {
+      if (employee.user_id !== user.id) {
+        const { data: updatedEmployee, error: updateError } =
+          await supabase
+            .from("employees")
+            .update({ user_id: user.id })
+            .eq("id", employee.id)
+            .eq("school_id", staffRow.school_id)
+            .select("id, school_id, user_id, employee_code")
+            .single();
+
+        if (updateError) {
+          throw new Error(
+            `Unable to link employee account: ${updateError.message}`,
+          );
+        }
+
+        employee = updatedEmployee;
+      }
+
+      return employee;
+    }
+
+    const { data: createdEmployee, error: createError } =
+      await supabase
+        .from("employees")
+        .insert({
+          school_id: staffRow.school_id,
+          user_id: user.id,
+          employee_code: employeeCode || null,
+          name: fullName || employeeCode || "Staff",
+          designation: staffRow.designation || null,
+          monthly_salary: 0,
+          status: "active",
+        })
+        .select("id, school_id, user_id, employee_code")
+        .single();
+
+    if (createError) {
+      throw new Error(
+        `Unable to create the employee record required for attendance: ${createError.message}`,
+      );
+    }
+
+    if (!createdEmployee?.id) {
+      throw new Error("Employee record could not be created for this staff member.");
+    }
+
+    return createdEmployee;
+  }, [supabase]);
 
   /* =====================================================
      CHECK IN
@@ -446,6 +565,16 @@ export default function StaffAttendancePage() {
       setLocation(
         current
       );
+
+      setMessage(
+        "Preparing your attendance account..."
+      );
+
+      if (!staff) {
+      throw new Error("Staff record not found.");
+    }
+
+    await ensureEmployeeRecord(staff);
 
       setMessage(
         "Verifying your location with the school..."
@@ -537,6 +666,16 @@ export default function StaffAttendancePage() {
       setLocation(
         current
       );
+
+      setMessage(
+        "Preparing your attendance account..."
+      );
+
+      if (!staff) {
+      throw new Error("Staff record not found.");
+    }
+
+    await ensureEmployeeRecord(staff);
 
       setMessage(
         "Verifying your location with the school..."
@@ -670,7 +809,7 @@ export default function StaffAttendancePage() {
           <p className="mt-1 text-sm text-slate-500">
             {staffName(staff)}
             {staff.designation
-              ? ` • ${staff.designation}`
+              ? ` â€¢ ${staff.designation}`
               : ""}
           </p>
 
@@ -855,7 +994,7 @@ export default function StaffAttendancePage() {
                     </p>
 
                     <p className="mt-1 text-sm font-semibold text-slate-800">
-                      ±
+                      Â±
                       {Math.round(
                         location.accuracy
                       )}
@@ -1169,8 +1308,8 @@ function GpsDetail({
             null ||
             accuracy ===
               undefined
-              ? "—"
-              : `±${Math.round(
+              ? "â€”"
+              : `Â±${Math.round(
                   accuracy
                 )} m`}
           </p>

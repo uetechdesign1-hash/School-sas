@@ -16,7 +16,7 @@ import {
   Lock,
   RefreshCw,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 
 type Staff = {
@@ -231,9 +231,6 @@ export default function PayrollPage() {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [search, setSearch] = useState("");
-  const employeeForStaffRef = useRef<Map<string, Record<string, unknown>>>(
-    new Map(),
-  );
 
   const locked = savedRun?.status === "prepared" || savedRun?.status === "finalized";
 
@@ -749,8 +746,6 @@ export default function PayrollPage() {
         employeeForStaff.set(staffMember.id, employee);
       }
 
-      employeeForStaffRef.current = employeeForStaff;
-
       /*
        * IMPORTANT:
        * Resolve all employee IDs BEFORE deleting old payroll items.
@@ -885,8 +880,8 @@ export default function PayrollPage() {
       return;
     }
 
-    if (totals.net <= 0) {
-      setError("There is no positive net payroll amount.");
+    if (editing) {
+      setError("Save your changes before preparing Salary Payment.");
       return;
     }
 
@@ -894,43 +889,126 @@ export default function PayrollPage() {
 
     try {
       /*
-       * If the payroll is already prepared, the Salary Expense -> Salary
-       * Payable journal already exists. In that case we MUST NOT call the
-       * preparation RPC again. Instead, recover the existing journal and
-       * open Accounting Payment so an admin can continue paying employees
-       * individually by Cash or Bank.
+       * IMPORTANT RECOVERY FLOW
+       *
+       * Your screenshot is the exact case where the previous attempt already
+       * prepared this payroll. The old code then blocked the button with:
+       *
+       *   if (locked) "This payroll has already been prepared."
+       *
+       * That made "Continue Salary Payment" useless.
+       *
+       * A prepared payroll is NOT a completed payment. It means the salary
+       * expense/payable journal already exists. We must find that journal and
+       * continue to the Payment screen.
        */
-      if (locked) {
-        const { data: preparedTransaction, error: preparedTransactionError } =
-          await supabase
-            .from("transactions")
-            .select("id, transaction_number, transaction_date")
-            .eq("school_id", schoolId)
-            .eq("transaction_type", "expense")
-            .eq("reference_type", "payroll")
-            .eq("reference_id", savedRun.id)
-            .order("created_at", { ascending: false })
-            .limit(1)
-            .maybeSingle();
+
+      const payrollAmount = Number(
+        totals.net.toFixed(2),
+      );
+
+      if (payrollAmount <= 0) {
+        throw new Error(
+          "There is no positive net payroll amount.",
+        );
+      }
+
+      let transactionId: string | null = null;
+      let transactionNumber: string | null = null;
+      let payableAccountId: string | null = null;
+      let payableAccountName = "Salary Payable";
+      let expenseAccountId: string | null = null;
+      let expenseAccountName = "Salary Expense";
+
+      /*
+       * Check whether this payroll has already been paid.
+       * A settlement payment uses reference_type = "payment" and
+       * reference_id = payroll_run_id.
+       */
+      const {
+        data: existingSettlement,
+        error: settlementCheckError,
+      } = await supabase
+        .from("transactions")
+        .select("id, transaction_number")
+        .eq("school_id", schoolId)
+        .eq("transaction_type", "expense")
+        .eq("reference_type", "payment")
+        .eq("reference_id", savedRun.id)
+        .limit(1)
+        .maybeSingle();
+
+      if (settlementCheckError) {
+        throw new Error(
+          `Unable to check payroll payment status: ${settlementCheckError.message}`,
+        );
+      }
+
+      if (existingSettlement?.id) {
+        throw new Error(
+          `This payroll has already been paid${
+            existingSettlement.transaction_number
+              ? ` — ${existingSettlement.transaction_number}`
+              : ""
+          }.`,
+        );
+      }
+
+      /*
+       * If the payroll is already prepared, recover the existing
+       * Salary Expense -> Salary Payable journal instead of calling
+       * prepare_payroll_accounting again.
+       */
+      if (locked || savedRun.status === "prepared") {
+        const {
+          data: preparedTransaction,
+          error: preparedTransactionError,
+        } = await supabase
+          .from("transactions")
+          .select(
+            "id, transaction_number, transaction_date, description",
+          )
+          .eq("school_id", schoolId)
+          .eq("transaction_type", "expense")
+          .eq("reference_type", "payroll")
+          .eq("reference_id", savedRun.id)
+          .order("created_at", {
+            ascending: false,
+          })
+          .limit(1)
+          .maybeSingle();
 
         if (preparedTransactionError) {
           throw new Error(
-            `Unable to recover prepared salary journal: ${preparedTransactionError.message}`,
+            `Unable to recover the prepared salary journal: ${preparedTransactionError.message}`,
           );
         }
 
-        if (!preparedTransaction) {
+        if (!preparedTransaction?.id) {
           throw new Error(
-            "This payroll is marked Prepared, but its Salary Expense / Salary Payable journal could not be found.",
+            "This payroll is marked Prepared, but its Salary Expense / Salary Payable journal was not found. Do not prepare it again; check the accounting records first.",
           );
         }
 
-        const { data: preparedEntries, error: preparedEntriesError } =
-          await supabase
-            .from("transaction_entries")
-            .select("account_id, debit, credit")
-            .eq("school_id", schoolId)
-            .eq("transaction_id", preparedTransaction.id);
+        transactionId =
+          preparedTransaction.id;
+        transactionNumber =
+          preparedTransaction.transaction_number ||
+          null;
+
+        const {
+          data: preparedEntries,
+          error: preparedEntriesError,
+        } = await supabase
+          .from("transaction_entries")
+          .select(
+            "account_id, debit, credit",
+          )
+          .eq("school_id", schoolId)
+          .eq(
+            "transaction_id",
+            preparedTransaction.id,
+          );
 
         if (preparedEntriesError) {
           throw new Error(
@@ -938,13 +1016,13 @@ export default function PayrollPage() {
           );
         }
 
-        const accountIds = Array.from(
-          new Set(
-            (preparedEntries || [])
-              .map((entry) => entry.account_id)
-              .filter(Boolean),
-          ),
-        );
+        const accountIds =
+          (preparedEntries || [])
+            .map(
+              (entry) =>
+                entry.account_id,
+            )
+            .filter(Boolean);
 
         if (!accountIds.length) {
           throw new Error(
@@ -952,12 +1030,22 @@ export default function PayrollPage() {
           );
         }
 
-        const { data: preparedAccounts, error: preparedAccountsError } =
-          await supabase
-            .from("accounts")
-            .select("id, name, account_type")
-            .eq("school_id", schoolId)
-            .in("id", accountIds);
+        const {
+          data: preparedAccounts,
+          error: preparedAccountsError,
+        } = await supabase
+          .from("accounts")
+          .select(
+            "id, name, account_type",
+          )
+          .eq(
+            "school_id",
+            schoolId,
+          )
+          .in(
+            "id",
+            accountIds,
+          );
 
         if (preparedAccountsError) {
           throw new Error(
@@ -965,23 +1053,44 @@ export default function PayrollPage() {
           );
         }
 
-        let payableAccountId = "";
-        let payableAccountName = "Salary Payable";
+        for (const account of
+          preparedAccounts || []) {
+          const entry =
+            (preparedEntries || [])
+              .find(
+                (item) =>
+                  item.account_id ===
+                  account.id,
+              );
 
-        for (const account of preparedAccounts || []) {
-          const entry = (preparedEntries || []).find(
-            (item) => item.account_id === account.id,
-          );
+          if (!entry) {
+            continue;
+          }
 
           if (
-            entry &&
-            Number(entry.credit || 0) > 0 &&
-            (account.account_type === "payable" ||
-              account.account_type === "liability")
+            Number(entry.credit || 0) >
+              0 &&
+            (account.account_type ===
+              "payable" ||
+              account.account_type ===
+                "liability")
           ) {
-            payableAccountId = account.id;
-            payableAccountName = account.name;
-            break;
+            payableAccountId =
+              account.id;
+            payableAccountName =
+              account.name;
+          }
+
+          if (
+            Number(entry.debit || 0) >
+              0 &&
+            account.account_type ===
+              "expense"
+          ) {
+            expenseAccountId =
+              account.id;
+            expenseAccountName =
+              account.name;
           }
         }
 
@@ -990,249 +1099,169 @@ export default function PayrollPage() {
             "Salary Payable account could not be recovered from the prepared journal.",
           );
         }
+      } else {
+        /*
+         * First-time preparation:
+         *
+         *   Dr Salary / Wages Expense
+         *   Cr Salary Payable
+         *
+         * The RPC is responsible for creating this journal and changing
+         * the payroll status to prepared.
+         */
+        const {
+          data,
+          error,
+        } = await supabase.rpc(
+          "prepare_payroll_accounting",
+          {
+            p_payroll_run_id:
+              savedRun.id,
+          },
+        );
 
-        const { data: savedItems, error: savedItemsError } =
-          await supabase
-            .from("payroll_items")
-            .select(
-              "employee_id, staff_id, net_salary, paid, paid_amount, status",
-            )
-            .eq("school_id", schoolId)
-            .eq("payroll_run_id", savedRun.id);
-
-        if (savedItemsError) {
+        if (error) {
           throw new Error(
-            `Unable to recover payroll employees: ${savedItemsError.message}`,
+            `Unable to prepare salary accounting: ${error.message}`,
           );
         }
 
-        const staffItems = (savedItems || [])
-          .filter((item) => item.employee_id)
-          .map((item) => {
-            const row = rows.find((r) => r.staff.id === item.staff_id);
-            return {
-              employee_id: String(item.employee_id),
-              employee_no: row?.staff.employee_no || "",
-              name: row ? staffName(row.staff) : "Staff",
-              designation: row?.staff.designation || "",
-              net_pay: Number(item.net_salary || 0),
-            };
-          });
-
-        const remainingAmount = (savedItems || []).reduce(
-          (sum, item) =>
-            sum +
-            Math.max(
-              Number(item.net_salary || 0) -
-                Number(item.paid_amount || 0),
-              0,
-            ),
-          0,
-        );
-
-        const payload = {
-          source: "payroll",
-          school_id: schoolId,
-          payroll_run_id: savedRun.id,
-          payroll_month: month,
-          amount: Number(
-            (remainingAmount > 0
-              ? remainingAmount
-              : savedRun.total_net
-            ).toFixed(2),
-          ),
-          particulars: `Salary Payroll - ${monthText(month)}`,
-          reference: `PAYROLL-${month}`,
-          staff_count: staffItems.length || totals.staff,
-          staff_items: staffItems,
-          accounting_transaction_id: preparedTransaction.id,
-          accounting_transaction_number:
-            preparedTransaction.transaction_number || null,
-          payable_account_id: payableAccountId,
-          payable_account_name: payableAccountName,
-          accounting_status: "payable_created",
-        };
-
-        window.sessionStorage.setItem(
-          "schoolflow_payroll_payment",
-          JSON.stringify(payload),
-        );
-
-        window.location.assign(
-          `/accounting/payment?source=payroll` +
-            `&run_id=${encodeURIComponent(savedRun.id)}` +
-            `&month=${encodeURIComponent(month)}` +
-            `&amount=${encodeURIComponent(
-              Number(payload.amount).toFixed(2),
-            )}` +
-            `&particulars=${encodeURIComponent(payload.particulars)}` +
-            `&reference=${encodeURIComponent(payload.reference)}` +
-            `&payable_account_id=${encodeURIComponent(
-              payableAccountId,
-            )}` +
-            `&accounting_transaction_id=${encodeURIComponent(
-              preparedTransaction.id,
-            )}`,
-        );
-
-        return;
-      }
-
-      /*
-       * First-time preparation:
-       *
-       *   Dr Salary / Wages Expense
-       *   Cr Salary Payable
-       *
-       * Bank/Cash is NOT touched here.
-       */
-      let runToPrepare = savedRun;
-
-      if (editing || !runToPrepare?.id) {
-        const saved = await savePayroll();
-
-        if (!saved?.id) {
-          return;
-        }
-
-        runToPrepare = saved;
-      }
-
-      if (!runToPrepare?.id) {
-        throw new Error("Payroll was not saved. Please try again.");
-      }
-
-      const { data, error } = await supabase.rpc(
-        "prepare_payroll_accounting",
-        {
-          p_payroll_run_id: runToPrepare.id,
-        },
-      );
-
-      if (error) {
-        throw new Error(
-          `Unable to prepare salary accounting: ${error.message}`,
-        );
-      }
-
-      if (!data?.success) {
-        throw new Error(
-          "Salary payroll accounting was not completed.",
-        );
-      }
-
-      const payrollAmount = Number(totals.net.toFixed(2));
-
-      let staffItems = rows
-        .map((r) => ({
-          employee_id: employeeForStaffRef.current.get(r.staff.id)?.id,
-          employee_no: r.staff.employee_no,
-          name: staffName(r.staff),
-          designation: r.staff.designation || "",
-          net_pay: Number(r.net.toFixed(2)),
-        }))
-        .filter(
-          (item): item is {
-            employee_id: string;
-            employee_no: string;
-            name: string;
-            designation: string;
-            net_pay: number;
-          } => Boolean(item.employee_id),
-        );
-
-      /*
-       * If this is a previously saved draft that survived a page refresh,
-       * the in-memory employee map is empty. Recover the real employee_id
-       * values directly from payroll_items instead of guessing from staff.id.
-       */
-      if (!staffItems.length) {
-        const { data: savedItems, error: savedItemsError } = await supabase
-          .from("payroll_items")
-          .select("employee_id, staff_id, net_salary")
-          .eq("school_id", schoolId)
-          .eq("payroll_run_id", runToPrepare.id);
-
-        if (savedItemsError) {
+        if (!data?.success) {
           throw new Error(
-            `Unable to recover payroll employees: ${savedItemsError.message}`,
+            "Salary payroll accounting was not completed.",
           );
         }
 
-        staffItems = (savedItems || [])
-          .map((item) => {
-            const row = rows.find((r) => r.staff.id === item.staff_id);
-            return {
-              employee_id: String(item.employee_id),
-              employee_no: row?.staff.employee_no || "",
-              name: row ? staffName(row.staff) : "Staff",
-              designation: row?.staff.designation || "",
-              net_pay: Number(item.net_salary || 0),
-            };
-          })
-          .filter((item) => Boolean(item.employee_id));
+        transactionId =
+          data.transaction_id ||
+          null;
+        transactionNumber =
+          data.transaction_number ||
+          null;
+        payableAccountId =
+          data.payable_account_id ||
+          null;
+        payableAccountName =
+          data.payable_account_name ||
+          "Salary Payable";
+        expenseAccountId =
+          data.expense_account_id ||
+          null;
+        expenseAccountName =
+          data.expense_account_name ||
+          "Salary Expense";
       }
 
-      if (!staffItems.length) {
+      if (!transactionId) {
         throw new Error(
-          "No payroll employees were found for Salary Payment.",
+          "Salary accounting transaction could not be determined.",
+        );
+      }
+
+      if (!payableAccountId) {
+        throw new Error(
+          "Salary Payable account could not be determined.",
         );
       }
 
       const payload = {
         source: "payroll",
         school_id: schoolId,
-        payroll_run_id: runToPrepare.id,
+        payroll_run_id: savedRun.id,
         payroll_month: month,
         amount: payrollAmount,
-        particulars: `Salary Payroll - ${monthText(month)}`,
-        reference: `PAYROLL-${month}`,
-        staff_count: totals.staff,
-        staff_items: staffItems,
-        accounting_transaction_id: data.transaction_id,
+        particulars:
+          `Salary Payroll - ${monthText(month)}`,
+        reference:
+          `PAYROLL-${month}`,
+        staff_count:
+          totals.staff,
+
+        accounting_transaction_id:
+          transactionId,
         accounting_transaction_number:
-          data.transaction_number || null,
-        payable_account_id: data.payable_account_id,
+          transactionNumber,
+
+        payable_account_id:
+          payableAccountId,
         payable_account_name:
-          data.payable_account_name || "Salary Payable",
-        expense_account_id: data.expense_account_id,
+          payableAccountName,
+
+        expense_account_id:
+          expenseAccountId,
         expense_account_name:
-          data.expense_account_name || "Salary Expense",
-        accounting_status: "payable_created",
+          expenseAccountName,
+
+        accounting_status:
+          "payable_created",
       };
 
-      window.sessionStorage.setItem(
-        "schoolflow_payroll_payment",
-        JSON.stringify(payload),
-      );
+      try {
+        window.sessionStorage.setItem(
+          "schoolflow_payroll_payment",
+          JSON.stringify(payload),
+        );
+      } catch {
+        // Session storage is only a convenience bridge.
+      }
 
-      const preparedRun: PayrollRun = {
-        ...runToPrepare,
-        status: "prepared",
-        finalized_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      };
+      /*
+       * Keep the local UI state synchronized. Do NOT create another
+       * payroll journal when the payroll is already prepared.
+       */
+      if (
+        savedRun.status !==
+        "prepared"
+      ) {
+        setSavedRun({
+          ...savedRun,
+          status: "prepared",
+          updated_at:
+            new Date().toISOString(),
+        });
+      }
 
-      setSavedRun(preparedRun);
       setEditing(false);
 
+      /*
+       * This is the actual existing Accounting Payment route.
+       *
+       * Payroll settlement will post:
+       *   Dr Salary Payable
+       *   Cr Cash/Bank
+       */
       const paymentUrl =
         `/accounting/payment?source=payroll` +
-        `&run_id=${encodeURIComponent(runToPrepare.id)}` +
-        `&month=${encodeURIComponent(month)}` +
-        `&amount=${encodeURIComponent(payrollAmount.toFixed(2))}` +
-        `&particulars=${encodeURIComponent(payload.particulars)}` +
-        `&reference=${encodeURIComponent(payload.reference)}` +
+        `&run_id=${encodeURIComponent(
+          savedRun.id,
+        )}` +
+        `&month=${encodeURIComponent(
+          month,
+        )}` +
+        `&amount=${encodeURIComponent(
+          payrollAmount.toFixed(2),
+        )}` +
+        `&particulars=${encodeURIComponent(
+          payload.particulars,
+        )}` +
+        `&reference=${encodeURIComponent(
+          payload.reference,
+        )}` +
         `&payable_account_id=${encodeURIComponent(
-          data.payable_account_id,
+          payableAccountId,
         )}` +
         `&accounting_transaction_id=${encodeURIComponent(
-          data.transaction_id,
+          transactionId,
         )}`;
 
-      window.location.assign(paymentUrl);
+      window.location.assign(
+        paymentUrl,
+      );
     } catch (e) {
-      console.error("PREPARE PAYROLL ERROR", e);
+      console.error(
+        "PREPARE PAYROLL ERROR",
+        e,
+      );
 
       setError(
         e instanceof Error
@@ -1679,6 +1708,10 @@ function DayInput({
           onChange(v);
         }}
         className="mx-auto block w-20 rounded-lg border border-slate-300 px-2 py-2 text-center text-sm font-semibold outline-none focus:border-blue-500 disabled:bg-slate-100 disabled:text-slate-500"
+      />
+    </td>
+  );
+}
       />
     </td>
   );

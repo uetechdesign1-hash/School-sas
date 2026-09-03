@@ -142,6 +142,9 @@ export default function StaffPayslipsPage() {
   const [staff, setStaff] =
     useState<Staff | null>(null);
 
+  const [schoolName, setSchoolName] =
+    useState("School");
+
   const [payslips, setPayslips] =
     useState<Payslip[]>([]);
 
@@ -216,6 +219,31 @@ export default function StaffPayslipsPage() {
         setStaff(
           staffRow as Staff
         );
+
+        /* ==========================================
+           LOAD SCHOOL NAME
+           ========================================== */
+
+        const { data: schoolRow } = await supabase
+          .from("schools")
+          .select("*")
+          .eq("id", staffRow.school_id)
+          .maybeSingle();
+
+        const schoolRecord = (schoolRow || {}) as Record<
+          string,
+          unknown
+        >;
+
+        const resolvedSchoolName =
+          String(
+            schoolRecord.name ||
+              schoolRecord.school_name ||
+              schoolRecord.title ||
+              "School"
+          ).trim() || "School";
+
+        setSchoolName(resolvedSchoolName);
 
         /* ==========================================
            LOAD PAYROLL RUNS
@@ -438,14 +466,26 @@ export default function StaffPayslipsPage() {
           </div>
 
           {selected && (
-            <button
-              type="button"
-              onClick={printPayslip}
-              className="no-print inline-flex items-center justify-center gap-2 rounded-xl bg-slate-900 px-5 py-3 text-sm font-semibold text-white hover:bg-slate-800"
-            >
-              <Printer size={17} />
-              Print Payslip
-            </button>
+            <div className="no-print flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={printPayslip}
+                className="inline-flex items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-slate-800"
+              >
+                <Printer size={16} />
+                Print
+              </button>
+
+              <button
+                type="button"
+                onClick={printPayslip}
+                className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                title="Choose Save as PDF in the print window"
+              >
+                <Download size={16} />
+                Download PDF
+              </button>
+            </div>
           )}
 
         </div>
@@ -577,8 +617,11 @@ export default function StaffPayslipsPage() {
 
                         <div>
 
-                          <p className="text-xs font-bold uppercase tracking-wider text-blue-600">
-                            SchoolFlow
+                          <p className="text-base font-black uppercase tracking-wide text-slate-900">
+                            {schoolName}
+                          </p>
+                          <p className="mt-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-blue-600">
+                            School Salary Statement
                           </p>
 
                           <h2 className="text-xl font-bold text-slate-900">
@@ -927,8 +970,8 @@ export default function StaffPayslipsPage() {
 
                 </div>
 
-                <div className="border-t border-slate-200 p-5 text-center text-xs text-slate-400">
-                  Generated from SchoolFlow
+                <div className="border-t border-slate-200 px-6 py-3 text-center text-[10px] text-slate-400">
+                  {schoolName} • Salary Payslip • Generated from SchoolFlow
                 </div>
 
               </section>
@@ -942,30 +985,149 @@ export default function StaffPayslipsPage() {
       {/* PRINT STYLES */}
 
       <style jsx global>{`
+        @page {
+          size: A4 portrait;
+          margin: 8mm;
+        }
+
         @media print {
+          html,
           body {
+            width: 210mm !important;
+            min-height: 297mm !important;
             background: white !important;
           }
 
-          .no-print {
-            display: none !important;
+          body {
+            margin: 0 !important;
+            padding: 0 !important;
           }
 
+          .no-print,
           header,
           nav,
           aside {
             display: none !important;
           }
 
-          .print-area {
-            border: 0 !important;
-            box-shadow: none !important;
+          main {
+            display: block !important;
             width: 100% !important;
-            max-width: 100% !important;
+            min-height: 0 !important;
+            padding: 0 !important;
+            margin: 0 !important;
           }
 
-          main {
+          main > div {
+            width: 100% !important;
+            max-width: none !important;
+            margin: 0 !important;
             padding: 0 !important;
+          }
+
+          .print-area {
+            display: block !important;
+            width: 100% !important;
+            max-width: none !important;
+            min-height: 0 !important;
+            margin: 0 !important;
+            border: 1px solid #cbd5e1 !important;
+            border-radius: 0 !important;
+            box-shadow: none !important;
+            overflow: visible !important;
+            page-break-inside: avoid !important;
+            break-inside: avoid !important;
+          }
+
+          .print-area > div {
+            page-break-inside: avoid !important;
+            break-inside: avoid !important;
+          }
+
+          .print-area .p-6 {
+            padding: 12px !important;
+          }
+
+          .print-area .p-8 {
+            padding: 14px !important;
+          }
+
+          .print-area .mx-6 {
+            margin-left: 14px !important;
+            margin-right: 14px !important;
+          }
+
+          .print-area .mx-8 {
+            margin-left: 14px !important;
+            margin-right: 14px !important;
+          }
+
+          .print-area .mb-6 {
+            margin-bottom: 10px !important;
+          }
+
+          .print-area .mt-5 {
+            margin-top: 8px !important;
+          }
+
+          .print-area .mt-6 {
+            margin-top: 10px !important;
+          }
+
+          .print-area .py-4 {
+            padding-top: 7px !important;
+            padding-bottom: 7px !important;
+          }
+
+          .print-area .p-5 {
+            padding: 10px !important;
+          }
+
+          .print-area .gap-6 {
+            gap: 12px !important;
+          }
+
+          .print-area .gap-5 {
+            gap: 10px !important;
+          }
+
+          .print-area .gap-3 {
+            gap: 7px !important;
+          }
+
+          .print-area .text-3xl {
+            font-size: 22px !important;
+            line-height: 1.1 !important;
+          }
+
+          .print-area .text-xl {
+            font-size: 16px !important;
+            line-height: 1.2 !important;
+          }
+
+          .print-area .text-lg {
+            font-size: 14px !important;
+            line-height: 1.2 !important;
+          }
+
+          .print-area .text-sm {
+            font-size: 10px !important;
+            line-height: 1.35 !important;
+          }
+
+          .print-area .text-xs {
+            font-size: 8px !important;
+            line-height: 1.25 !important;
+          }
+
+          .print-area .text-base {
+            font-size: 14px !important;
+            line-height: 1.2 !important;
+          }
+
+          .print-area .rounded-2xl,
+          .print-area .rounded-xl {
+            border-radius: 4px !important;
           }
         }
       `}</style>

@@ -1,4 +1,6 @@
-"use client";
+﻿"use client";
+
+
 
 import {
   FormEvent,
@@ -249,8 +251,18 @@ export default function SuperAdminPage() {
         error
       );
 
+      setErrorMessage(
+        error.message ||
+          "Unable to load schools."
+      );
+
       return;
     }
+
+    console.log(
+      "SUPER ADMIN SCHOOLS:",
+      data
+    );
 
     setSchools(
       (data || []) as School[]

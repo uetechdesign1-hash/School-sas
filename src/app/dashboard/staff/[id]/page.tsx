@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
@@ -75,7 +75,7 @@ function formatName(staff: Staff | null) {
 }
 
 function formatDate(value: string | null) {
-  if (!value) return "—";
+  if (!value) return "â€”";
 
   const date = new Date(value);
 
@@ -91,7 +91,7 @@ function formatDate(value: string | null) {
 }
 
 function capitalize(value: string | null) {
-  if (!value) return "—";
+  if (!value) return "â€”";
 
   return value
     .replaceAll("_", " ")
@@ -131,7 +131,7 @@ function InfoItem({
         </p>
 
         <p className="mt-1 break-words text-sm font-medium text-slate-800">
-          {value || "—"}
+          {value || "â€”"}
         </p>
       </div>
     </div>
@@ -645,7 +645,7 @@ export default function StaffProfilePage() {
                       "Staff Member"}
 
                     {staff.department
-                      ? ` • ${staff.department}`
+                      ? ` â€¢ ${staff.department}`
                       : ""}
                   </p>
 
@@ -725,13 +725,13 @@ export default function StaffProfilePage() {
             title="Personal Information"
             icon={CircleUserRound}
             action={
-              <button
-                type="button"
+              <Link
+                href={`/dashboard/staff/${staff.id}/edit`}
                 className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50"
               >
                 <Edit3 className="h-3.5 w-3.5" />
                 Edit
-              </button>
+              </Link>
             }
           >
             <div className="grid gap-5 sm:grid-cols-2">
@@ -753,13 +753,13 @@ export default function StaffProfilePage() {
               <InfoItem
                 icon={Phone}
                 label="Phone"
-                value={staff.phone || "—"}
+                value={staff.phone || "â€”"}
               />
 
               <InfoItem
                 icon={Mail}
                 label="Email"
-                value={staff.email || "—"}
+                value={staff.email || "â€”"}
               />
 
               <div className="sm:col-span-2">
@@ -772,7 +772,7 @@ export default function StaffProfilePage() {
                       staff.city,
                     ]
                       .filter(Boolean)
-                      .join(", ") || "—"
+                      .join(", ") || "â€”"
                   }
                 />
               </div>
@@ -794,7 +794,7 @@ export default function StaffProfilePage() {
                 icon={Users}
                 label="Department"
                 value={
-                  staff.department || "—"
+                  staff.department || "â€”"
                 }
               />
 
@@ -802,7 +802,7 @@ export default function StaffProfilePage() {
                 icon={BriefcaseBusiness}
                 label="Designation"
                 value={
-                  staff.designation || "—"
+                  staff.designation || "â€”"
                 }
               />
 
@@ -826,7 +826,7 @@ export default function StaffProfilePage() {
                 icon={ShieldCheck}
                 label="Employee Number"
                 value={
-                  staff.employee_no || "—"
+                  staff.employee_no || "â€”"
                 }
               />
 
@@ -925,7 +925,7 @@ export default function StaffProfilePage() {
                       <p className="mt-1 break-all font-mono text-sm font-bold text-slate-900">
                         {showPassword
                           ? createdLogin.password
-                          : "••••••••••••"}
+                          : "â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢"}
                       </p>
 
                     </div>
@@ -1001,11 +1001,25 @@ export default function StaffProfilePage() {
                         </div>
                       )}
 
+                      <Link
+                        href={`/dashboard/staff/${staff.id}/reset-password`}
+                        className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50"
+                      >
+                        <KeyRound className="h-4 w-4" />
+                        Reset Staff Password
+                      </Link>
                     </div>
                   </div>
                 </div>
               )}
 
+                      <Link
+                        href={`/dashboard/staff/${staff.id}/reset-password`}
+                        className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-3 text-sm font-bold text-white hover:bg-slate-800"
+                      >
+                        <KeyRound className="h-4 w-4" />
+                        Reset Password
+                      </Link>
             {/* NO ACCOUNT */}
 
             {!createdLogin &&
@@ -1399,3 +1413,6 @@ export default function StaffProfilePage() {
     </div>
   );
 }
+
+
+
