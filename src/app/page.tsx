@@ -321,7 +321,7 @@ export default function HomePage() {
                     </div>
 
                     <div className="mt-1 text-2xl font-bold text-slate-950">
-                      Good morning ðŸ‘‹
+                      Good morning‹
                     </div>
                   </div>
 
