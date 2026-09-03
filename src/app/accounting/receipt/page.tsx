@@ -1,3 +1,4 @@
+"use client";
 
 
 import {
@@ -1429,7 +1430,7 @@ export default function ReceiptPage() {
         transaction.id.slice(0, 8);
 
       setSuccess(
-        `Receipt saved successfully — ${transactionNumber}. ${money(
+        `Receipt saved successfully â€” ${transactionNumber}. ${money(
           numericAmount
         )} received into ${receiveAccount.name}.`
       );
@@ -2189,7 +2190,7 @@ export default function ReceiptPage() {
                     <Field label="Amount">
                       <div className="relative">
                         <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">
-                          ₹
+                          â‚¹
                         </span>
 
                         <input
@@ -2217,7 +2218,7 @@ export default function ReceiptPage() {
                         </h3>
 
                         <p className="mt-1 text-xs text-slate-500">
-                          Filter by Class → Section → Student → Fee Bill.
+                          Filter by Class â†’ Section â†’ Student â†’ Fee Bill.
                         </p>
                       </div>
 
@@ -2305,7 +2306,7 @@ export default function ReceiptPage() {
                                   {getStudentName(
                                     student
                                   )}{" "}
-                                  —{" "}
+                                  â€”{" "}
                                   {
                                     student.admission_no
                                   }
@@ -2347,7 +2348,7 @@ export default function ReceiptPage() {
                                   key={bill.id}
                                   value={bill.id}
                                 >
-                                  {bill.bill_number} —
+                                  {bill.bill_number} â€”
                                   Outstanding{" "}
                                   {money(
                                     Number(

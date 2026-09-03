@@ -1,6 +1,4 @@
-
 "use client";
-
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
@@ -96,7 +94,7 @@ function supabaseErrorMessage(
   ].filter(Boolean);
 
   return parts.length
-    ? parts.join(" — ")
+    ? parts.join(" â€” ")
     : fallback;
 }
 
@@ -1608,7 +1606,7 @@ export default function FeeStructurePage() {
                     </div>
 
                     <p className="mt-1 text-xs text-slate-500">
-                      {year.start_date} → {year.end_date}
+                      {year.start_date} â†’ {year.end_date}
                     </p>
                   </div>
                 ))}
@@ -1664,7 +1662,7 @@ export default function FeeStructurePage() {
           {structures.length === 0 ? (
             <div className="rounded-3xl border border-dashed border-slate-300 bg-white px-6 py-16 text-center">
               <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-blue-50 text-2xl text-blue-600">
-                ₹
+                â‚¹
               </div>
 
               <h3 className="mt-4 font-bold text-slate-900">
@@ -1772,7 +1770,7 @@ export default function FeeStructurePage() {
                                     </span>
 
                                     <span>
-                                      •
+                                      â€¢
                                     </span>
 
                                     <span>

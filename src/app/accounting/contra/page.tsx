@@ -386,7 +386,7 @@ export default function ContraPage() {
           editingRow.id.slice(0, 8);
 
         setSuccess(
-          `Contra updated successfully — ${transactionNumber}.`
+          `Contra updated successfully â€” ${transactionNumber}.`
         );
       } else {
         const { data: userData, error: userError } =
@@ -467,7 +467,7 @@ export default function ContraPage() {
         }
 
         setSuccess(
-          `Contra saved successfully — ${
+          `Contra saved successfully â€” ${
             transaction.transaction_number ||
             transaction.id.slice(0, 8)
           }. ${money(numericAmount)} transferred from ${
@@ -479,7 +479,7 @@ export default function ContraPage() {
       setShowForm(false);
       resetForm();
 
-      await loadHistory(schoolId);
+      await loadHistory(schoolId!);
     } catch (err: any) {
       console.error("CONTRA SAVE ERROR:", err);
 
@@ -520,7 +520,7 @@ export default function ContraPage() {
       setDeletingRow(null);
 
       if (schoolId) {
-        await loadHistory(schoolId);
+        await loadHistory(schoolId!);
       }
     } catch (err: any) {
       console.error("CONTRA DELETE ERROR:", err);
@@ -591,7 +591,7 @@ export default function ContraPage() {
         <section className="mb-6 grid gap-4 md:grid-cols-2">
           <div className="rounded-2xl border bg-white p-5">
             <div className="text-xs font-semibold text-slate-500">
-              CASH → BANK
+              CASH â†’ BANK
             </div>
 
             <div className="mt-3 font-mono text-sm">
@@ -605,7 +605,7 @@ export default function ContraPage() {
 
           <div className="rounded-2xl border bg-white p-5">
             <div className="text-xs font-semibold text-slate-500">
-              BANK → CASH
+              BANK â†’ CASH
             </div>
 
             <div className="mt-3 font-mono text-sm">
@@ -705,7 +705,7 @@ export default function ContraPage() {
                             {account.code
                               ? ` (${account.code})`
                               : ""}
-                            {" — "}
+                            {" â€” "}
                             {account.account_type ===
                             "cash"
                               ? "Cash"
@@ -749,7 +749,7 @@ export default function ContraPage() {
                             {account.code
                               ? ` (${account.code})`
                               : ""}
-                            {" — "}
+                            {" â€” "}
                             {account.account_type ===
                             "cash"
                               ? "Cash"
@@ -767,7 +767,7 @@ export default function ContraPage() {
 
                   <div className="relative">
                     <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">
-                      ₹
+                      â‚¹
                     </span>
 
                     <input
@@ -1167,7 +1167,7 @@ export default function ContraPage() {
 
               <div className="mt-1">
                 <strong>Transfer:</strong>{" "}
-                {deletingRow.from_account} →{" "}
+                {deletingRow.from_account} â†’{" "}
                 {deletingRow.to_account}
               </div>
 
