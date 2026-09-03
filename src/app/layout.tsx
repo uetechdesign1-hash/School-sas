@@ -1,5 +1,6 @@
-import type { Metadata } from "next";
+﻿import type { Metadata } from "next";
 import "./globals.css";
+import SchoolAccessGuard from "@/components/auth/SchoolAccessGuard";
 
 export const metadata: Metadata = {
   title: "SchoolFlow",
@@ -13,7 +14,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body><SchoolAccessGuard>{children}</SchoolAccessGuard></body>
     </html>
   );
 }
