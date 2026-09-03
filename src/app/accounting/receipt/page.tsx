@@ -1931,7 +1931,7 @@ export default function ReceiptPage() {
 
   return (
     <>
-      <style jsx global>{`
+      <style>{`
         @media print {
           body {
             background: white !important;
