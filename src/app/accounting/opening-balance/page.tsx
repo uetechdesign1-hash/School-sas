@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { AccountingExportActions } from "../accounting-export";
 import {
   ArrowLeft,
   CheckCircle2,
@@ -1175,7 +1176,8 @@ export default function OpeningBalancePage() {
             Credit balances.
           </p>
         </div>
-      </main>
+              <AccountingExportActions fileName="opening-balances" />
+</main>
     </div>
   );
 }

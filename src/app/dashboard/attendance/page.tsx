@@ -38,7 +38,7 @@ type OverrideRecord = {
   id: string;
   staff_id: string;
   attendance_date: string;
-  status: "present" | "absent" | "holiday" | "week_off" | "half_day";
+  status: "present" | "absent" | "holiday" | "week_off" | "half_day" | "paid_leave";
   notes: string | null;
 };
 
@@ -56,6 +56,7 @@ type CellStatus =
   | "holiday"
   | "week_off"
   | "half_day"
+  | "paid_leave"
   | "auto";
 
 const STATUS_LABEL: Record<CellStatus, string> = {
@@ -64,6 +65,7 @@ const STATUS_LABEL: Record<CellStatus, string> = {
   holiday: "H",
   week_off: "W/O",
   half_day: "½",
+  paid_leave: "C/L",
   auto: "Auto",
 };
 
@@ -73,6 +75,7 @@ const STATUS_FULL: Record<CellStatus, string> = {
   holiday: "Holiday",
   week_off: "Week Off",
   half_day: "Half Day",
+  paid_leave: "Casual Leave (Paid Leave)",
   auto: "Automatic",
 };
 
@@ -353,6 +356,7 @@ export default function AdminAttendancePage() {
     let holiday = 0;
     let weekOff = 0;
     let halfDay = 0;
+    let paidLeave = 0;
 
     for (const day of days) {
       const date = dateFor(month, day);
@@ -363,6 +367,7 @@ export default function AdminAttendancePage() {
       if (status === "holiday") holiday++;
       if (status === "week_off") weekOff++;
       if (status === "half_day") halfDay++;
+      if (status === "paid_leave") paidLeave++;
     }
 
     const workingDays = Math.max(days.length - holiday - weekOff, 0);
@@ -374,6 +379,7 @@ export default function AdminAttendancePage() {
       holiday,
       weekOff,
       halfDay,
+      paidLeave,
       workingDays,
       workedDays,
     };
@@ -524,6 +530,7 @@ export default function AdminAttendancePage() {
     let holiday = 0;
     let weekOff = 0;
     let halfDay = 0;
+    let paidLeave = 0;
 
     for (const day of days) {
       const date = dateFor(month, day);
@@ -548,10 +555,12 @@ export default function AdminAttendancePage() {
       if (status === "holiday") holiday++;
       if (status === "week_off") weekOff++;
       if (status === "half_day") halfDay++;
+      if (status === "paid_leave") paidLeave++;
     }
 
     const workingDays = Math.max(days.length - holiday - weekOff, 0);
     const workedDays = present + halfDay * 0.5;
+    const unpaidDays = absent + halfDay * 0.5;
 
     const { data: existing, error: findError } = await supabase
       .from("staff_monthly_attendance")
@@ -570,8 +579,8 @@ export default function AdminAttendancePage() {
       month,
       working_days: workingDays,
       worked_days: workedDays,
-      paid_leave: 0,
-      unpaid_leave: absent,
+      paid_leave: paidLeave,
+      unpaid_leave: unpaidDays,
       school_holidays: holiday,
     };
 
@@ -748,6 +757,7 @@ export default function AdminAttendancePage() {
       let holiday = 0;
       let weekOff = 0;
       let halfDay = 0;
+      let paidLeave = 0;
 
       for (const day of days) {
         const date = dateFor(month, day);
@@ -772,10 +782,12 @@ export default function AdminAttendancePage() {
         if (status === "holiday") holiday++;
         if (status === "week_off") weekOff++;
         if (status === "half_day") halfDay++;
+        if (status === "paid_leave") paidLeave++;
       }
 
       const workingDays = Math.max(days.length - holiday - weekOff, 0);
       const workedDays = present + halfDay * 0.5;
+      const unpaidDays = absent + halfDay * 0.5;
 
       const { data: existing, error: findError } = await supabase
         .from("staff_monthly_attendance")
@@ -794,8 +806,8 @@ export default function AdminAttendancePage() {
         month,
         working_days: workingDays,
         worked_days: workedDays,
-        paid_leave: 0,
-        unpaid_leave: absent,
+        paid_leave: paidLeave,
+        unpaid_leave: unpaidDays,
         school_holidays: holiday,
       };
 
@@ -835,6 +847,7 @@ export default function AdminAttendancePage() {
       ...days.map((day) => dateFor(month, day)),
       "Present",
       "Half Day",
+      "C/L Paid Leave",
       "Absent",
       "Holiday",
       "Week Off",
@@ -858,6 +871,7 @@ export default function AdminAttendancePage() {
         }),
         String(summary.present),
         String(summary.halfDay),
+        String(summary.paidLeave),
         String(summary.absent),
         String(summary.holiday),
         String(summary.weekOff),
@@ -983,6 +997,9 @@ export default function AdminAttendancePage() {
             </span>
             <span className="rounded-lg bg-violet-50 px-2.5 py-1.5 text-violet-700">
               ½ = Half Day
+            </span>
+            <span className="rounded-lg bg-sky-50 px-2.5 py-1.5 text-sky-700">
+              C/L = Casual Leave (Paid)
             </span>
           </div>
         </div>
@@ -1137,7 +1154,9 @@ export default function AdminAttendancePage() {
                                         ? "border-slate-200 bg-slate-100 text-slate-700"
                                         : status === "half_day"
                                           ? "border-violet-200 bg-violet-50 text-violet-700"
-                                          : "border-slate-200 bg-white text-slate-400"
+                                          : status === "paid_leave"
+                                            ? "border-sky-200 bg-sky-50 text-sky-700"
+                                            : "border-slate-200 bg-white text-slate-400"
                               }`}
                             >
                               <option value="auto">
@@ -1146,6 +1165,7 @@ export default function AdminAttendancePage() {
                               <option value="present">P</option>
                               <option value="absent">A</option>
                               <option value="half_day">½</option>
+                              <option value="paid_leave">C/L</option>
                               <option value="holiday">H</option>
                               <option value="week_off">W/O</option>
                             </select>

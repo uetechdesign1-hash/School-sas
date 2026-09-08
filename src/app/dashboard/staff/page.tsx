@@ -3,7 +3,6 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import {
-  Activity,
   BriefcaseBusiness,
   CalendarDays,
   ChevronRight,
@@ -416,14 +415,6 @@ export default function StaffPage() {
           <div className="flex flex-wrap gap-2">
 
             <Link
-              href="/dashboard/staff/attendance"
-              className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 shadow-sm transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700"
-            >
-              <Activity size={17} />
-              Daily Attendance
-            </Link>
-
-            <Link
               href="/dashboard/staff/add"
               className="inline-flex items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-bold text-white shadow-sm transition hover:bg-blue-700"
             >
@@ -505,15 +496,6 @@ export default function StaffPage() {
            ===================================================== */}
 
         <section className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-
-          <ManagementCard
-            href="/dashboard/staff/attendance"
-            icon={
-              <Activity size={21} />
-            }
-            title="Daily Attendance"
-            description="Check-in, check-out and working hours"
-          />
 
           <ManagementCard
             href="/dashboard/payroll"

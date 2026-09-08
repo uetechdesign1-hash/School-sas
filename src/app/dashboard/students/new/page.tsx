@@ -5,10 +5,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 
-type Gender =
-  | "male"
-  | "female"
-  | "other";
+type Gender = "male" | "female" | "other";
 
 type StudentStatus =
   | "active"
@@ -29,6 +26,14 @@ type Section = {
   name: string;
 };
 
+type AcademicYear = {
+  id: string;
+  name: string;
+  start_date: string;
+  end_date: string;
+  is_current: boolean;
+};
+
 export default function NewStudentPage() {
   const router = useRouter();
 
@@ -40,20 +45,20 @@ export default function NewStudentPage() {
   const [dateOfBirth, setDateOfBirth] = useState("");
   const [gender, setGender] = useState<Gender | "">("");
   const [admissionDate, setAdmissionDate] = useState("");
-  const [status, setStatus] =
-    useState<StudentStatus>("active");
+  const [status, setStatus] = useState<StudentStatus>("active");
   const [bloodGroup, setBloodGroup] = useState("");
 
+  const [academicYearId, setAcademicYearId] = useState("");
+  const [academicYears, setAcademicYears] = useState<AcademicYear[]>([]);
+  const [academicYearsLoading, setAcademicYearsLoading] = useState(true);
+
   const [classId, setClassId] = useState("");
-  const [sectionId, setSectionId] = useState("");
-
   const [classes, setClasses] = useState<SchoolClass[]>([]);
-  const [sections, setSections] = useState<Section[]>([]);
+  const [classesLoading, setClassesLoading] = useState(true);
 
-  const [classesLoading, setClassesLoading] =
-    useState(true);
-  const [sectionsLoading, setSectionsLoading] =
-    useState(false);
+  const [sectionId, setSectionId] = useState("");
+  const [sections, setSections] = useState<Section[]>([]);
+  const [sectionsLoading, setSectionsLoading] = useState(false);
 
   const [address, setAddress] = useState("");
   const [city, setCity] = useState("");
@@ -65,25 +70,27 @@ export default function NewStudentPage() {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    loadClasses();
+    void loadFormData();
   }, []);
 
-  async function getSchoolId() {
-    const supabase = createClient();
-
+  async function getSchoolId(
+    supabase: ReturnType<typeof createClient>,
+  ) {
     const {
       data: { user },
+      error: userError,
     } = await supabase.auth.getUser();
+
+    if (userError) {
+      throw userError;
+    }
 
     if (!user) {
       window.location.href = "/login";
       return null;
     }
 
-    const {
-      data: membership,
-      error: membershipError,
-    } = await supabase
+    const { data: membership, error: membershipError } = await supabase
       .from("school_users")
       .select("school_id, role, is_active")
       .eq("user_id", user.id)
@@ -95,156 +102,145 @@ export default function NewStudentPage() {
       throw membershipError;
     }
 
-    if (!membership) {
-      throw new Error(
-        "Your account is not assigned to a school."
-      );
+    if (!membership?.school_id) {
+      throw new Error("Your account is not assigned to a school.");
     }
 
-    return membership.school_id;
+    return membership.school_id as string;
   }
 
-  async function loadClasses() {
+  async function loadFormData() {
     try {
-      setClassesLoading(true);
       setError("");
+      setAcademicYearsLoading(true);
+      setClassesLoading(true);
 
       const supabase = createClient();
-      const schoolId = await getSchoolId();
+      const schoolId = await getSchoolId(supabase);
 
       if (!schoolId) {
         return;
       }
 
-      const {
-        data,
-        error: classesError,
-      } = await supabase
-        .from("classes")
-        .select(
-          "id, name, display_order"
-        )
-        .eq("school_id", schoolId)
-        .order("display_order", {
-          ascending: true,
-        })
-        .order("name", {
-          ascending: true,
-        });
+      const [yearsResult, classesResult] = await Promise.all([
+        supabase
+          .from("academic_years")
+          .select("id, name, start_date, end_date, is_current")
+          .eq("school_id", schoolId)
+          .order("start_date", { ascending: false }),
 
-      if (classesError) {
-        throw classesError;
+        supabase
+          .from("classes")
+          .select("id, name, display_order")
+          .eq("school_id", schoolId)
+          .order("display_order", { ascending: true })
+          .order("name", { ascending: true }),
+      ]);
+
+      if (yearsResult.error) {
+        throw yearsResult.error;
       }
 
-      setClasses(
-        (data || []) as SchoolClass[]
-      );
-    } catch (error) {
-      console.error(
-        "LOAD CLASSES ERROR:",
-        error
-      );
+      if (classesResult.error) {
+        throw classesResult.error;
+      }
 
+      const years = (yearsResult.data || []) as AcademicYear[];
+      const loadedClasses = (classesResult.data || []) as SchoolClass[];
+
+      setAcademicYears(years);
+      setClasses(loadedClasses);
+
+      const currentYear = years.find((year) => year.is_current);
+      if (currentYear) {
+        setAcademicYearId(currentYear.id);
+      } else if (years.length > 0) {
+        setAcademicYearId(years[0].id);
+      }
+    } catch (loadError) {
+      console.error("LOAD ADD STUDENT DATA ERROR:", loadError);
       setError(
-        error instanceof Error
-          ? error.message
-          : "Unable to load classes."
+        loadError instanceof Error
+          ? loadError.message
+          : "Unable to load academic years and classes.",
       );
     } finally {
+      setAcademicYearsLoading(false);
       setClassesLoading(false);
     }
   }
 
-  async function loadSections(
-    selectedClassId: string
-  ) {
-    if (!selectedClassId) {
-      setSections([]);
+  async function handleClassChange(value: string) {
+    setClassId(value);
+    setSectionId("");
+    setSections([]);
+
+    if (!value) {
       return;
     }
 
     try {
-      setSectionsLoading(true);
       setError("");
+      setSectionsLoading(true);
 
       const supabase = createClient();
-      const schoolId = await getSchoolId();
+      const schoolId = await getSchoolId(supabase);
 
       if (!schoolId) {
         return;
       }
 
-      const {
-        data,
-        error: sectionsError,
-      } = await supabase
+      const { data, error: sectionsError } = await supabase
         .from("sections")
-        .select(
-          "id, class_id, name"
-        )
+        .select("id, class_id, name")
         .eq("school_id", schoolId)
-        .eq("class_id", selectedClassId)
-        .order("name", {
-          ascending: true,
-        });
+        .eq("class_id", value)
+        .order("name", { ascending: true });
 
       if (sectionsError) {
         throw sectionsError;
       }
 
-      setSections(
-        (data || []) as Section[]
-      );
-    } catch (error) {
-      console.error(
-        "LOAD SECTIONS ERROR:",
-        error
-      );
-
+      setSections((data || []) as Section[]);
+    } catch (sectionError) {
+      console.error("LOAD SECTIONS ERROR:", sectionError);
       setError(
-        error instanceof Error
-          ? error.message
-          : "Unable to load sections."
+        sectionError instanceof Error
+          ? sectionError.message
+          : "Unable to load sections.",
       );
-
-      setSections([]);
     } finally {
       setSectionsLoading(false);
     }
   }
 
-  async function handleClassChange(
-    value: string
-  ) {
-    setClassId(value);
-
-    // Section must belong to selected class.
-    setSectionId("");
-    setSections([]);
-
-    if (value) {
-      await loadSections(value);
-    }
-  }
-
-  async function handleSubmit(
-    event: FormEvent<HTMLFormElement>
-  ) {
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
     setError("");
 
     if (!admissionNo.trim()) {
-      setError(
-        "Admission number is required."
-      );
+      setError("Admission number is required.");
       return;
     }
 
     if (!firstName.trim()) {
-      setError(
-        "First name is required."
-      );
+      setError("First name is required.");
+      return;
+    }
+
+    if (!academicYearId) {
+      setError("Please select an academic year.");
+      return;
+    }
+
+    if (!classId) {
+      setError("Please select a class.");
+      return;
+    }
+
+    if (!sectionId) {
+      setError("Please select a section.");
       return;
     }
 
@@ -252,129 +248,51 @@ export default function NewStudentPage() {
 
     try {
       const supabase = createClient();
+      const schoolId = await getSchoolId(supabase);
 
-      const {
-        data: { user },
-      } =
-        await supabase.auth.getUser();
-
-      if (!user) {
-        window.location.href = "/login";
+      if (!schoolId) {
         return;
       }
 
-      const {
-        data: membership,
-        error: membershipError,
-      } = await supabase
-        .from("school_users")
-        .select(
-          "school_id, role, is_active"
-        )
-        .eq(
-          "user_id",
-          user.id
-        )
-        .eq(
-          "is_active",
-          true
-        )
-        .limit(1)
-        .maybeSingle();
-
-      if (membershipError) {
-        throw membershipError;
-      }
-
-      if (!membership) {
-        throw new Error(
-          "Your account is not assigned to a school."
-        );
-      }
-
       const student = {
-        school_id:
-          membership.school_id,
-
-        admission_no:
-          admissionNo.trim(),
-
-        roll_no:
-          rollNo.trim() || null,
-
-        first_name:
-          firstName.trim(),
-
-        middle_name:
-          middleName.trim() || null,
-
-        last_name:
-          lastName.trim() || null,
-
-        date_of_birth:
-          dateOfBirth || null,
-
-        gender:
-          gender || null,
-
-        class_id:
-          classId || null,
-
-        section_id:
-          sectionId || null,
-
-        admission_date:
-          admissionDate || null,
-
+        school_id: schoolId,
+        academic_year_id: academicYearId,
+        admission_no: admissionNo.trim(),
+        roll_no: rollNo.trim() || null,
+        first_name: firstName.trim(),
+        middle_name: middleName.trim() || null,
+        last_name: lastName.trim() || null,
+        date_of_birth: dateOfBirth || null,
+        gender: gender || null,
+        class_id: classId,
+        section_id: sectionId,
+        admission_date: admissionDate || null,
         status,
-
-        blood_group:
-          bloodGroup.trim() || null,
-
-        address:
-          address.trim() || null,
-
-        city:
-          city.trim() || null,
-
-        state:
-          state.trim() || null,
-
-        postal_code:
-          postalCode.trim() || null,
-
-        notes:
-          notes.trim() || null,
+        blood_group: bloodGroup.trim() || null,
+        address: address.trim() || null,
+        city: city.trim() || null,
+        state: state.trim() || null,
+        postal_code: postalCode.trim() || null,
+        notes: notes.trim() || null,
       };
 
-      const {
-        error: insertError,
-      } =
-        await supabase
-          .from("students")
-          .insert(student);
+      const { error: insertError } = await supabase
+        .from("students")
+        .insert(student);
 
       if (insertError) {
         throw insertError;
       }
 
-      router.replace(
-        "/dashboard/students"
-      );
-
+      router.replace("/dashboard/students");
       router.refresh();
-    } catch (error) {
-      console.error(
-        "CREATE STUDENT ERROR:",
-        error
-      );
-
+    } catch (createError) {
+      console.error("CREATE STUDENT ERROR:", createError);
       setError(
-        error instanceof Error
-          ? error.message
-          : "Unable to create student."
+        createError instanceof Error
+          ? createError.message
+          : "Unable to create student.",
       );
-
       setLoading(false);
     }
   }
@@ -382,9 +300,6 @@ export default function NewStudentPage() {
   return (
     <div className="p-4 md:p-6">
       <div className="mx-auto max-w-5xl">
-
-        {/* HEADER */}
-
         <div className="mb-6">
           <Link
             href="/dashboard/students"
@@ -402,44 +317,23 @@ export default function NewStudentPage() {
           </p>
         </div>
 
-        {/* ERROR */}
-
         {error && (
           <div className="mb-6 rounded-2xl border border-red-200 bg-red-50 p-4">
-            <p className="text-sm font-semibold text-red-800">
-              {error}
-            </p>
+            <p className="text-sm font-semibold text-red-800">{error}</p>
           </div>
         )}
 
-        {/* FORM */}
-
-        <form
-          onSubmit={handleSubmit}
-          className="space-y-6"
-        >
-
-          {/* BASIC INFORMATION */}
-
+        <form onSubmit={handleSubmit} className="space-y-6">
           <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-
             <h2 className="text-lg font-bold text-slate-900">
               Basic Information
             </h2>
 
             <div className="mt-5 grid gap-5 md:grid-cols-2">
-
-              <Field
-                label="Admission Number"
-                required
-              >
+              <Field label="Admission Number" required>
                 <input
                   value={admissionNo}
-                  onChange={(event) =>
-                    setAdmissionNo(
-                      event.target.value
-                    )
-                  }
+                  onChange={(event) => setAdmissionNo(event.target.value)}
                   required
                   placeholder="ADM-001"
                   className={inputClass}
@@ -449,27 +343,16 @@ export default function NewStudentPage() {
               <Field label="Roll Number">
                 <input
                   value={rollNo}
-                  onChange={(event) =>
-                    setRollNo(
-                      event.target.value
-                    )
-                  }
+                  onChange={(event) => setRollNo(event.target.value)}
                   placeholder="1"
                   className={inputClass}
                 />
               </Field>
 
-              <Field
-                label="First Name"
-                required
-              >
+              <Field label="First Name" required>
                 <input
                   value={firstName}
-                  onChange={(event) =>
-                    setFirstName(
-                      event.target.value
-                    )
-                  }
+                  onChange={(event) => setFirstName(event.target.value)}
                   required
                   placeholder="First name"
                   className={inputClass}
@@ -479,11 +362,7 @@ export default function NewStudentPage() {
               <Field label="Middle Name">
                 <input
                   value={middleName}
-                  onChange={(event) =>
-                    setMiddleName(
-                      event.target.value
-                    )
-                  }
+                  onChange={(event) => setMiddleName(event.target.value)}
                   placeholder="Middle name"
                   className={inputClass}
                 />
@@ -492,11 +371,7 @@ export default function NewStudentPage() {
               <Field label="Last Name">
                 <input
                   value={lastName}
-                  onChange={(event) =>
-                    setLastName(
-                      event.target.value
-                    )
-                  }
+                  onChange={(event) => setLastName(event.target.value)}
                   placeholder="Last name"
                   className={inputClass}
                 />
@@ -506,28 +381,14 @@ export default function NewStudentPage() {
                 <select
                   value={gender}
                   onChange={(event) =>
-                    setGender(
-                      event.target
-                        .value as Gender | ""
-                    )
+                    setGender(event.target.value as Gender | "")
                   }
                   className={inputClass}
                 >
-                  <option value="">
-                    Select gender
-                  </option>
-
-                  <option value="male">
-                    Male
-                  </option>
-
-                  <option value="female">
-                    Female
-                  </option>
-
-                  <option value="other">
-                    Other
-                  </option>
+                  <option value="">Select gender</option>
+                  <option value="male">Male</option>
+                  <option value="female">Female</option>
+                  <option value="other">Other</option>
                 </select>
               </Field>
 
@@ -535,11 +396,7 @@ export default function NewStudentPage() {
                 <input
                   type="date"
                   value={dateOfBirth}
-                  onChange={(event) =>
-                    setDateOfBirth(
-                      event.target.value
-                    )
-                  }
+                  onChange={(event) => setDateOfBirth(event.target.value)}
                   className={inputClass}
                 />
               </Field>
@@ -548,11 +405,7 @@ export default function NewStudentPage() {
                 <input
                   type="date"
                   value={admissionDate}
-                  onChange={(event) =>
-                    setAdmissionDate(
-                      event.target.value
-                    )
-                  }
+                  onChange={(event) => setAdmissionDate(event.target.value)}
                   className={inputClass}
                 />
               </Field>
@@ -561,150 +414,121 @@ export default function NewStudentPage() {
                 <select
                   value={status}
                   onChange={(event) =>
-                    setStatus(
-                      event.target
-                        .value as StudentStatus
-                    )
+                    setStatus(event.target.value as StudentStatus)
                   }
                   className={inputClass}
                 >
-                  <option value="active">
-                    Active
-                  </option>
-
-                  <option value="inactive">
-                    Inactive
-                  </option>
-
-                  <option value="transferred">
-                    Transferred
-                  </option>
-
-                  <option value="completed">
-                    Completed
-                  </option>
-
-                  <option value="alumni">
-                    Alumni
-                  </option>
+                  <option value="active">Active</option>
+                  <option value="inactive">Inactive</option>
+                  <option value="transferred">Transferred</option>
+                  <option value="completed">Completed</option>
+                  <option value="alumni">Alumni</option>
                 </select>
               </Field>
 
               <Field label="Blood Group">
                 <input
                   value={bloodGroup}
-                  onChange={(event) =>
-                    setBloodGroup(
-                      event.target.value
-                    )
-                  }
+                  onChange={(event) => setBloodGroup(event.target.value)}
                   placeholder="A+"
                   className={inputClass}
                 />
               </Field>
+            </div>
+          </section>
 
-              {/* CLASS */}
+          <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+            <h2 className="text-lg font-bold text-slate-900">
+              Academic Placement
+            </h2>
 
-              <Field label="Class">
+            <p className="mt-1 text-sm text-slate-500">
+              Select the academic year, class and section for this student.
+            </p>
+
+            <div className="mt-5 grid gap-5 md:grid-cols-3">
+              <Field label="Academic Year" required>
                 <select
-                  value={classId}
-                  onChange={(event) =>
-                    handleClassChange(
-                      event.target.value
-                    )
-                  }
-                  disabled={
-                    classesLoading ||
-                    loading
-                  }
+                  value={academicYearId}
+                  onChange={(event) => setAcademicYearId(event.target.value)}
+                  disabled={academicYearsLoading || loading}
+                  required
                   className={inputClass}
                 >
                   <option value="">
-                    {classesLoading
-                      ? "Loading classes..."
-                      : "Select class"}
+                    {academicYearsLoading
+                      ? "Loading academic years..."
+                      : academicYears.length === 0
+                        ? "No academic years"
+                        : "Select academic year"}
                   </option>
 
-                  {classes.map(
-                    (schoolClass) => (
-                      <option
-                        key={
-                          schoolClass.id
-                        }
-                        value={
-                          schoolClass.id
-                        }
-                      >
-                        {schoolClass.name}
-                      </option>
-                    )
-                  )}
+                  {academicYears.map((year) => (
+                    <option key={year.id} value={year.id}>
+                      {year.name}
+                      {year.is_current ? " (Current)" : ""}
+                    </option>
+                  ))}
                 </select>
               </Field>
 
-              {/* SECTION */}
+              <Field label="Class" required>
+                <select
+                  value={classId}
+                  onChange={(event) => void handleClassChange(event.target.value)}
+                  disabled={classesLoading || loading}
+                  required
+                  className={inputClass}
+                >
+                  <option value="">
+                    {classesLoading ? "Loading classes..." : "Select class"}
+                  </option>
 
-              <Field label="Section">
+                  {classes.map((schoolClass) => (
+                    <option key={schoolClass.id} value={schoolClass.id}>
+                      {schoolClass.name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+
+              <Field label="Section" required>
                 <select
                   value={sectionId}
-                  onChange={(event) =>
-                    setSectionId(
-                      event.target.value
-                    )
-                  }
-                  disabled={
-                    !classId ||
-                    sectionsLoading ||
-                    loading
-                  }
+                  onChange={(event) => setSectionId(event.target.value)}
+                  disabled={!classId || sectionsLoading || loading}
+                  required
                   className={inputClass}
                 >
                   <option value="">
                     {!classId
                       ? "Select class first"
                       : sectionsLoading
-                      ? "Loading sections..."
-                      : sections.length ===
-                        0
-                      ? "No sections"
-                      : "Select section"}
+                        ? "Loading sections..."
+                        : sections.length === 0
+                          ? "No sections"
+                          : "Select section"}
                   </option>
 
-                  {sections.map(
-                    (section) => (
-                      <option
-                        key={section.id}
-                        value={section.id}
-                      >
-                        {section.name}
-                      </option>
-                    )
-                  )}
+                  {sections.map((section) => (
+                    <option key={section.id} value={section.id}>
+                      {section.name}
+                    </option>
+                  ))}
                 </select>
               </Field>
-
             </div>
           </section>
 
-          {/* ADDRESS */}
-
           <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-
-            <h2 className="text-lg font-bold text-slate-900">
-              Address
-            </h2>
+            <h2 className="text-lg font-bold text-slate-900">Address</h2>
 
             <div className="mt-5 grid gap-5 md:grid-cols-2">
-
               <div className="md:col-span-2">
                 <Field label="Address">
                   <textarea
                     value={address}
-                    onChange={(event) =>
-                      setAddress(
-                        event.target.value
-                      )
-                    }
+                    onChange={(event) => setAddress(event.target.value)}
                     rows={3}
                     placeholder="Full address"
                     className={inputClass}
@@ -715,11 +539,7 @@ export default function NewStudentPage() {
               <Field label="City">
                 <input
                   value={city}
-                  onChange={(event) =>
-                    setCity(
-                      event.target.value
-                    )
-                  }
+                  onChange={(event) => setCity(event.target.value)}
                   placeholder="City"
                   className={inputClass}
                 />
@@ -728,11 +548,7 @@ export default function NewStudentPage() {
               <Field label="State">
                 <input
                   value={state}
-                  onChange={(event) =>
-                    setState(
-                      event.target.value
-                    )
-                  }
+                  onChange={(event) => setState(event.target.value)}
                   placeholder="State"
                   className={inputClass}
                 />
@@ -741,47 +557,29 @@ export default function NewStudentPage() {
               <Field label="Postal Code">
                 <input
                   value={postalCode}
-                  onChange={(event) =>
-                    setPostalCode(
-                      event.target.value
-                    )
-                  }
+                  onChange={(event) => setPostalCode(event.target.value)}
                   placeholder="Postal code"
                   className={inputClass}
                 />
               </Field>
-
             </div>
           </section>
 
-          {/* NOTES */}
-
           <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-
-            <h2 className="text-lg font-bold text-slate-900">
-              Notes
-            </h2>
+            <h2 className="text-lg font-bold text-slate-900">Notes</h2>
 
             <div className="mt-5">
               <textarea
                 value={notes}
-                onChange={(event) =>
-                  setNotes(
-                    event.target.value
-                  )
-                }
+                onChange={(event) => setNotes(event.target.value)}
                 rows={4}
                 placeholder="Additional notes..."
                 className={inputClass}
               />
             </div>
-
           </section>
 
-          {/* ACTIONS */}
-
           <div className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
-
             <Link
               href="/dashboard/students"
               className="rounded-xl border border-slate-300 bg-white px-5 py-3 text-center text-sm font-semibold text-slate-700 hover:bg-slate-50"
@@ -794,13 +592,9 @@ export default function NewStudentPage() {
               disabled={loading}
               className="rounded-xl bg-blue-600 px-6 py-3 text-sm font-semibold text-white shadow-sm hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-400"
             >
-              {loading
-                ? "Saving..."
-                : "Save Student"}
+              {loading ? "Saving..." : "Save Student"}
             </button>
-
           </div>
-
         </form>
       </div>
     </div>
@@ -823,14 +617,8 @@ function Field({
     <div>
       <label className="mb-2 block text-sm font-semibold text-slate-700">
         {label}
-
-        {required && (
-          <span className="ml-1 text-red-500">
-            *
-          </span>
-        )}
+        {required && <span className="ml-1 text-red-500">*</span>}
       </label>
-
       {children}
     </div>
   );

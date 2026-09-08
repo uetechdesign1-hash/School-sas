@@ -1303,7 +1303,7 @@ export default function BankReconciliationPage() {
             Loading Bank Reconciliation...
           </div>
         )}
-      </main>
+</main>
     </>
   );
 }

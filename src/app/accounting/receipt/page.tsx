@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import Link from "next/link";
+import { AccountingExportActions } from "../accounting-export";
 import {
   ArrowLeft,
   CheckCircle2,
@@ -68,10 +69,22 @@ type Student = {
   status: string;
 };
 
+type FeeConcession = {
+  id: string;
+  school_id: string;
+  student_id: string;
+  bill_id: string;
+  concession_type: string;
+  percentage: number | null;
+  amount: number;
+  reason: string | null;
+};
+
 type FeeBill = {
   id: string;
   school_id: string;
   student_id: string;
+  academic_year_id?: string | null;
   bill_number: string;
   bill_date: string;
   due_date: string | null;
@@ -95,6 +108,8 @@ type ReceiptHistoryRow = {
   amount: number;
   receipt_type: ReceiptType;
   reference_id: string | null;
+  student_id?: string | null;
+  manual_bill_number?: string | null;
 };
 
 type TransactionEntry = {
@@ -162,18 +177,23 @@ function getStudentName(student: Student) {
     .join(" ");
 }
 
+function getStudentClassName(student: Student, classes: ClassRow[]) {
+  return (
+    classes.find((item) => item.id === student.class_id)?.name ||
+    "Class not assigned"
+  );
+}
+
+function createSystemReceiptNumber(manualBillNumber: string) {
+  return `SYS-${manualBillNumber.trim().slice(0, 60)}-${Date.now()}`;
+}
+
 function paymentMethodLabel(value: string) {
   return (
     PAYMENT_METHODS.find((item) => item.value === value)?.label || value
   );
 }
 
-function generateReceiptNumber() {
-  return `RCP-${Date.now()}-${Math.random()
-    .toString(36)
-    .substring(2, 6)
-    .toUpperCase()}`;
-}
 
 export default function ReceiptPage() {
   const supabase = useMemo(() => createClient(), []);
@@ -193,6 +213,7 @@ export default function ReceiptPage() {
   const [paymentMethod, setPaymentMethod] = useState("cash");
   const [receiveIntoAccountId, setReceiveIntoAccountId] = useState("");
   const [amount, setAmount] = useState("");
+  const [manualBillNumber, setManualBillNumber] = useState("");
 
   const [classes, setClasses] = useState<ClassRow[]>([]);
   const [selectedClassId, setSelectedClassId] = useState("");
@@ -204,7 +225,11 @@ export default function ReceiptPage() {
   const [selectedStudentId, setSelectedStudentId] = useState("");
 
   const [feeBills, setFeeBills] = useState<FeeBill[]>([]);
+  const [concessionsByBillId, setConcessionsByBillId] = useState<Record<string, number>>({});
   const [selectedBillId, setSelectedBillId] = useState("");
+  const [feeManagementName, setFeeManagementName] = useState("");
+  const [feeManagementAcademicYear, setFeeManagementAcademicYear] = useState("");
+  const [feeManagementAmount, setFeeManagementAmount] = useState(0);
 
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [incomeAccountId, setIncomeAccountId] = useState("");
@@ -216,6 +241,10 @@ export default function ReceiptPage() {
   const [notes, setNotes] = useState("");
 
   const [history, setHistory] = useState<ReceiptHistoryRow[]>([]);
+  const [historySearch, setHistorySearch] = useState("");
+  const [historyType, setHistoryType] = useState<"all" | ReceiptType>("all");
+  const [historyFromDate, setHistoryFromDate] = useState("");
+  const [historyToDate, setHistoryToDate] = useState("");
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [viewingId, setViewingId] = useState<string | null>(null);
@@ -272,6 +301,58 @@ export default function ReceiptPage() {
       feeBills.find((item) => item.id === selectedBillId) || null,
     [feeBills, selectedBillId]
   );
+
+  const selectedBillConcession = useMemo(
+    () => (selectedBillId ? Number(concessionsByBillId[selectedBillId] || 0) : 0),
+    [concessionsByBillId, selectedBillId]
+  );
+
+  const selectedBillNetFee = useMemo(
+    () =>
+      selectedBill
+        ? Math.max(0, Number(selectedBill.total_amount || 0))
+        : 0,
+    [selectedBill]
+  );
+
+  const filteredHistory = useMemo(() => {
+    const query = historySearch.trim().toLowerCase();
+
+    return history.filter((receipt) => {
+      if (historyType !== "all" && receipt.receipt_type !== historyType) {
+        return false;
+      }
+
+      if (historyFromDate && receipt.transaction_date < historyFromDate) {
+        return false;
+      }
+
+      if (historyToDate && receipt.transaction_date > historyToDate) {
+        return false;
+      }
+
+      if (!query) return true;
+
+      const student = receipt.student_id
+        ? students.find((item) => item.id === receipt.student_id)
+        : null;
+
+      return [
+        receipt.manual_bill_number,
+        receipt.description,
+        student ? getStudentName(student) : "",
+        student ? getStudentClassName(student, classes) : "",
+      ].some((value) => value?.toLowerCase().includes(query));
+    });
+  }, [
+    classes,
+    history,
+    historyFromDate,
+    historySearch,
+    historyToDate,
+    historyType,
+    students,
+  ]);
 
   const cashBankAccounts = useMemo(
     () =>
@@ -430,172 +511,383 @@ export default function ReceiptPage() {
   async function loadStudentBills(studentId: string) {
     if (!schoolId || !studentId) {
       setFeeBills([]);
+      setConcessionsByBillId({});
       setSelectedBillId("");
+      setFeeManagementName("");
+      setFeeManagementAcademicYear("");
+      setFeeManagementAmount(0);
       return;
     }
 
     try {
       setLoadingBills(true);
+      setError("");
 
-      const { data, error } = await supabase
-        .from("fee_bills")
-        .select(
-          `
-            id,
-            school_id,
-            student_id,
-            bill_number,
-            bill_date,
-            due_date,
-            status,
-            subtotal,
-            discount,
-            late_fee,
-            total_amount,
-            paid_amount,
-            balance_amount,
-            notes
-          `
-        )
+      /*
+       * FEE MANAGEMENT IS THE SOURCE OF TRUTH.
+       *
+       * For a new Student Fee receipt we do NOT show every historical
+       * fee_bills row. We first resolve:
+       *   1. the school's current academic year
+       *   2. the active Fee Management structure for the student's class
+       *   3. the fee bill directly linked to that structure
+       *
+       * Only the newest outstanding linked bill is shown.
+       * Old/duplicate/unrelated fee bills therefore disappear from this
+       * selector without deleting historical database records.
+       */
+
+      const { data: student, error: studentError } = await supabase
+        .from("students")
+        .select("id, school_id, class_id")
+        .eq("id", studentId)
         .eq("school_id", schoolId)
-        .eq("student_id", studentId)
-        .gt("balance_amount", 0)
-        .order("bill_date", { ascending: false });
+        .maybeSingle();
 
-      if (error) throw new Error(error.message);
+      if (studentError) throw new Error(studentError.message);
 
-      setFeeBills((data || []) as FeeBill[]);
+      if (!student) {
+        throw new Error("Selected student was not found in your school.");
+      }
+
+      if (!student.class_id) {
+        throw new Error(
+          "This student has no class assigned. Assign a class before collecting fees.",
+        );
+      }
+
+      const { data: academicYear, error: academicYearError } = await supabase
+        .from("academic_years")
+        .select("id, name, start_date, end_date, is_current")
+        .eq("school_id", schoolId)
+        .eq("is_current", true)
+        .order("start_date", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (academicYearError) {
+        throw new Error(
+          `Unable to load current academic year: ${academicYearError.message}`,
+        );
+      }
+
+      if (!academicYear) {
+        throw new Error(
+          "No current academic year is configured for this school.",
+        );
+      }
+
+      const { data: structure, error: structureError } = await supabase
+        .from("fee_structures")
+        .select("id, name, academic_year_id, class_id, active")
+        .eq("school_id", schoolId)
+        .eq("academic_year_id", academicYear.id)
+        .eq("class_id", student.class_id)
+        .eq("active", true)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (structureError) {
+        throw new Error(
+          `Unable to load Fee Management structure: ${structureError.message}`,
+        );
+      }
+
+      if (!structure) {
+        setFeeBills([]);
+        setConcessionsByBillId({});
+        setSelectedBillId("");
+        setFeeManagementName("");
+        setFeeManagementAcademicYear(academicYear.name);
+        setFeeManagementAmount(0);
+        throw new Error(
+          "No active Fee Management structure is assigned to this student's class for the current academic year.",
+        );
+      }
+
+      const { data: structureItems, error: structureItemsError } =
+        await supabase
+          .from("fee_structure_items")
+          .select("id, amount, mandatory")
+          .eq("school_id", schoolId)
+          .eq("fee_structure_id", structure.id);
+
+      if (structureItemsError) {
+        throw new Error(
+          `Unable to load Fee Management fee items: ${structureItemsError.message}`,
+        );
+      }
+
+      /*
+       * IMPORTANT:
+       * This must match Student Fees exactly.
+       * Mandatory Fee Management items are included automatically.
+       * Optional items are NOT included unless the student assignment
+       * explicitly selected them.
+       */
+      const mandatoryStructureAmount = (structureItems || [])
+        .filter((item) => Boolean(item.mandatory))
+        .reduce(
+          (total, item) => total + Math.max(Number(item.amount || 0), 0),
+          0,
+        );
+
+      /*
+       * Pending previous-year carry-forward is part of the student's
+       * current fee position in Student Fees.
+       */
+      const { data: pendingCarryForwards, error: carryForwardError } =
+        await supabase
+          .from("fee_carry_forwards")
+          .select("id, source_bill_id, to_academic_year_id, amount, status")
+          .eq("school_id", schoolId)
+          .eq("student_id", studentId)
+          .eq("to_academic_year_id", academicYear.id)
+          .eq("status", "pending");
+
+      if (carryForwardError) {
+        throw new Error(
+          `Unable to load previous-year carry-forward: ${carryForwardError.message}`,
+        );
+      }
+
+      const carryForwardAmount = (pendingCarryForwards || []).reduce(
+        (total, record) => total + Math.max(Number(record.amount || 0), 0),
+        0,
+      );
+
+      const currentFeeManagementAmount =
+        mandatoryStructureAmount + carryForwardAmount;
+
+      /*
+       * Direct linkage:
+       * fee_bill_items.fee_structure_id -> fee_structures.id
+       */
+      const { data: structureBillItems, error: structureBillItemsError } =
+        await supabase
+          .from("fee_bill_items")
+          .select("bill_id")
+          .eq("school_id", schoolId)
+          .eq("fee_structure_id", structure.id);
+
+      if (structureBillItemsError) {
+        throw new Error(
+          `Unable to link fee bills to Fee Management: ${structureBillItemsError.message}`,
+        );
+      }
+
+      const structureBillIds = Array.from(
+        new Set(
+          (structureBillItems || [])
+            .map((row) => row.bill_id as string)
+            .filter(Boolean),
+        ),
+      );
+
+      let bills: FeeBill[] = [];
+
+      if (structureBillIds.length > 0) {
+        const { data: billData, error: billError } = await supabase
+          .from("fee_bills")
+          .select(
+            `
+              id,
+              school_id,
+              student_id,
+              academic_year_id,
+              bill_number,
+              bill_date,
+              due_date,
+              status,
+              subtotal,
+              discount,
+              late_fee,
+              total_amount,
+              paid_amount,
+              balance_amount,
+              notes
+            `,
+          )
+          .eq("school_id", schoolId)
+          .eq("student_id", studentId)
+          .eq("academic_year_id", academicYear.id)
+          .in("id", structureBillIds)
+          .gt("balance_amount", 0)
+          .order("bill_date", { ascending: false })
+          .limit(1);
+
+        if (billError) throw new Error(billError.message);
+
+        bills = (billData || []) as FeeBill[];
+      }
+
+      setFeeBills(bills);
+      setFeeManagementName(structure.name);
+      setFeeManagementAcademicYear(academicYear.name);
+      setFeeManagementAmount(currentFeeManagementAmount);
+
+      const billIds = bills.map((bill) => bill.id);
+
+      if (billIds.length) {
+        const { data: concessions, error: concessionError } =
+          await supabase
+            .from("fee_concessions")
+            .select(
+              "id, school_id, student_id, bill_id, concession_type, percentage, amount, reason",
+            )
+            .eq("school_id", schoolId)
+            .eq("student_id", studentId)
+            .in("bill_id", billIds);
+
+        if (concessionError) {
+          throw new Error(concessionError.message);
+        }
+
+        const totals: Record<string, number> = {};
+        ((concessions || []) as FeeConcession[]).forEach((item) => {
+          totals[item.bill_id] =
+            (totals[item.bill_id] || 0) + Number(item.amount || 0);
+        });
+
+        setConcessionsByBillId(totals);
+      } else {
+        setConcessionsByBillId({});
+      }
+
       setSelectedBillId("");
       setAmount("");
     } catch (err: any) {
-      setError(err?.message || "Unable to load fee bills.");
+      setFeeBills([]);
+      setConcessionsByBillId({});
+      setSelectedBillId("");
+      setAmount("");
+      setError(err?.message || "Unable to load Fee Management fees.");
     } finally {
       setLoadingBills(false);
     }
   }
 
   async function loadHistory(currentSchoolId: string) {
-    const { data: transactions, error: transactionError } =
-      await supabase
-        .from("transactions")
-        .select(
-          `
-            id,
-            transaction_number,
-            transaction_date,
-            description,
-            reference_type,
-            reference_id
-          `
-        )
-        .eq("school_id", currentSchoolId)
-        .in("reference_type", [
-          "fee_payment",
-          "accounting_receipt",
-        ])
-        .order("created_at", { ascending: false })
-        .limit(100);
+    const { data, error } = await supabase.rpc("get_receipt_history", {
+      p_school_id: currentSchoolId,
+    });
 
-    if (transactionError) {
-      throw new Error(transactionError.message);
-    }
+    if (error) throw new Error(error.message);
 
-    if (!transactions?.length) {
-      setHistory([]);
+    const receiptHistory = (data || []) as ReceiptHistoryRow[];
+    const paymentIds = receiptHistory
+      .filter(
+        (receipt) =>
+          receipt.receipt_type === "student_fee" && receipt.reference_id
+      )
+      .map((receipt) => receipt.reference_id as string);
+
+    if (!paymentIds.length) {
+      setHistory(receiptHistory);
       return;
     }
 
-    const transactionIds = transactions.map((item) => item.id);
+    const { data: payments, error: paymentError } = await supabase
+      .from("fee_payments")
+      .select("id, student_id, bill_id")
+      .eq("school_id", currentSchoolId)
+      .in("id", paymentIds);
 
-    const { data: entries, error: entriesError } =
-      await supabase
-        .from("transaction_entries")
-        .select(
-          `
-            id,
-            transaction_id,
-            account_id,
-            debit,
-            credit,
-            description
-          `
-        )
-        .eq("school_id", currentSchoolId)
-        .in("transaction_id", transactionIds);
+    if (paymentError) throw new Error(paymentError.message);
 
-    if (entriesError) throw new Error(entriesError.message);
-
-    const accountIds = Array.from(
-      new Set((entries || []).map((entry) => entry.account_id))
+    const paymentById = new Map(
+      (payments || []).map((payment) => [payment.id, payment])
     );
+    const billIds = (payments || [])
+      .map((payment) => payment.bill_id)
+      .filter((billId): billId is string => Boolean(billId));
 
-    let entryAccounts: Account[] = [];
+    const billById = new Map<string, { bill_number: string }>();
 
-    if (accountIds.length) {
-      const { data, error } = await supabase
-        .from("accounts")
-        .select(
-          `
-            id,
-            school_id,
-            code,
-            name,
-            account_type,
-            opening_balance,
-            is_system,
-            is_active
-          `
-        )
+    if (billIds.length) {
+      const { data: bills, error: billError } = await supabase
+        .from("fee_bills")
+        .select("id, bill_number")
         .eq("school_id", currentSchoolId)
-        .in("id", accountIds);
+        .in("id", billIds);
 
-      if (error) throw new Error(error.message);
+      if (billError) throw new Error(billError.message);
 
-      entryAccounts = (data || []) as Account[];
+      (bills || []).forEach((bill) => {
+        billById.set(bill.id, bill);
+      });
     }
 
-    const accountMap = new Map<string, Account>();
+    setHistory(
+      receiptHistory.map((receipt) => {
+        const payment = receipt.reference_id
+          ? paymentById.get(receipt.reference_id)
+          : undefined;
 
-    entryAccounts.forEach((account) => {
-      accountMap.set(account.id, account);
+        return {
+          ...receipt,
+          student_id: payment?.student_id || null,
+          manual_bill_number: payment?.bill_id
+            ? billById.get(payment.bill_id)?.bill_number || null
+            : null,
+        };
+      })
+    );
+  }
+
+  function downloadReceiptHistory() {
+    if (!filteredHistory.length) return;
+
+    const escapeCsv = (value: string | number | null | undefined) =>
+      `"${String(value ?? "").replace(/"/g, '""')}"`;
+
+    const rows = filteredHistory.map((receipt) => {
+      const student = receipt.student_id
+        ? students.find((item) => item.id === receipt.student_id)
+        : null;
+
+      return [
+        receipt.transaction_date,
+        receipt.receipt_type === "student_fee" ? "Student Fee" : "Other Income",
+        receipt.manual_bill_number || "",
+        student ? getStudentName(student) : "",
+        student ? getStudentClassName(student, classes) : "",
+        receipt.debit_account,
+        receipt.credit_account,
+        receipt.description,
+        Number(receipt.amount || 0).toFixed(2),
+      ];
     });
 
-    const result = transactions.map((transaction) => {
-      const transactionEntries = (entries || []).filter(
-        (entry) => entry.transaction_id === transaction.id
-      );
+    const csv = [
+      [
+        "Date",
+        "Type",
+        "Manual Bill Number",
+        "Student",
+        "Class",
+        "Debit Account",
+        "Credit Account",
+        "Description",
+        "Amount",
+      ],
+      ...rows,
+    ]
+      .map((row) => row.map(escapeCsv).join(","))
+      .join("\n");
 
-      const debitEntry = transactionEntries.find(
-        (entry) => Number(entry.debit || 0) > 0
-      );
+    const url = URL.createObjectURL(
+      new Blob([csv], { type: "text/csv;charset=utf-8;" })
+    );
+    const link = document.createElement("a");
 
-      const creditEntry = transactionEntries.find(
-        (entry) => Number(entry.credit || 0) > 0
-      );
-
-      return {
-        id: transaction.id,
-        transaction_number: transaction.transaction_number,
-        transaction_date: transaction.transaction_date,
-        description: transaction.description,
-        debit_account:
-          accountMap.get(debitEntry?.account_id || "")?.name ||
-          "Unknown",
-        credit_account:
-          accountMap.get(creditEntry?.account_id || "")?.name ||
-          "Unknown",
-        amount: Number(
-          debitEntry?.debit || creditEntry?.credit || 0
-        ),
-        receipt_type:
-          transaction.reference_type === "fee_payment"
-            ? "student_fee"
-            : "other_income",
-        reference_id: transaction.reference_id,
-      } as ReceiptHistoryRow;
-    });
-
-    setHistory(result);
+    link.href = url;
+    link.download = `receipt-history-${today()}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   }
 
   async function loadPage() {
@@ -654,12 +946,17 @@ export default function ReceiptPage() {
     setSelectedBillId("");
 
     setFeeBills([]);
+    setConcessionsByBillId({});
+    setFeeManagementName("");
+    setFeeManagementAcademicYear("");
+    setFeeManagementAmount(0);
 
     setAmount("");
+    setManualBillNumber("");
     setReceivedFrom("");
     setParticulars("");
     setReferenceNumber("");
-    setNotes("");
+
 
     setEditingId(null);
     setViewingId(null);
@@ -678,8 +975,13 @@ export default function ReceiptPage() {
     setSelectedStudentId("");
     setSelectedBillId("");
     setFeeBills([]);
+    setConcessionsByBillId({});
+    setFeeManagementName("");
+    setFeeManagementAcademicYear("");
+    setFeeManagementAmount(0);
 
     setAmount("");
+    setManualBillNumber("");
     setReceivedFrom("");
     setParticulars("");
     setReferenceNumber("");
@@ -704,6 +1006,7 @@ export default function ReceiptPage() {
     setSelectedStudentId("");
     setSelectedBillId("");
     setFeeBills([]);
+    setConcessionsByBillId({});
     setAmount("");
   }
 
@@ -712,6 +1015,7 @@ export default function ReceiptPage() {
     setSelectedStudentId("");
     setSelectedBillId("");
     setFeeBills([]);
+    setConcessionsByBillId({});
     setAmount("");
   }
 
@@ -721,16 +1025,6 @@ export default function ReceiptPage() {
     setAmount("");
 
     await loadStudentBills(studentId);
-  }
-
-  function handleBillChange(billId: string) {
-    setSelectedBillId(billId);
-
-    const bill = feeBills.find((item) => item.id === billId);
-
-    if (bill) {
-      setAmount(Number(bill.balance_amount).toFixed(2));
-    }
   }
 
   function changePaymentMethod(method: string) {
@@ -876,58 +1170,34 @@ export default function ReceiptPage() {
       setSuccess("");
       setSaving(true);
 
-      if (!schoolId) throw new Error("School could not be determined.");
-
-      const transaction = await getTransaction(row.id);
-      const entries = await getTransactionEntries(row.id);
-
-      const debitEntry = entries.find(
-        (entry) => Number(entry.debit || 0) > 0
-      );
-
-      const creditEntry = entries.find(
-        (entry) => Number(entry.credit || 0) > 0
-      );
+      if (!schoolId) {
+        throw new Error("School could not be determined.");
+      }
 
       setEditingId(row.id);
       setViewingId(null);
 
-      setReceiptDate(transaction.transaction_date);
-      setAmount(
-        Number(
-          debitEntry?.debit ||
-            creditEntry?.credit ||
-            row.amount ||
-            0
-        ).toFixed(2)
-      );
-
-      setReceiveIntoAccountId(
-        debitEntry?.account_id || ""
-      );
-
-      setIncomeAccountId(
-        creditEntry?.account_id || ""
-      );
-
-      if (transaction.reference_type === "fee_payment") {
-        setReceiptType("student_fee");
-
-        if (!transaction.reference_id) {
-          throw new Error(
-            "Fee transaction has no payment reference."
-          );
+      /*
+       * Student Fee receipts are canonical fee_payments.
+       * Do NOT look them up in transactions: canonical receipts
+       * may have no legacy transactions row.
+       */
+      if (row.receipt_type === "student_fee") {
+        if (!row.reference_id) {
+          throw new Error("Student fee receipt has no payment reference.");
         }
 
-        const payment = await getPayment(
-          transaction.reference_id
-        );
+        const payment = await getPayment(row.reference_id);
 
         if (!payment) {
           throw new Error("Fee payment could not be found.");
         }
 
+        setReceiptType("student_fee");
+        setReceiptDate(payment.payment_date);
+        setAmount(Number(payment.amount || 0).toFixed(2));
         setPaymentMethod(payment.payment_method);
+        setReceiveIntoAccountId(payment.account_id || receiveIntoAccountId);
         setReferenceNumber(payment.reference_number || "");
         setNotes(payment.notes || "");
 
@@ -943,60 +1213,108 @@ export default function ReceiptPage() {
           setSelectedSectionId(student.section_id || "");
         }
 
-        if (payment.student_id) {
-          const { data: bills, error: billsError } =
-            await supabase
-              .from("fee_bills")
-              .select(
-                `
-                  id,
-                  school_id,
-                  student_id,
-                  bill_number,
-                  bill_date,
-                  due_date,
-                  status,
-                  subtotal,
-                  discount,
-                  late_fee,
-                  total_amount,
-                  paid_amount,
-                  balance_amount,
-                  notes
-                `
-              )
-              .eq("school_id", schoolId)
-              .eq("student_id", payment.student_id)
-              .order("bill_date", { ascending: false });
+        if (payment.student_id && payment.bill_id) {
+          /*
+           * EDIT MODE:
+           * Never load every historical bill for the student.
+           * The receipt must be tied to the exact bill that this payment
+           * originally paid. Loading all bills was the reason the edit form
+           * displayed the old combined outstanding amount (for example
+           * ₹46,200).
+           *
+           * New receipts use the current Fee Management structure in
+           * loadStudentBills(). Existing receipts use their original bill
+           * so historical accounting remains correct.
+           */
+          const { data: linkedBill, error: linkedBillError } = await supabase
+            .from("fee_bills")
+            .select(
+              `
+                id,
+                school_id,
+                student_id,
+                academic_year_id,
+                bill_number,
+                bill_date,
+                due_date,
+                status,
+                subtotal,
+                discount,
+                late_fee,
+                total_amount,
+                paid_amount,
+                balance_amount,
+                notes
+              `
+            )
+            .eq("school_id", schoolId)
+            .eq("student_id", payment.student_id)
+            .eq("id", payment.bill_id)
+            .maybeSingle();
 
-          if (billsError) {
-            throw new Error(billsError.message);
+          if (linkedBillError) {
+            throw new Error(linkedBillError.message);
           }
 
-          setFeeBills((bills || []) as FeeBill[]);
+          setFeeBills(linkedBill ? [linkedBill as FeeBill] : []);
+          setManualBillNumber(linkedBill?.bill_number || "");
+        } else {
+          setManualBillNumber("");
+          /*
+           * A legacy Student Fee receipt without bill_id has no safe bill
+           * linkage. Do not guess by loading all of the student's bills.
+           */
+          setFeeBills([]);
         }
-      } else {
-        setReceiptType("other_income");
 
-        const description = transaction.description || "";
-
-        const receivedMarker = " - received from ";
-        const receivedIndex = description.indexOf(
-          receivedMarker
+        const feeIncome = accounts.find(
+          (account) =>
+            account.account_type === "income" &&
+            account.name.toLowerCase() === "fee income"
         );
 
-        if (receivedIndex >= 0) {
-          setParticulars(
-            description.slice(0, receivedIndex).trim()
-          );
+        if (feeIncome) {
+          setIncomeAccountId(feeIncome.id);
+        }
+      } else {
+        /* Other Income continues to use the existing transactions ledger. */
+        const transaction = await getTransaction(row.id);
+        const entries = await getTransactionEntries(row.id);
 
-          let receivedText = description.slice(
+        const debitEntry = entries.find(
+          (entry) => Number(entry.debit || 0) > 0
+        );
+
+        const creditEntry = entries.find(
+          (entry) => Number(entry.credit || 0) > 0
+        );
+
+        setReceiptType("other_income");
+        setReceiptDate(transaction.transaction_date);
+        setAmount(
+          Number(
+            debitEntry?.debit ||
+              creditEntry?.credit ||
+              row.amount ||
+              0
+          ).toFixed(2)
+        );
+
+        setReceiveIntoAccountId(debitEntry?.account_id || "");
+        setIncomeAccountId(creditEntry?.account_id || "");
+
+        const description = transaction.description || "";
+        const receivedMarker = " - received from ";
+        const receivedIndex = description.indexOf(receivedMarker);
+
+        if (receivedIndex >= 0) {
+          setParticulars(description.slice(0, receivedIndex).trim());
+
+          const receivedText = description.slice(
             receivedIndex + receivedMarker.length
           );
 
-          const referenceIndex = receivedText.indexOf(
-            " | Reference:"
-          );
+          const referenceIndex = receivedText.indexOf(" | Reference:");
 
           if (referenceIndex >= 0) {
             setReceivedFrom(
@@ -1024,6 +1342,7 @@ export default function ReceiptPage() {
         setSelectedStudentId("");
         setSelectedBillId("");
         setFeeBills([]);
+        setConcessionsByBillId({});
       }
 
       window.scrollTo({
@@ -1033,6 +1352,7 @@ export default function ReceiptPage() {
     } catch (err: any) {
       console.error("EDIT RECEIPT ERROR:", err);
 
+      setEditingId(null);
       setError(
         err?.message || "Unable to load receipt for editing."
       );
@@ -1097,27 +1417,38 @@ export default function ReceiptPage() {
       return false;
     }
 
-    if (!selectedBillId) {
-      setError("Select the Fee Bill.");
-      return false;
-    }
-
     if (!selectedStudent) {
       setError("Selected student was not found.");
       return false;
     }
 
-    if (!selectedBill) {
-      setError("Selected fee bill was not found.");
+    if (!feeManagementName) {
+      setError("Fee Management fee could not be loaded for this student.");
       return false;
     }
 
-    const outstanding = Number(selectedBill.balance_amount);
+    if (!manualBillNumber.trim()) {
+      setError("Enter the manual Bill Number.");
+      return false;
+    }
 
-    if (numericAmount > outstanding + 0.005) {
+    /*
+     * Fee Management is the source of truth for the current fee.
+     * Do not require the user to select an existing fee_bill.
+     */
+    const feeManagementOutstanding = feeBills[0]
+      ? Number(feeBills[0].balance_amount || 0)
+      : Number(feeManagementAmount || 0);
+
+    if (!Number.isFinite(feeManagementOutstanding) || feeManagementOutstanding <= 0) {
+      setError("No outstanding Fee Management amount is available for this student.");
+      return false;
+    }
+
+    if (numericAmount > feeManagementOutstanding + 0.005) {
       setError(
-        `Payment cannot exceed outstanding balance ${money(
-          outstanding
+        `Payment cannot exceed Fee Management outstanding ${money(
+          feeManagementOutstanding
         )}.`
       );
       return false;
@@ -1197,6 +1528,7 @@ export default function ReceiptPage() {
     let createdTransactionId: string | null = null;
     let createdPaymentId: string | null = null;
     let createdReceiptId: string | null = null;
+    let paymentId: string | null = null;
 
     try {
       const {
@@ -1225,66 +1557,189 @@ export default function ReceiptPage() {
       let description = "";
 
       if (receiptType === "student_fee") {
-        description =
-          `Fee collection from ${getStudentName(
-            selectedStudent!
-          )} - ${selectedBill!.bill_number}`;
-      } else {
-        description =
-          `${particulars.trim()} - received from ${receivedFrom.trim()}`;
-      }
+        /*
+         * Fee Management is the source of truth. The user supplies the
+         * physical/manual Bill Number.
+         *
+         * If a current Fee Management-linked bill already exists, reuse it
+         * and update its bill number to the manual number. If no linked bill
+         * exists, create one from the current Fee Management amount.
+         */
+        let bill = feeBills[0] || null;
 
-      if (referenceNumber.trim()) {
-        description +=
-          ` | Reference: ${referenceNumber.trim()}`;
-      }
+        if (bill) {
+          const { data: updatedBill, error: billUpdateError } = await supabase
+            .from("fee_bills")
+            .update({
+              bill_number: manualBillNumber.trim(),
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", bill.id)
+            .eq("school_id", schoolId)
+            .select(
+              `
+                id,
+                school_id,
+                student_id,
+                academic_year_id,
+                bill_number,
+                bill_date,
+                due_date,
+                status,
+                subtotal,
+                discount,
+                late_fee,
+                total_amount,
+                paid_amount,
+                balance_amount,
+                notes
+              `
+            )
+            .single();
 
-      let paymentId: string | null = null;
+          if (billUpdateError) {
+            throw new Error(`Unable to update fee bill number: ${billUpdateError.message}`);
+          }
 
-      if (receiptType === "student_fee") {
-        const receiptNumber = generateReceiptNumber();
+          bill = updatedBill as FeeBill;
+        } else {
+          const { data: currentAcademicYear, error: academicYearError } =
+            await supabase
+              .from("academic_years")
+              .select("id")
+              .eq("school_id", schoolId)
+              .eq("is_current", true)
+              .order("start_date", { ascending: false })
+              .limit(1)
+              .maybeSingle();
 
-        const { data: payment, error: paymentError } =
-          await supabase
-            .from("fee_payments")
+          if (academicYearError) {
+            throw new Error(`Unable to load current academic year: ${academicYearError.message}`);
+          }
+
+          if (!currentAcademicYear) {
+            throw new Error("No current academic year is configured.");
+          }
+
+          const feeAmount = Number(feeManagementAmount || 0);
+
+          if (feeAmount <= 0) {
+            throw new Error("Fee Management amount is zero.");
+          }
+
+          const { data: newBill, error: newBillError } = await supabase
+            .from("fee_bills")
             .insert({
               school_id: schoolId,
               student_id: selectedStudentId,
-              receipt_number: receiptNumber,
-              payment_date: receiptDate,
-              amount: numericAmount,
-              payment_method: paymentMethod,
-              account_id: receiveIntoAccountId,
-              reference_number:
-                referenceNumber.trim() || null,
-              notes: notes.trim() || null,
-              received_by: userId,
-              receipt_generated: true,
-              bill_id: selectedBillId,
+              academic_year_id: currentAcademicYear.id,
+              bill_number: manualBillNumber.trim(),
+              bill_date: receiptDate,
+              due_date: null,
+              status: "unpaid",
+              subtotal: feeAmount,
+              discount: 0,
+              late_fee: 0,
+              total_amount: feeAmount,
+              paid_amount: 0,
+              balance_amount: feeAmount,
+              notes: `Created from Fee Management: ${feeManagementName}`,
+              created_by: userId,
             })
             .select(
               `
                 id,
                 school_id,
                 student_id,
-                receipt_number,
-                payment_date,
-                amount,
-                payment_method,
-                account_id,
-                reference_number,
-                notes,
-                received_by,
-                receipt_generated,
-                bill_id
+                academic_year_id,
+                bill_number,
+                bill_date,
+                due_date,
+                status,
+                subtotal,
+                discount,
+                late_fee,
+                total_amount,
+                paid_amount,
+                balance_amount,
+                notes
               `
             )
             .single();
 
+          if (newBillError) {
+            throw new Error(`Unable to create fee bill: ${newBillError.message}`);
+          }
+
+          bill = newBill as FeeBill;
+
+          const { error: billItemError } = await supabase
+            .from("fee_bill_items")
+            .insert({
+              school_id: schoolId,
+              bill_id: bill.id,
+              fee_structure_id: null,
+              description: `Fee Management - ${feeManagementName}`,
+              fee_type: "fee",
+              amount: feeAmount,
+              discount: 0,
+              net_amount: feeAmount,
+            });
+
+          if (billItemError) {
+            await supabase
+              .from("fee_bills")
+              .delete()
+              .eq("id", bill.id)
+              .eq("school_id", schoolId);
+
+            throw new Error(`Unable to create fee bill item: ${billItemError.message}`);
+          }
+        }
+
+        setSelectedBillId(bill.id);
+
+        const systemReceiptNumber = createSystemReceiptNumber(
+          manualBillNumber
+        );
+
+        const { data: payment, error: paymentError } = await supabase
+          .from("fee_payments")
+          .insert({
+            school_id: schoolId,
+            student_id: selectedStudentId,
+            receipt_number: systemReceiptNumber,
+            payment_date: receiptDate,
+            amount: numericAmount,
+            payment_method: paymentMethod,
+            account_id: receiveIntoAccountId,
+            reference_number: referenceNumber.trim() || null,
+            notes: notes.trim() || null,
+            received_by: userId,
+            receipt_generated: true,
+            bill_id: bill.id,
+          })
+          .select(
+            `
+              id,
+              school_id,
+              student_id,
+              receipt_number,
+              payment_date,
+              amount,
+              payment_method,
+              account_id,
+              reference_number,
+              notes,
+              received_by,
+              receipt_generated,
+              bill_id
+            `
+          )
+          .single();
+
         if (paymentError) {
-          throw new Error(
-            `Unable to record fee payment: ${paymentError.message}`
-          );
+          throw new Error(`Unable to record fee payment: ${paymentError.message}`);
         }
 
         if (!payment) {
@@ -1294,39 +1749,29 @@ export default function ReceiptPage() {
         createdPaymentId = payment.id;
         paymentId = payment.id;
 
-        const { data: receipt, error: receiptError } =
-          await supabase
-            .from("receipts")
-            .insert({
-              school_id: schoolId,
-              payment_id: payment.id,
-              receipt_number: receiptNumber,
-              pdf_storage_path: null,
-            })
-            .select("id")
-            .single();
+        const { data: receipt, error: receiptError } = await supabase
+          .from("receipts")
+          .insert({
+            school_id: schoolId,
+            payment_id: payment.id,
+            receipt_number: systemReceiptNumber,
+            pdf_storage_path: null,
+          })
+          .select("id")
+          .single();
 
         if (receiptError) {
-          throw new Error(
-            `Unable to create fee receipt: ${receiptError.message}`
-          );
+          throw new Error(`Unable to create fee receipt: ${receiptError.message}`);
         }
 
         createdReceiptId = receipt?.id || null;
 
-        const bill = selectedBill!;
-
         const oldPaid = Number(bill.paid_amount || 0);
         const oldBalance = Number(bill.balance_amount || 0);
-
         const newPaid = oldPaid + numericAmount;
-        const newBalance = Math.max(
-          0,
-          oldBalance - numericAmount
-        );
+        const newBalance = Math.max(0, oldBalance - numericAmount);
 
         let newStatus = "partial";
-
         if (newBalance <= 0.005) {
           newStatus = "paid";
         } else if (newPaid <= 0.005) {
@@ -1336,6 +1781,7 @@ export default function ReceiptPage() {
         const { error: billError } = await supabase
           .from("fee_bills")
           .update({
+            bill_number: manualBillNumber.trim(),
             paid_amount: newPaid,
             balance_amount: newBalance,
             status: newStatus,
@@ -1345,10 +1791,21 @@ export default function ReceiptPage() {
           .eq("school_id", schoolId);
 
         if (billError) {
-          throw new Error(
-            `Unable to update fee bill: ${billError.message}`
-          );
+          throw new Error(`Unable to update fee bill: ${billError.message}`);
         }
+
+        description =
+          `Fee collection from ${getStudentName(
+            selectedStudent!
+          )} - Bill ${manualBillNumber.trim()}`;
+      } else {
+        description =
+          `${particulars.trim()} - received from ${receivedFrom.trim()}`;
+      }
+
+      if (referenceNumber.trim()) {
+        description +=
+          ` | Reference: ${referenceNumber.trim()}`;
       }
 
       const { data: transaction, error: transactionError } =
@@ -1410,7 +1867,7 @@ export default function ReceiptPage() {
           credit: numericAmount,
           description:
             receiptType === "student_fee"
-              ? `Fee income - ${selectedBill!.bill_number}`
+              ? `Fee income - Bill ${manualBillNumber.trim()}`
               : `Income - ${particulars.trim()}`,
         },
       ];
@@ -1483,7 +1940,9 @@ export default function ReceiptPage() {
     setSelectedStudentId("");
     setSelectedBillId("");
     setFeeBills([]);
+    setConcessionsByBillId({});
     setAmount("");
+    setManualBillNumber("");
 
     setReceivedFrom("");
     setParticulars("");
@@ -1509,6 +1968,99 @@ export default function ReceiptPage() {
     setSaving(true);
 
     try {
+      /*
+       * Student Fee = canonical fee_payments.
+       * Use the dedicated RPC so payment, allocation, bill balance,
+       * receipt and canonical journal stay synchronized.
+       */
+      const editingRow = history.find((item) => item.id === editingId);
+
+      if (!editingRow) {
+        throw new Error("Receipt could not be found in receipt history.");
+      }
+
+      if (editingRow.receipt_type === "student_fee") {
+        if (!editingRow.reference_id) {
+          throw new Error("Student fee receipt has no payment reference.");
+        }
+
+        if (!selectedStudentId) {
+          throw new Error("Select Student.");
+        }
+
+        if (!manualBillNumber.trim()) {
+          throw new Error("Enter the manual Bill Number.");
+        }
+
+        const payment = await getPayment(editingRow.reference_id);
+
+        if (!payment) {
+          throw new Error("Fee payment could not be found.");
+        }
+
+        if (!receiveIntoAccountId) {
+          throw new Error("Select the Cash or Bank account receiving the money.");
+        }
+
+        const feeIncome = accounts.find(
+          (account) =>
+            account.account_type === "income" &&
+            account.name.toLowerCase() === "fee income"
+        );
+
+        if (!feeIncome) {
+          throw new Error("Fee Income account was not found.");
+        }
+
+        const { data, error: rpcError } = await supabase.rpc(
+          "update_fee_payment_receipt",
+          {
+            p_school_id: schoolId,
+            p_payment_id: payment.id,
+            p_amount: numericAmount,
+            p_payment_mode: paymentMethod,
+            p_account_id: receiveIntoAccountId,
+            p_payment_date: receiptDate,
+            p_reference_number: referenceNumber.trim() || null,
+            p_remarks: notes.trim() || null,
+          }
+        );
+
+        if (rpcError) {
+          throw new Error(rpcError.message);
+        }
+
+        if (data?.success === false) {
+          throw new Error(
+            data?.message || "Unable to update fee payment."
+          );
+        }
+
+        if (payment.bill_id) {
+          const { error: billNumberError } = await supabase
+            .from("fee_bills")
+            .update({
+              bill_number: manualBillNumber.trim(),
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", payment.bill_id)
+            .eq("school_id", schoolId);
+
+          if (billNumberError) {
+            throw new Error(
+              `Unable to update bill number: ${billNumberError.message}`
+            );
+          }
+        }
+
+        setSuccess("Fee receipt updated successfully.");
+
+        setEditingId(null);
+        await loadHistory(schoolId);
+        return;
+      }
+
+      /* Other Income keeps the existing transaction workflow. */
       const transaction = await getTransaction(editingId);
       const entries = await getTransactionEntries(editingId);
 
@@ -1521,268 +2073,26 @@ export default function ReceiptPage() {
       );
 
       if (!oldDebit || !oldCredit) {
-        throw new Error(
-          "Receipt accounting entries are incomplete."
-        );
+        throw new Error("Receipt accounting entries are incomplete.");
       }
 
-      const oldAmount = Number(
-        oldDebit.debit || oldCredit.credit || 0
+      if (!validateOtherIncome()) return;
+
+      const description =
+        `${particulars.trim()} - received from ${receivedFrom.trim()}${
+          referenceNumber.trim()
+            ? ` | Reference: ${referenceNumber.trim()}`
+            : ""
+        }`;
+
+      await updateTransactionAndEntries(
+        transaction.id,
+        description,
+        receiptDate,
+        receiveIntoAccountId,
+        incomeAccountId,
+        numericAmount
       );
-
-      const receiveAccount = accounts.find(
-        (account) => account.id === receiveIntoAccountId
-      );
-
-      const incomeAccount = accounts.find(
-        (account) => account.id === incomeAccountId
-      );
-
-      if (!receiveAccount || !incomeAccount) {
-        throw new Error(
-          "Receipt accounts could not be determined."
-        );
-      }
-
-      if (
-        transaction.reference_type === "fee_payment"
-      ) {
-        if (!transaction.reference_id) {
-          throw new Error(
-            "Fee transaction has no payment reference."
-          );
-        }
-
-        if (!selectedBillId || !selectedStudentId) {
-          throw new Error(
-            "Select Student and Fee Bill."
-          );
-        }
-
-        const payment = await getPayment(
-          transaction.reference_id
-        );
-
-        if (!payment) {
-          throw new Error("Fee payment could not be found.");
-        }
-
-        const oldBillId = payment.bill_id;
-
-        if (!oldBillId) {
-          throw new Error(
-            "Existing fee payment has no bill."
-          );
-        }
-
-        /*
-         * If the user changed the bill, restore the
-         * old bill first and apply the new payment
-         * to the new bill.
-         */
-        if (oldBillId !== selectedBillId) {
-          const oldBill = await getBill(oldBillId);
-          const newBill = await getBill(selectedBillId);
-
-          const restoredPaid = Math.max(
-            0,
-            Number(oldBill.paid_amount || 0) - oldAmount
-          );
-
-          const restoredBalance =
-            Number(oldBill.balance_amount || 0) +
-            oldAmount;
-
-          const restoredStatus =
-            restoredBalance <= 0.005
-              ? "paid"
-              : restoredPaid <= 0.005
-                ? "unpaid"
-                : "partial";
-
-          const { error: oldBillError } = await supabase
-            .from("fee_bills")
-            .update({
-              paid_amount: restoredPaid,
-              balance_amount: restoredBalance,
-              status: restoredStatus,
-              updated_at: new Date().toISOString(),
-            })
-            .eq("id", oldBill.id)
-            .eq("school_id", schoolId);
-
-          if (oldBillError) {
-            throw new Error(
-              `Unable to restore old fee bill: ${oldBillError.message}`
-            );
-          }
-
-          if (
-            numericAmount >
-            Number(newBill.balance_amount) + 0.005
-          ) {
-            throw new Error(
-              `Payment cannot exceed outstanding balance ${money(
-                Number(newBill.balance_amount)
-              )}.`
-            );
-          }
-
-          const newPaid =
-            Number(newBill.paid_amount || 0) +
-            numericAmount;
-
-          const newBalance = Math.max(
-            0,
-            Number(newBill.balance_amount || 0) -
-              numericAmount
-          );
-
-          const newStatus =
-            newBalance <= 0.005
-              ? "paid"
-              : "partial";
-
-          const { error: newBillError } =
-            await supabase
-              .from("fee_bills")
-              .update({
-                paid_amount: newPaid,
-                balance_amount: newBalance,
-                status: newStatus,
-                updated_at: new Date().toISOString(),
-              })
-              .eq("id", newBill.id)
-              .eq("school_id", schoolId);
-
-          if (newBillError) {
-            throw new Error(
-              `Unable to apply new fee bill: ${newBillError.message}`
-            );
-          }
-        } else {
-          const bill = await getBill(oldBillId);
-
-          const restoredPaid = Math.max(
-            0,
-            Number(bill.paid_amount || 0) - oldAmount
-          );
-
-          const restoredBalance =
-            Number(bill.balance_amount || 0) +
-            oldAmount;
-
-          const availableBalance =
-            restoredBalance;
-
-          if (
-            numericAmount >
-            availableBalance + 0.005
-          ) {
-            throw new Error(
-              `Payment cannot exceed outstanding balance ${money(
-                availableBalance
-              )}.`
-            );
-          }
-
-          const newPaid =
-            restoredPaid + numericAmount;
-
-          const newBalance = Math.max(
-            0,
-            availableBalance - numericAmount
-          );
-
-          const newStatus =
-            newBalance <= 0.005
-              ? "paid"
-              : newPaid <= 0.005
-                ? "unpaid"
-                : "partial";
-
-          const { error: billError } =
-            await supabase
-              .from("fee_bills")
-              .update({
-                paid_amount: newPaid,
-                balance_amount: newBalance,
-                status: newStatus,
-                updated_at: new Date().toISOString(),
-              })
-              .eq("id", bill.id)
-              .eq("school_id", schoolId);
-
-          if (billError) {
-            throw new Error(
-              `Unable to update fee bill: ${billError.message}`
-            );
-          }
-        }
-
-        const { error: paymentError } =
-          await supabase
-            .from("fee_payments")
-            .update({
-              student_id: selectedStudentId,
-              payment_date: receiptDate,
-              amount: numericAmount,
-              payment_method: paymentMethod,
-              account_id: receiveIntoAccountId,
-              reference_number:
-                referenceNumber.trim() || null,
-              notes: notes.trim() || null,
-              bill_id: selectedBillId,
-            })
-            .eq("id", payment.id)
-            .eq("school_id", schoolId);
-
-        if (paymentError) {
-          throw new Error(
-            `Unable to update fee payment: ${paymentError.message}`
-          );
-        }
-
-        const description =
-          `Fee collection from ${getStudentName(
-            selectedStudent!
-          )} - ${
-            (
-              await getBill(selectedBillId)
-            ).bill_number
-          }${
-            referenceNumber.trim()
-              ? ` | Reference: ${referenceNumber.trim()}`
-              : ""
-          }`;
-
-        await updateTransactionAndEntries(
-          transaction.id,
-          description,
-          receiptDate,
-          receiveIntoAccountId,
-          incomeAccountId,
-          numericAmount
-        );
-      } else {
-        if (!validateOtherIncome()) return;
-
-        const description =
-          `${particulars.trim()} - received from ${receivedFrom.trim()}${
-            referenceNumber.trim()
-              ? ` | Reference: ${referenceNumber.trim()}`
-              : ""
-          }`;
-
-        await updateTransactionAndEntries(
-          transaction.id,
-          description,
-          receiptDate,
-          receiveIntoAccountId,
-          incomeAccountId,
-          numericAmount
-        );
-      }
 
       setSuccess(
         `Receipt ${
@@ -1792,7 +2102,6 @@ export default function ReceiptPage() {
       );
 
       setEditingId(null);
-
       await loadHistory(schoolId);
     } catch (err: any) {
       console.error("UPDATE RECEIPT ERROR:", err);
@@ -1880,14 +2189,36 @@ export default function ReceiptPage() {
       setError("");
       setSuccess("");
 
-      /*
-       * Deletion is performed by one PostgreSQL RPC so the receipt,
-       * fee payment, bill balance, transaction entries and transaction
-       * are handled together.
-       *
-       * This also handles old/orphan transactions where the linked
-       * fee_payment no longer exists.
-       */
+      if (row.receipt_type === "student_fee") {
+        if (!row.reference_id) {
+          throw new Error("Student fee receipt has no payment reference.");
+        }
+
+        const { error: deleteError } = await supabase.rpc(
+          "delete_fee_payment_receipt",
+          {
+            p_school_id: schoolId,
+            p_payment_id: row.reference_id,
+          }
+        );
+
+        if (deleteError) {
+          throw new Error(deleteError.message);
+        }
+
+        setDeleteTarget(null);
+
+        setSuccess(
+          `Receipt ${
+            row.transaction_number || row.id.slice(0, 8)
+          } deleted successfully.`
+        );
+
+        await loadHistory(schoolId);
+        return;
+      }
+
+      /* Other Income continues to use the existing delete RPC. */
       const { error: deleteError } = await supabase.rpc(
         "delete_receipt",
         {
@@ -2190,7 +2521,7 @@ export default function ReceiptPage() {
                     <Field label="Amount">
                       <div className="relative">
                         <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">
-                          â‚¹
+
                         </span>
 
                         <input
@@ -2218,7 +2549,7 @@ export default function ReceiptPage() {
                         </h3>
 
                         <p className="mt-1 text-xs text-slate-500">
-                          Filter by Class â†’ Section â†’ Student â†’ Fee Bill.
+                          Filter by Class  Section  Student  Fee Bill.
                         </p>
                       </div>
 
@@ -2317,48 +2648,63 @@ export default function ReceiptPage() {
                         </Field>
                       </div>
 
-                      <div className="mt-4">
-                        <Field label="Fee Bill">
-                          <select
-                            value={selectedBillId}
-                            onChange={(e) =>
-                              handleBillChange(
-                                e.target.value
-                              )
-                            }
-                            disabled={
-                              !selectedStudentId ||
-                              loadingBills
-                            }
-                            className="input disabled:bg-slate-100"
-                          >
-                            <option value="">
-                              {loadingBills
-                                ? "Loading fee bills..."
-                                : !selectedStudentId
-                                  ? "Select Student first"
-                                  : feeBills.length === 0
-                                    ? "No outstanding fee bills"
-                                    : "Select Fee Bill"}
-                            </option>
+                      {feeManagementName && (
+                        <div className="mb-4 rounded-xl border border-emerald-100 bg-emerald-50 p-4">
+                          <div className="flex flex-wrap items-start justify-between gap-3">
+                            <div>
+                              <div className="text-xs font-bold uppercase tracking-wide text-emerald-700">
+                                Fee Management
+                              </div>
+                              <div className="mt-1 font-semibold text-slate-900">
+                                {feeManagementName}
+                              </div>
+                              <div className="mt-1 text-xs text-slate-500">
+                                Current academic year: {feeManagementAcademicYear}
+                              </div>
+                            </div>
+                            <div className="text-right">
+                              <div className="text-xs text-slate-500">
+                                Current Fee
+                              </div>
+                              <div className="text-lg font-bold text-emerald-700">
+                                {money(feeManagementAmount)}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      )}
 
-                            {feeBills.map(
-                              (bill) => (
-                                <option
-                                  key={bill.id}
-                                  value={bill.id}
-                                >
-                                  {bill.bill_number} â€”
-                                  Outstanding{" "}
-                                  {money(
-                                    Number(
-                                      bill.balance_amount
-                                    )
-                                  )}
-                                </option>
-                              )
-                            )}
-                          </select>
+                      <div className="mt-4 grid gap-4 md:grid-cols-3">
+                        <Field label="Manual Bill Number *">
+                          <input
+                            type="text"
+                            value={manualBillNumber}
+                            onChange={(e) =>
+                              setManualBillNumber(e.target.value)
+                            }
+                            disabled={!selectedStudentId || saving}
+                            placeholder="Enter physical bill number"
+                            className="input disabled:bg-slate-100"
+                            autoComplete="off"
+                          />
+                          <p className="mt-1 text-xs text-slate-500">
+                            Enter the exact Bill Number printed on the physical/offline bill.
+                          </p>
+                        </Field>
+
+                        <Field label="Fee Bill Status">
+                          <div className="input flex items-center bg-slate-50 text-slate-700">
+                            {loadingBills
+                              ? "Checking current fee..."
+                              : !selectedStudentId
+                                ? "Select Student first"
+                                : feeBills[0]
+                                  ? `Outstanding ${money(Number(feeBills[0].balance_amount || 0))}`
+                                  : `Current Fee ${money(Number(feeManagementAmount || 0))}`}
+                          </div>
+                          <p className="mt-1 text-xs text-slate-500">
+                            Bill number is manual; outstanding is read from Fee Management.
+                          </p>
                         </Field>
                       </div>
 
@@ -2394,25 +2740,56 @@ export default function ReceiptPage() {
                             />
                           </div>
 
-                          <div className="mt-4 border-t pt-4">
-                            <div className="text-xs text-slate-500">
-                              Outstanding
-                            </div>
+                          <div className="mt-4">
+                            <Link
+                              href={`/dashboard/students/${selectedStudent.id}/fees`}
+                              className="inline-flex rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-800 hover:bg-amber-100"
+                            >
+                              Give / Manage Concession
+                            </Link>
+                          </div>
 
-                            <div className="mt-1 text-xl font-bold text-red-600">
-                              {money(
-                                selectedBill
-                                  ? Number(
-                                      selectedBill.balance_amount
-                                    )
-                                  : feeBills.reduce(
-                                      (total, bill) =>
-                                        total +
-                                        Number(
-                                          bill.balance_amount
-                                        ),
-                                      0
-                                    )
+                          <div className="mt-4 border-t pt-4">
+                            {selectedBill ? (
+                              <div className="grid gap-3 sm:grid-cols-4">
+                                <Detail
+                                  label="Gross Fee"
+                                  value={money(Number(selectedBill.subtotal || 0))}
+                                />
+                                <Detail
+                                  label="Concession"
+                                  value={money(selectedBillConcession)}
+                                />
+                                <Detail
+                                  label="Net Fee"
+                                  value={money(selectedBillNetFee)}
+                                />
+                                <Detail
+                                  label="Paid"
+                                  value={money(Number(selectedBill.paid_amount || 0))}
+                                />
+                              </div>
+                            ) : null}
+
+                            <div className="mt-4 rounded-lg border border-red-100 bg-red-50 p-3">
+                              <div className="text-xs font-medium text-red-600">
+                                Outstanding
+                              </div>
+                              <div className="mt-1 text-xl font-bold text-red-700">
+                                {money(
+                                  selectedBill
+                                    ? Number(selectedBill.balance_amount)
+                                    : feeBills.reduce(
+                                        (total, bill) =>
+                                          total + Number(bill.balance_amount || 0),
+                                        0
+                                      )
+                                )}
+                              </div>
+                              {selectedBillConcession > 0 && (
+                                <div className="mt-1 text-xs text-red-600">
+                                  Concession has already been applied to this bill.
+                                </div>
                               )}
                             </div>
                           </div>
@@ -2618,26 +2995,75 @@ export default function ReceiptPage() {
                     </h2>
 
                     <p className="text-xs text-slate-500">
-                      {history.length} receipts
+                      {filteredHistory.length} of {history.length} receipts
                     </p>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={() =>
-                      schoolId &&
-                      loadHistory(schoolId)
-                    }
-                    className="inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm"
-                  >
-                    <RefreshCw size={15} />
-                    Refresh
-                  </button>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={downloadReceiptHistory}
+                      disabled={!filteredHistory.length}
+                      className="rounded-lg border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Download CSV
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        schoolId &&
+                        loadHistory(schoolId)
+                      }
+                      className="inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm"
+                    >
+                      <RefreshCw size={15} />
+                      Refresh
+                    </button>
+                  </div>
                 </div>
 
-                {history.length === 0 ? (
+                <div className="grid gap-3 border-b bg-slate-50/70 px-5 py-4 md:grid-cols-4">
+                  <input
+                    type="search"
+                    value={historySearch}
+                    onChange={(event) => setHistorySearch(event.target.value)}
+                    placeholder="Search student, class or bill number"
+                    className="input"
+                  />
+
+                  <select
+                    value={historyType}
+                    onChange={(event) =>
+                      setHistoryType(event.target.value as "all" | ReceiptType)
+                    }
+                    className="input"
+                  >
+                    <option value="all">All receipt types</option>
+                    <option value="student_fee">Student Fee</option>
+                    <option value="other_income">Other Income</option>
+                  </select>
+
+                  <input
+                    type="date"
+                    value={historyFromDate}
+                    onChange={(event) => setHistoryFromDate(event.target.value)}
+                    aria-label="History from date"
+                    className="input"
+                  />
+
+                  <input
+                    type="date"
+                    value={historyToDate}
+                    onChange={(event) => setHistoryToDate(event.target.value)}
+                    aria-label="History to date"
+                    className="input"
+                  />
+                </div>
+
+                {filteredHistory.length === 0 ? (
                   <div className="p-10 text-center text-sm text-slate-500">
-                    No receipts found.
+                    No receipts match these filters.
                   </div>
                 ) : (
                   <div className="overflow-x-auto">
@@ -2653,7 +3079,7 @@ export default function ReceiptPage() {
                           </th>
 
                           <th className="px-5 py-3 text-left text-xs text-slate-500">
-                            Transaction
+                            Manual Bill Number
                           </th>
 
                           <th className="px-5 py-3 text-left text-xs text-slate-500">
@@ -2679,7 +3105,14 @@ export default function ReceiptPage() {
                       </thead>
 
                       <tbody className="divide-y">
-                        {history.map((row) => (
+                        {filteredHistory.map((row) => {
+                          const historyStudent = row.student_id
+                            ? students.find(
+                                (student) => student.id === row.student_id
+                              )
+                            : null;
+
+                          return (
                           <tr key={row.id}>
                             <td className="px-5 py-4 text-sm">
                               {row.transaction_date}
@@ -2702,8 +3135,9 @@ export default function ReceiptPage() {
                             </td>
 
                             <td className="px-5 py-4 font-mono text-xs">
-                              {row.transaction_number ||
-                                row.id.slice(0, 8)}
+                              {row.receipt_type === "student_fee"
+                                ? row.manual_bill_number || "-"
+                                : "-"}
                             </td>
 
                             <td className="px-5 py-4 text-sm text-emerald-700">
@@ -2715,7 +3149,21 @@ export default function ReceiptPage() {
                             </td>
 
                             <td className="max-w-[320px] px-5 py-4 text-sm text-slate-600">
-                              {row.description}
+                              {historyStudent ? (
+                                <Link
+                                  href={`/dashboard/students/${historyStudent.id}/fees`}
+                                  className="block rounded-md text-blue-700 hover:underline"
+                                >
+                                  <span className="font-medium">
+                                    {getStudentName(historyStudent)}
+                                  </span>
+                                  <span className="block text-xs text-slate-500">
+                                    {getStudentClassName(historyStudent, classes)}
+                                  </span>
+                                </Link>
+                              ) : (
+                                row.description
+                              )}
                             </td>
 
                             <td className="px-5 py-4 text-right font-semibold text-emerald-600">
@@ -2759,7 +3207,8 @@ export default function ReceiptPage() {
                               </div>
                             </td>
                           </tr>
-                        ))}
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
@@ -2772,7 +3221,7 @@ export default function ReceiptPage() {
             <InfoCard
               icon={<User size={20} />}
               title="Student Fee"
-              text="Select Class, Section, Student and Fee Bill before recording the payment."
+              text="Select Class, Section and Student, then enter the physical Bill Number manually before recording the payment."
             />
 
             <InfoCard
@@ -2798,6 +3247,7 @@ export default function ReceiptPage() {
             getTransaction={getTransaction}
             getTransactionEntries={getTransactionEntries}
             getPayment={getPayment}
+            getBill={getBill}
             students={students}
             accounts={accounts}
           />
@@ -2878,7 +3328,8 @@ export default function ReceiptPage() {
             className="hidden print:block"
           />
         )}
-      </main>
+              <AccountingExportActions fileName="receipts" />
+</main>
     </>
   );
 }
@@ -2895,6 +3346,7 @@ function ReceiptViewModal({
   getTransaction,
   getTransactionEntries,
   getPayment,
+  getBill,
   students,
   accounts,
 }: {
@@ -2911,6 +3363,9 @@ function ReceiptViewModal({
   getPayment: (
     id: string
   ) => Promise<FeePayment | null>;
+  getBill: (
+    id: string
+  ) => Promise<FeeBill>;
   students: Student[];
   accounts: Account[];
 }) {
@@ -2926,6 +3381,16 @@ function ReceiptViewModal({
   const [payment, setPayment] =
     useState<FeePayment | null>(null);
 
+  const [bill, setBill] =
+    useState<FeeBill | null>(null);
+
+  const [concession, setConcession] =
+    useState<number>(0);
+
+  const row = history.find(
+    (item) => item.id === transactionId
+  );
+
   useEffect(() => {
     let active = true;
 
@@ -2934,21 +3399,80 @@ function ReceiptViewModal({
         setLoading(true);
         setError("");
 
-        const transaction =
-          await getTransaction(transactionId);
-
-        const entries =
-          await getTransactionEntries(transactionId);
-
+        let transaction: TransactionRow;
+        let entries: TransactionEntry[] = [];
         let payment: FeePayment | null = null;
+        let bill: FeeBill | null = null;
+        let concession = 0;
 
-        if (
-          transaction.reference_type === "fee_payment" &&
-          transaction.reference_id
-        ) {
-          payment = await getPayment(
-            transaction.reference_id
-          );
+        if (row?.receipt_type === "student_fee" && row.reference_id) {
+          payment = await getPayment(row.reference_id);
+          if (!payment) throw new Error("Fee payment could not be found.");
+
+          transaction = {
+            id: payment.id,
+            school_id: payment.school_id,
+            transaction_number: payment.receipt_number,
+            transaction_date: payment.payment_date,
+            transaction_type: "receipt",
+            description: row.description || `Fee collection - ${payment.receipt_number}`,
+            reference_type: "fee_payment",
+            reference_id: payment.id,
+            created_by: payment.received_by,
+          };
+
+          if (payment.bill_id) {
+            bill = await getBill(payment.bill_id);
+
+            const client = createClient();
+            const { data: concessions, error: concessionError } = await client
+              .from("fee_concessions")
+              .select("amount")
+              .eq("school_id", payment.school_id)
+              .eq("bill_id", payment.bill_id);
+
+            if (concessionError) throw new Error(concessionError.message);
+
+            concession = (concessions || []).reduce(
+              (sum, item) => sum + Number(item.amount || 0),
+              0
+            );
+          }
+
+          const client = createClient();
+          const { data: journal, error: journalError } = await client
+            .from("journal_entries")
+            .select("id")
+            .eq("school_id", payment.school_id)
+            .eq("reference_type", "fee_payment")
+            .eq("reference_id", payment.id)
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+          if (journalError) throw new Error(journalError.message);
+
+          if (journal?.id) {
+            const { data: lines, error: linesError } = await client
+              .from("journal_lines")
+              .select("id, account_id, debit, credit, description")
+              .eq("school_id", payment.school_id)
+              .eq("journal_entry_id", journal.id);
+
+            if (linesError) throw new Error(linesError.message);
+
+            entries = (lines || []).map((line) => ({
+              id: line.id,
+              transaction_id: payment!.id,
+              account_id: line.account_id,
+              debit: Number(line.debit || 0),
+              credit: Number(line.credit || 0),
+              description: line.description || null,
+            }));
+          }
+        } else {
+          transaction = await getTransaction(transactionId);
+          entries = await getTransactionEntries(transactionId);
         }
 
         if (!active) return;
@@ -2956,6 +3480,8 @@ function ReceiptViewModal({
         setTransaction(transaction);
         setEntries(entries);
         setPayment(payment);
+        setBill(bill);
+        setConcession(concession);
       } catch (err: any) {
         if (!active) return;
 
@@ -2978,11 +3504,8 @@ function ReceiptViewModal({
     getTransaction,
     getTransactionEntries,
     getPayment,
+    getBill,
   ]);
-
-  const row = history.find(
-    (item) => item.id === transactionId
-  );
 
   const debitEntry = entries.find(
     (entry) => Number(entry.debit || 0) > 0
@@ -3153,11 +3676,28 @@ function ReceiptViewModal({
                       <PrintDetail
                         label="Fee Bill"
                         value={
+                          bill?.bill_number ||
                           payment.bill_id ||
                           "-"
                         }
                       />
                     </div>
+
+                    {bill && (
+                      <div className="mt-5 rounded-xl border bg-slate-50 p-4">
+                        <h4 className="font-semibold">Fee Summary</h4>
+                        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                          <PrintDetail label="Gross Fee" value={money(bill.subtotal)} />
+                          <PrintDetail label="Concession" value={money(concession)} />
+                          <PrintDetail
+                            label="Net Fee"
+                            value={money(Math.max(Number(bill.subtotal || 0) - concession + Number(bill.late_fee || 0), 0))}
+                          />
+                          <PrintDetail label="Payment Received" value={money(payment.amount)} />
+                          <PrintDetail label="Remaining Outstanding" value={money(bill.balance_amount)} />
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
 

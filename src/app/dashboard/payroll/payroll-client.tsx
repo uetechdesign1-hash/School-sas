@@ -207,7 +207,9 @@ function calculate(
   const p = Math.max(0, n(paidLeave));
   const h = Math.max(0, n(holiday));
 
-  const payable = Math.min(wd, w + p + h);
+  // working_days already excludes school holidays and weekly offs.
+  // Therefore holidays must not be added a second time to payable days.
+  const payable = Math.min(wd, w + p);
   const unpaid = Math.max(wd - payable, 0);
 
   const gross = wd > 0 ? salary.gross_salary * (payable / wd) : salary.gross_salary;
@@ -231,9 +233,7 @@ export default function PayrollPage() {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [search, setSearch] = useState("");
-  const employeeForStaffRef = useRef<Map<string, Record<string, unknown>>>(
-    new Map(),
-  );
+  const employeeForStaffRef = useRef<Map<string, Record<string, unknown>>>(new Map());
 
   const locked = savedRun?.status === "prepared" || savedRun?.status === "finalized";
 
@@ -293,6 +293,19 @@ export default function PayrollPage() {
 
       const [year, monthNumber] = month.split("-").map(Number);
       const defaultDays = daysInMonth(month);
+
+      // Always refresh monthly attendance from the daily GPS/admin source
+      // before calculating payroll. This removes the dependency on someone
+      // opening the Attendance page first.
+      const { error: attendanceRefreshError } = await supabase.rpc(
+        "refresh_staff_monthly_attendance",
+        { p_month: month },
+      );
+      if (attendanceRefreshError) {
+        throw new Error(
+          `Attendance refresh: ${attendanceRefreshError.message}`,
+        );
+      }
 
       const { data: attendance, error: attendanceError } = await supabase
         .from("staff_monthly_attendance")
@@ -413,8 +426,7 @@ export default function PayrollPage() {
               0,
               wd -
                 n(saved.paid_leave_days) -
-                n(saved.unpaid_days) -
-                n(saved.school_holidays),
+                n(saved.unpaid_days),
             )
           : n(att?.worked_days) ||
             Math.max(wd - paid - n(att?.unpaid_leave), 0);
@@ -449,44 +461,6 @@ export default function PayrollPage() {
     void loadPayroll();
   }, [loadPayroll]);
 
-  function updateRow(
-    staffId: string,
-    key: "worked" | "paidLeave" | "holiday",
-    value: number,
-  ) {
-    if (locked) return;
-
-    setRows((current) =>
-      current.map((r) => {
-        if (r.staff.id !== staffId) return r;
-
-        const next = {
-          worked: key === "worked" ? value : r.worked,
-          paidLeave: key === "paidLeave" ? value : r.paidLeave,
-          holiday: key === "holiday" ? value : r.holiday,
-        };
-
-        const result = calculate(
-          r.salary,
-          workingDays,
-          next.worked,
-          next.paidLeave,
-          next.holiday,
-        );
-
-        return {
-          ...r,
-          ...next,
-          unpaid: result.unpaid,
-          payable: result.payable,
-          gross: result.gross,
-          deductions: result.deductions,
-          net: result.net,
-        };
-      }),
-    );
-  }
-
   function changeMonth(value: string) {
     setMonth(value);
     setWorkingDays(daysInMonth(value));
@@ -512,7 +486,7 @@ export default function PayrollPage() {
           r.worked < 0 ||
           r.paidLeave < 0 ||
           r.holiday < 0 ||
-          r.worked + r.paidLeave + r.holiday > workingDays
+          r.worked + r.paidLeave > workingDays
         ) {
           throw new Error(
             `Invalid attendance for ${staffName(r.staff)}. Worked + paid leave + holiday cannot exceed ${workingDays}.`,
@@ -795,7 +769,7 @@ export default function PayrollPage() {
         other_deduction: Number(r.deductions.toFixed(2)),
         total_deductions: Number(r.deductions.toFixed(2)),
         status: "draft",
-        notes: `Offline attendance: ${r.worked} worked, ${r.paidLeave} paid leave, ${r.holiday} holiday, ${r.unpaid} unpaid.`,
+        notes: `Attendance source: Admin/GPS monthly attendance — ${r.worked} worked, ${r.paidLeave} paid leave, ${r.holiday} holiday, ${r.unpaid} unpaid.`,
       }));
 
       /*
@@ -1123,7 +1097,7 @@ export default function PayrollPage() {
 
       const payrollAmount = Number(totals.net.toFixed(2));
 
-      let staffItems = rows
+      const staffItems = rows
         .map((r) => ({
           employee_id: employeeForStaffRef.current.get(r.staff.id)?.id,
           employee_no: r.staff.employee_no,
@@ -1141,38 +1115,6 @@ export default function PayrollPage() {
           } => Boolean(item.employee_id),
         );
 
-      /*
-       * If this is a previously saved draft that survived a page refresh,
-       * the in-memory employee map is empty. Recover the real employee_id
-       * values directly from payroll_items instead of guessing from staff.id.
-       */
-      if (!staffItems.length) {
-        const { data: savedItems, error: savedItemsError } = await supabase
-          .from("payroll_items")
-          .select("employee_id, staff_id, net_salary")
-          .eq("school_id", schoolId)
-          .eq("payroll_run_id", runToPrepare.id);
-
-        if (savedItemsError) {
-          throw new Error(
-            `Unable to recover payroll employees: ${savedItemsError.message}`,
-          );
-        }
-
-        staffItems = (savedItems || [])
-          .map((item) => {
-            const row = rows.find((r) => r.staff.id === item.staff_id);
-            return {
-              employee_id: String(item.employee_id),
-              employee_no: row?.staff.employee_no || "",
-              name: row ? staffName(row.staff) : "Staff",
-              designation: row?.staff.designation || "",
-              net_pay: Number(item.net_salary || 0),
-            };
-          })
-          .filter((item) => Boolean(item.employee_id));
-      }
-
       if (!staffItems.length) {
         throw new Error(
           "No payroll employees were found for Salary Payment.",
@@ -1189,7 +1131,7 @@ export default function PayrollPage() {
         reference: `PAYROLL-${month}`,
         staff_count: totals.staff,
         staff_items: staffItems,
-        accounting_transaction_id: data.transaction_id,
+        accounting_transaction_id: data.transaction_id || data.journal_entry_id,
         accounting_transaction_number:
           data.transaction_number || null,
         payable_account_id: data.payable_account_id,
@@ -1366,7 +1308,7 @@ export default function PayrollPage() {
             <div>
               <p className="text-sm font-bold text-slate-900">Staff & Monthly Attendance</p>
               <p className="text-xs text-slate-500">
-                Add/edit Salary and enter offline Attendance for any staff member without leaving the payroll workflow.
+                Attendance is read from Staff Monthly Attendance. Use Admin Attendance to mark P, A or ½; payroll recalculates automatically.
               </p>
             </div>
             <Link
@@ -1390,8 +1332,8 @@ export default function PayrollPage() {
             <div>
               <h2 className="font-bold text-slate-900">Monthly Payroll</h2>
               <p className="mt-1 text-xs text-slate-500">
-                Salary comes from each staff member's Salary Structure. Attendance and leave come from Offline Attendance.
-                Paid leave and holidays are payable; unpaid days reduce salary.
+                Salary comes from each staff member's Salary Structure. Attendance is linked automatically from Admin Staff Attendance.
+                Paid leave and school holidays are payable; unpaid days reduce salary.
               </p>
             </div>
 
@@ -1472,26 +1414,9 @@ export default function PayrollPage() {
 
                       <td className="px-4 py-4 text-center font-semibold">{workingDays}</td>
 
-                      <DayInput
-                        value={r.worked}
-                        disabled={!editing || locked || !r.salary}
-                        max={workingDays}
-                        onChange={(v) => updateRow(r.staff.id, "worked", v)}
-                      />
-
-                      <DayInput
-                        value={r.paidLeave}
-                        disabled={!editing || locked || !r.salary}
-                        max={workingDays}
-                        onChange={(v) => updateRow(r.staff.id, "paidLeave", v)}
-                      />
-
-                      <DayInput
-                        value={r.holiday}
-                        disabled={!editing || locked || !r.salary}
-                        max={workingDays}
-                        onChange={(v) => updateRow(r.staff.id, "holiday", v)}
-                      />
+                      <td className="px-4 py-4 text-center font-semibold">{r.worked}</td>
+                      <td className="px-4 py-4 text-center font-semibold">{r.paidLeave}</td>
+                      <td className="px-4 py-4 text-center font-semibold">{r.holiday}</td>
 
                       <td className="px-4 py-4 text-center font-bold text-red-600">{r.unpaid}</td>
                       <td className="px-4 py-4 text-center font-bold">{r.payable}</td>
@@ -1651,35 +1576,5 @@ function Detail({ label, value }: { label: string; value: string }) {
       <p className="text-xs text-slate-400">{label}</p>
       <p className="mt-1 font-bold text-slate-900">{value}</p>
     </div>
-  );
-}
-
-function DayInput({
-  value,
-  max,
-  disabled,
-  onChange,
-}: {
-  value: number;
-  max: number;
-  disabled: boolean;
-  onChange: (value: number) => void;
-}) {
-  return (
-    <td className="px-4 py-4">
-      <input
-        type="number"
-        min={0}
-        max={max}
-        step={1}
-        value={value}
-        disabled={disabled}
-        onChange={(e) => {
-          const v = Math.max(0, Math.min(max, n(e.target.value)));
-          onChange(v);
-        }}
-        className="mx-auto block w-20 rounded-lg border border-slate-300 px-2 py-2 text-center text-sm font-semibold outline-none focus:border-blue-500 disabled:bg-slate-100 disabled:text-slate-500"
-      />
-    </td>
   );
 }

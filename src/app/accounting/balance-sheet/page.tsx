@@ -1799,7 +1799,7 @@ export default function BalanceSheetPage() {
             Loading Balance Sheet...
           </div>
         )}
-      </main>
+</main>
     </>
   );
 }

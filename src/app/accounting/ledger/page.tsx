@@ -1167,7 +1167,7 @@ export default function LedgerPage() {
             Loading Ledger...
           </div>
         )}
-      </main>
+</main>
     </>
   );
 }

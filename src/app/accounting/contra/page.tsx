@@ -2,6 +2,7 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { AccountingExportActions } from "../accounting-export";
 import {
   ArrowLeft,
   ArrowRightLeft,
@@ -479,7 +480,9 @@ export default function ContraPage() {
       setShowForm(false);
       resetForm();
 
-      await loadHistory(schoolId!);
+      if (schoolId) {
+        await loadHistory(schoolId);
+      }
     } catch (err: any) {
       console.error("CONTRA SAVE ERROR:", err);
 
@@ -1208,7 +1211,8 @@ export default function ContraPage() {
           </div>
         </div>
       )}
-    </main>
+          <AccountingExportActions fileName="contra" />
+</main>
   );
 }
 

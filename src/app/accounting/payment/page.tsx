@@ -1433,14 +1433,28 @@ export default function PaymentPage() {
 
       /*
        * The Expenses dashboard is backed by public.expenses.
-       * Normal payments create an expense row here.
        *
-       * Payroll does NOT create another expense row here because
-       * payroll preparation creates the Salary Expense row.
+       * IMPORTANT:
+       * - Normal payments create an expense row.
+       * - Payroll salary payments ALSO create an individual expense row.
+       * - Payroll preparation must NOT create a combined employee expense row.
+       *
+       * This means every actual salary payment appears separately in
+       * Expenses, with the employee name and the Cash/Bank account used.
        */
-      if (!payrollMode) {
+      {
         const { data: userData } =
           await supabase.auth.getUser();
+
+        const payrollExpenseDescription = payrollMode && paymentStaff
+          ? `Salary - ${paymentStaff.name} - ${formatPayrollMonthLabel(
+              payrollMonth,
+            )}`
+          : particulars.trim();
+
+        const payrollExpenseReference = payrollMode && paymentStaff
+          ? `PAYROLL-${payrollMonth}-${paymentStaff.employee_no}`
+          : referenceNumber.trim() || null;
 
         const { error: expenseRowError } = await supabase
           .from("expenses")
@@ -1451,9 +1465,11 @@ export default function PaymentPage() {
             amount: numericAmount,
             paid_from_account_id: paidFromAccountId,
             transaction_id: transaction.id,
-            vendor_name: null,
-            invoice_number: referenceNumber.trim() || null,
-            description: particulars.trim(),
+            vendor_name: payrollMode && paymentStaff
+              ? paymentStaff.name
+              : null,
+            invoice_number: payrollExpenseReference,
+            description: payrollExpenseDescription,
             created_by: userData.user?.id || null,
           });
 

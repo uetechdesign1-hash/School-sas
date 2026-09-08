@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import {
   useCallback,
@@ -59,10 +59,20 @@ type FeeBill = {
   bill_number: string;
   bill_date: string;
   due_date?: string | null;
+  discount?: number;
   total_amount: number;
   paid_amount: number;
   balance_amount: number;
   status: string;
+};
+
+type CarryForwardRecord = {
+  id: string;
+  source_bill_id: string;
+  to_academic_year_id: string;
+  amount: number;
+  status: string;
+  target_bill_id?: string | null;
 };
 
 type FeePayment = {
@@ -126,6 +136,8 @@ type AssignmentPreview = {
   structure: FeeStructure;
   items: AssignmentItem[];
   existingBill: FeeBill | null;
+  previousAcademicYear: AcademicYear | null;
+  pendingCarryForwards: CarryForwardRecord[];
 };
 
 function formatMoney(value: number) {
@@ -190,6 +202,10 @@ export default function FeesPage() {
 
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [selectedBill, setSelectedBill] = useState<FeeBill | null>(null);
+  const [showConcessionForm, setShowConcessionForm] = useState(false);
+  const [concessionAmount, setConcessionAmount] = useState("");
+  const [concessionReason, setConcessionReason] = useState("");
+  const [savingConcession, setSavingConcession] = useState(false);
 
   const [amount, setAmount] = useState("");
   const [paymentMode, setPaymentMode] = useState("cash");
@@ -197,6 +213,7 @@ export default function FeesPage() {
     useState<FinancialAccount[]>([]);
   const [accountId, setAccountId] = useState("");
   const [loadingAccounts, setLoadingAccounts] = useState(false);
+  const [manualBillNumber, setManualBillNumber] = useState("");
   const [referenceNumber, setReferenceNumber] = useState("");
   const [paymentDate, setPaymentDate] = useState(
     new Date().toISOString().split("T")[0],
@@ -539,8 +556,9 @@ export default function FeesPage() {
         const { data: paymentData, error: paymentError } = await supabase
           .from("fee_payments")
           .select(
-            "id, bill_id, receipt_number, payment_date, amount, payment_method, reference_number, notes, account_id, received_by, receipt_generated",
+            "id, school_id, bill_id, receipt_number, payment_date, amount, payment_method, reference_number, notes, account_id, received_by, receipt_generated",
           )
+          .eq("school_id", schoolId)
           .eq("student_id", student.id)
           .order("payment_date", { ascending: false });
 
@@ -623,6 +641,50 @@ export default function FeesPage() {
             "No current academic year is configured for this school.",
           );
         }
+
+        // Load the immediately preceding academic year and any unpaid
+        // carry-forward records already assigned to this student. Carry
+        // forward is kept as a separate ledger item; it is never silently
+        // mixed into the new year's fee structure amount.
+        const { data: academicYearsData, error: academicYearsError } =
+          await supabase
+            .from("academic_years")
+            .select("id, name, start_date, end_date, is_current")
+            .eq("school_id", schoolId)
+            .order("start_date", { ascending: true });
+
+        if (academicYearsError) {
+          throw new Error(
+            `Unable to load academic years: ${academicYearsError.message}`,
+          );
+        }
+
+        const allAcademicYears = (academicYearsData || []) as AcademicYear[];
+        const previousAcademicYear =
+          allAcademicYears
+            .filter((year) => year.end_date < academicYear.start_date)
+            .sort((a, b) => b.end_date.localeCompare(a.end_date))[0] || null;
+
+        const { data: pendingCarryData, error: pendingCarryError } =
+          await supabase
+            .from("fee_carry_forwards")
+            .select(
+              "id, source_bill_id, to_academic_year_id, amount, status, target_bill_id",
+            )
+            .eq("school_id", schoolId)
+            .eq("student_id", student.id)
+            .eq("to_academic_year_id", academicYear.id)
+            .eq("status", "pending");
+
+        if (pendingCarryError) {
+          console.error(
+            "Carry-forward preview error:",
+            pendingCarryError.message,
+          );
+        }
+
+        const pendingCarryForwards =
+          (pendingCarryData || []) as CarryForwardRecord[];
 
         const { data: structureData, error: structureError } =
           await supabase
@@ -754,6 +816,8 @@ export default function FeesPage() {
           structure,
           items,
           existingBill,
+          previousAcademicYear,
+          pendingCarryForwards,
         });
       } finally {
         setLoadingAssignment(false);
@@ -798,6 +862,16 @@ export default function FeesPage() {
       sum + Math.max(Number(item.amount || 0), 0),
     0,
   );
+
+  const selectedAssignmentCarryForward =
+    assignmentPreview?.pendingCarryForwards.reduce(
+      (sum, record) =>
+        sum + Math.max(Number(record.amount || 0), 0),
+      0,
+    ) || 0;
+
+  const assignmentTotalWithCarry =
+    selectedAssignmentTotal + selectedAssignmentCarryForward;
 
   async function handleChangeFeeSelection() {
     if (!selectedStudent || !schoolId || !assignmentPreview?.existingBill) {
@@ -845,6 +919,29 @@ export default function FeesPage() {
       if (paymentRows && paymentRows.length > 0) {
         throw new Error(
           "This bill has payment history and cannot be changed.",
+        );
+      }
+
+      // A bill that contains a previous-year carry-forward cannot be
+      // deleted by the fee-selection editor because that would orphan the
+      // applied carry record. Keep the carry-forward attached to its bill.
+      const { data: appliedCarryRows, error: appliedCarryError } =
+        await supabase
+          .from("fee_carry_forwards")
+          .select("id")
+          .eq("school_id", schoolId)
+          .eq("student_id", selectedStudent.id)
+          .eq("target_bill_id", existingBill.id)
+          .eq("status", "applied")
+          .limit(1);
+
+      if (appliedCarryError) {
+        throw appliedCarryError;
+      }
+
+      if (appliedCarryRows && appliedCarryRows.length > 0) {
+        throw new Error(
+          "This bill contains a previous-year carry-forward and cannot be changed.",
         );
       }
 
@@ -967,10 +1064,19 @@ export default function FeesPage() {
       return;
     }
 
-    const totalAmount = selectedItems.reduce(
+    const structureTotal = selectedItems.reduce(
       (sum, item) => sum + Math.max(Number(item.amount || 0), 0),
       0,
     );
+
+    // A pending previous-year balance becomes part of the new academic
+    // year's bill. This keeps one payment flow and one outstanding balance.
+    const carryForwardTotal = assignmentPreview.pendingCarryForwards.reduce(
+      (sum, record) => sum + Math.max(Number(record.amount || 0), 0),
+      0,
+    );
+
+    const totalAmount = structureTotal + carryForwardTotal;
 
     if (totalAmount <= 0) {
       setMessage({
@@ -1065,7 +1171,10 @@ export default function FeesPage() {
             balance_amount: totalAmount,
             notes:
               "Created from " +
-              assignmentPreview.structure.name,
+              assignmentPreview.structure.name +
+              (carryForwardTotal > 0
+                ? ` | Includes ${formatMoney(carryForwardTotal)} previous-year carry-forward`
+                : ""),
             created_by: user.id,
           })
           .select(
@@ -1112,6 +1221,38 @@ export default function FeesPage() {
         );
       }
 
+      // Attach pending carry-forward records to this new bill. The amount
+      // has already been included in fee_bills.total_amount/balance_amount,
+      // so the carry record is marked applied to prevent double counting.
+      if (assignmentPreview.pendingCarryForwards.length > 0) {
+        const { error: carryApplyError } = await supabase
+          .from("fee_carry_forwards")
+          .update({
+            target_bill_id: billData.id,
+            status: "applied",
+          })
+          .eq("school_id", schoolId)
+          .eq("student_id", selectedStudent.id)
+          .eq("to_academic_year_id", assignmentPreview.academicYear.id)
+          .eq("status", "pending");
+
+        if (carryApplyError) {
+          await supabase
+            .from("fee_bill_items")
+            .delete()
+            .eq("school_id", schoolId)
+            .eq("bill_id", billData.id);
+          await supabase
+            .from("fee_bills")
+            .delete()
+            .eq("id", billData.id)
+            .eq("school_id", schoolId);
+          throw new Error(
+            `Unable to apply previous-year carry-forward: ${carryApplyError.message}`,
+          );
+        }
+      }
+
       setMessage({
         type: "success",
         text:
@@ -1136,6 +1277,120 @@ export default function FeesPage() {
       });
     } finally {
       setAssigningFees(false);
+    }
+  }
+
+  /*
+   * --------------------------------------------------
+   * YEAR-END CARRY FORWARD
+   * --------------------------------------------------
+   *
+   * Copies a bill's remaining balance to the next academic year. The actual
+   * record is created by the secure RPC so duplicate/over-limit carry
+   * forwards are rejected transactionally.
+   */
+  async function handleCarryForward(bill: FeeBill) {
+    if (!selectedStudent || !schoolId || !bill.academic_year_id) {
+      return;
+    }
+
+    const { data: sourceAcademicYear, error: sourceYearError } =
+      await supabase
+        .from("academic_years")
+        .select("id, name, start_date, end_date, is_current")
+        .eq("id", bill.academic_year_id)
+        .eq("school_id", schoolId)
+        .maybeSingle();
+
+    if (sourceYearError) {
+      setMessage({
+        type: "error",
+        text: `Unable to load source academic year: ${sourceYearError.message}`,
+      });
+      return;
+    }
+
+    if (!sourceAcademicYear) {
+      setMessage({
+        type: "error",
+        text: "Source academic year could not be found.",
+      });
+      return;
+    }
+
+    const { data: nextYears, error: nextYearError } = await supabase
+      .from("academic_years")
+      .select("id, name, start_date, end_date, is_current")
+      .eq("school_id", schoolId)
+      .gt("start_date", sourceAcademicYear.start_date)
+      .order("start_date", { ascending: true })
+      .limit(1);
+
+    if (nextYearError) {
+      setMessage({
+        type: "error",
+        text: `Unable to find next academic year: ${nextYearError.message}`,
+      });
+      return;
+    }
+
+    const targetYear = (nextYears?.[0] as AcademicYear | undefined) || null;
+    const outstanding = Math.max(Number(bill.balance_amount || 0), 0);
+
+    if (!targetYear) {
+      setMessage({
+        type: "error",
+        text: `No next academic year exists after ${sourceAcademicYear.name}. Create it first.`,
+      });
+      return;
+    }
+
+    if (outstanding <= 0) {
+      setMessage({
+        type: "error",
+        text: "This bill has no outstanding amount to carry forward.",
+      });
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Carry forward ${formatMoney(outstanding)} from ${sourceAcademicYear.name} to ${targetYear.name} for ${getStudentName(selectedStudent)}?`,
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      const { error } = await supabase.rpc("create_fee_carry_forward", {
+        p_school_id: schoolId,
+        p_student_id: selectedStudent.id,
+        p_source_bill_id: bill.id,
+        p_to_academic_year_id: targetYear.id,
+        p_amount: outstanding,
+        p_notes: `Carry forward from ${sourceAcademicYear.name} to ${targetYear.name}`,
+      });
+
+      if (error) {
+        throw error;
+      }
+
+      setMessage({
+        type: "success",
+        text: `${formatMoney(outstanding)} carried forward to ${targetYear.name}.`,
+      });
+
+      await loadLedger(selectedStudent);
+      await loadAssignmentPreview(selectedStudent);
+    } catch (error) {
+      console.error("CARRY FORWARD ERROR:", error);
+      setMessage({
+        type: "error",
+        text:
+          error instanceof Error
+            ? error.message
+            : "Unable to carry forward the outstanding amount.",
+      });
     }
   }
 
@@ -1270,6 +1525,10 @@ export default function FeesPage() {
     setSelectedBill(bill);
     setAmount("");
     setPaymentMode("cash");
+    setManualBillNumber(bill.bill_number || "");
+    setShowConcessionForm(false);
+    setConcessionAmount("");
+    setConcessionReason("");
     setReferenceNumber("");
     setPaymentDate(new Date().toISOString().split("T")[0]);
     setRemarks("");
@@ -1284,6 +1543,110 @@ export default function FeesPage() {
 
     setShowPaymentModal(false);
     setSelectedBill(null);
+    setShowConcessionForm(false);
+    setConcessionAmount("");
+    setConcessionReason("");
+    setManualBillNumber("");
+  }
+
+  async function applyConcession() {
+    if (!schoolId || !selectedStudent || !selectedBill) return;
+
+    const amountToConcede = Number(concessionAmount);
+    const outstanding = Number(selectedBill.balance_amount || 0);
+
+    if (!Number.isFinite(amountToConcede) || amountToConcede <= 0) {
+      setMessage({ type: "error", text: "Enter a valid concession amount." });
+      return;
+    }
+
+    if (amountToConcede > outstanding + 0.005) {
+      setMessage({
+        type: "error",
+        text: "Concession cannot exceed the current outstanding amount.",
+      });
+      return;
+    }
+
+    setSavingConcession(true);
+    setMessage(null);
+
+    try {
+      const { error: concessionError } = await supabase
+        .from("fee_concessions")
+        .insert({
+          school_id: schoolId,
+          student_id: selectedStudent.id,
+          bill_id: selectedBill.id,
+          concession_type: "manual_amount",
+          percentage: null,
+          amount: amountToConcede,
+          reason: concessionReason.trim() || null,
+        });
+
+      if (concessionError) throw concessionError;
+
+      const nextBalance = Math.max(0, outstanding - amountToConcede);
+      const nextTotal = Math.max(
+        Number(selectedBill.paid_amount || 0),
+        Number(selectedBill.total_amount || 0) - amountToConcede,
+      );
+      const nextDiscount =
+        Number(selectedBill.discount || 0) + amountToConcede;
+      const nextStatus =
+        nextBalance <= 0.005
+          ? "paid"
+          : Number(selectedBill.paid_amount || 0) > 0
+            ? "partial"
+            : "unpaid";
+
+      const { data: updatedBill, error: billError } = await supabase
+        .from("fee_bills")
+        .update({
+          discount: nextDiscount,
+          total_amount: nextTotal,
+          balance_amount: nextBalance,
+          status: nextStatus,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", selectedBill.id)
+        .eq("school_id", schoolId)
+        .eq("student_id", selectedStudent.id)
+        .select(
+          "id, academic_year_id, bill_number, bill_date, due_date, discount, total_amount, paid_amount, balance_amount, status",
+        )
+        .single();
+
+      if (billError || !updatedBill) {
+        throw billError || new Error("Concession was saved but the bill was not updated.");
+      }
+
+      const refreshedBill = updatedBill as FeeBill;
+      setSelectedBill(refreshedBill);
+      setBills((currentBills) =>
+        currentBills.map((bill) =>
+          bill.id === refreshedBill.id ? refreshedBill : bill,
+        ),
+      );
+      setAmount("");
+      setConcessionAmount("");
+      setConcessionReason("");
+      setShowConcessionForm(false);
+      setMessage({
+        type: "success",
+        text: `${formatMoney(amountToConcede)} concession applied to ${refreshedBill.bill_number}.`,
+      });
+    } catch (error: unknown) {
+      setMessage({
+        type: "error",
+        text:
+          error instanceof Error
+            ? error.message
+            : "Unable to apply concession.",
+      });
+    } finally {
+      setSavingConcession(false);
+    }
   }
 
   /*
@@ -1296,9 +1659,9 @@ export default function FeesPage() {
    * 2. selected student belongs to school
    * 3. selected bill belongs to selected student
    *
-   * The existing record_fee_payment RPC signature is kept
-   * unchanged because its exact database definition was not
-   * supplied in the project files.
+   * The manual bill number is the only physical identifier entered by staff.
+   * The legacy receipt-number field remains system-generated for the current
+   * payment RPC contract and is never collected from the user.
    */
   const accountOptions = useMemo(() => {
     const mode = paymentMode.toLowerCase();
@@ -1326,176 +1689,11 @@ export default function FeesPage() {
     }
   }, [showPaymentModal, accountOptions, accountId]);
 
-  async function createFeeAccountingEntry({
-    schoolId: currentSchoolId,
-    paymentId,
-    amount: paymentAmount,
-    paymentDate: date,
-    studentName,
-    account,
-    userId,
-    billNumber,
-    paymentMode: mode,
-  }: {
-    schoolId: string;
-    paymentId: string;
-    amount: number;
-    paymentDate: string;
-    studentName: string;
-    account: FinancialAccount;
-    userId: string;
-    billNumber: string;
-    paymentMode: string;
-  }) {
-    /*
-     * Double-entry:
-     *
-     *   DEBIT  selected Cash/Bank account
-     *   CREDIT Fee Income
-     *
-     * Both accounts come from `accounts`, matching the accounting schema.
-     */
-
-    const { data: incomeAccounts, error: incomeLookupError } =
-      await supabase
-        .from("accounts")
-        .select("id, name, account_type, is_active")
-        .eq("school_id", currentSchoolId)
-        .eq("account_type", "income")
-        .eq("is_active", true)
-        .order("is_system", { ascending: false })
-        .order("name", { ascending: true });
-
-    if (incomeLookupError) {
-      throw new Error(
-        `Unable to find the fee income account: ${incomeLookupError.message}`,
-      );
-    }
-
-    let incomeAccount = (incomeAccounts || []).find((candidate) =>
-      /fee|tuition|school/i.test(candidate.name || ""),
-    );
-
-    /*
-     * If no income account exists, create a standard Fee Income account.
-     * `income` is one of the confirmed account_type enum values.
-     */
-    if (!incomeAccount) {
-      const { data: createdIncomeAccount, error: incomeCreateError } =
-        await supabase
-          .from("accounts")
-          .insert({
-            school_id: currentSchoolId,
-            name: "Fee Income",
-            account_type: "income",
-            opening_balance: 0,
-            is_system: false,
-            is_active: true,
-          })
-          .select("id, name, account_type, is_active")
-          .single();
-
-      if (incomeCreateError || !createdIncomeAccount) {
-        throw new Error(
-          `No active Fee Income account exists and it could not be created: ${
-            incomeCreateError?.message || "Unknown error."
-          }`,
-        );
-      }
-
-      incomeAccount = createdIncomeAccount;
-    }
-
-    /*
-     * The exact transactions.transaction_type enum values were not supplied.
-     * Try common values in separate requests. Invalid enum attempts create no
-     * row; the first accepted value is used for the accounting transaction.
-     */
-    const transactionTypes = [
-      "fee_payment",
-      "income",
-      "receipt",
-      "payment",
-    ];
-
-    let transactionId: string | null = null;
-    let lastTransactionError = "Unknown transaction error.";
-
-    for (const transactionType of transactionTypes) {
-      const { data: transaction, error: transactionError } =
-        await supabase
-          .from("transactions")
-          .insert({
-            school_id: currentSchoolId,
-            transaction_date: date,
-            transaction_type: transactionType,
-            description:
-              `Fee payment - ${studentName} - ${billNumber}`,
-            reference_type: "fee_payment",
-            reference_id: paymentId,
-            created_by: userId,
-          })
-          .select("id")
-          .single();
-
-      if (!transactionError && transaction?.id) {
-        transactionId = transaction.id;
-        break;
-      }
-
-      lastTransactionError =
-        transactionError?.message || lastTransactionError;
-    }
-
-    if (!transactionId) {
-      throw new Error(
-        `Payment was saved, but the accounting transaction could not be created: ${lastTransactionError}`,
-      );
-    }
-
-    const { error: entriesError } = await supabase
-      .from("transaction_entries")
-      .insert([
-        {
-          school_id: currentSchoolId,
-          transaction_id: transactionId,
-          account_id: account.id,
-          debit: paymentAmount,
-          credit: 0,
-          description:
-            `${mode.toUpperCase()} fee collection from ${studentName}`,
-        },
-        {
-          school_id: currentSchoolId,
-          transaction_id: transactionId,
-          account_id: incomeAccount.id,
-          debit: 0,
-          credit: paymentAmount,
-          description: `Fee income - ${billNumber}`,
-        },
-      ]);
-
-    if (entriesError) {
-      await supabase
-        .from("transactions")
-        .delete()
-        .eq("id", transactionId)
-        .eq("school_id", currentSchoolId);
-
-      throw new Error(
-        `Payment was saved, but accounting entries could not be created: ${entriesError.message}`,
-      );
-    }
-
-    return transactionId;
-  }
 
   async function submitPayment(event: FormEvent) {
     event.preventDefault();
 
-    if (savingPayment) {
-      return;
-    }
+    if (savingPayment) return;
 
     if (!selectedStudent) {
       setMessage({
@@ -1541,7 +1739,7 @@ export default function FeesPage() {
       return;
     }
 
-    if (paymentAmount > outstanding) {
+    if (paymentAmount > outstanding + 0.005) {
       setMessage({
         type: "error",
         text:
@@ -1610,10 +1808,24 @@ export default function FeesPage() {
       return;
     }
 
-    /*
-     * UPI is stored as payment_method='upi' and uses a bank account.
-     * The UPI transaction/UTR is stored in fee_payments.reference_number.
-     */
+    const enteredBillNumber = manualBillNumber.trim();
+
+    if (!enteredBillNumber) {
+      setMessage({
+        type: "error",
+        text: "Enter the manual bill number printed on the physical bill.",
+      });
+      return;
+    }
+
+    if (enteredBillNumber.length > 100) {
+      setMessage({
+        type: "error",
+        text: "Manual bill number is too long.",
+      });
+      return;
+    }
+
     if (mode === "upi" && !referenceNumber.trim()) {
       setMessage({
         type: "error",
@@ -1625,18 +1837,13 @@ export default function FeesPage() {
     setSavingPayment(true);
     setMessage(null);
 
-    let insertedPaymentId: string | null = null;
-    let accountingTransactionId: string | null = null;
-
     try {
       const {
         data: { user },
         error: authError,
       } = await supabase.auth.getUser();
 
-      if (authError) {
-        throw authError;
-      }
+      if (authError) throw authError;
 
       if (!user) {
         throw new Error(
@@ -1645,13 +1852,14 @@ export default function FeesPage() {
       }
 
       /*
-       * Re-check the bill immediately before saving.
+       * Re-check the exact bill immediately before recording.
+       * The canonical RPC locks this same bill again during the transaction.
        */
       const { data: verifiedBill, error: verifiedBillError } =
         await supabase
           .from("fee_bills")
           .select(
-            "id, school_id, student_id, bill_number, total_amount, paid_amount, balance_amount, status",
+            "id, school_id, student_id, bill_number, bill_date, due_date, total_amount, paid_amount, balance_amount, status",
           )
           .eq("id", selectedBill.id)
           .eq("school_id", schoolId)
@@ -1665,12 +1873,9 @@ export default function FeesPage() {
       }
 
       if (!verifiedBill) {
-        throw new Error(
-          "Fee bill was not found for this student.",
-        );
+        throw new Error("Fee bill was not found for this student.");
       }
 
-      const currentPaid = Number(verifiedBill.paid_amount || 0);
       const currentOutstanding = Number(
         verifiedBill.balance_amount || 0,
       );
@@ -1679,7 +1884,7 @@ export default function FeesPage() {
         throw new Error("This bill is already fully paid.");
       }
 
-      if (paymentAmount > currentOutstanding) {
+      if (paymentAmount > currentOutstanding + 0.005) {
         throw new Error(
           "Payment cannot be greater than the current outstanding amount of " +
             formatMoney(currentOutstanding) +
@@ -1687,144 +1892,91 @@ export default function FeesPage() {
         );
       }
 
-      const newPaidAmount = currentPaid + paymentAmount;
-
-      const newBalanceAmount = Math.max(
-        Number(verifiedBill.total_amount || 0) - newPaidAmount,
-        0,
+      /*
+       * SINGLE SOURCE OF TRUTH:
+       *
+       * record_fee_payment performs atomically:
+       *   fee_payments
+       *   fee_payment_allocations
+       *   recalculate_fee_bill
+       *   journal_entries / journal_lines
+       *   receipts
+       *
+       * The frontend must NOT create a second transactions/
+       * transaction_entries accounting record.
+       */
+      const { data: result, error: rpcError } = await supabase.rpc(
+        "record_fee_payment",
+        {
+          p_student_id: selectedStudent.id,
+          p_bill_id: verifiedBill.id,
+          p_amount: paymentAmount,
+          p_payment_mode: mode,
+          p_account_id: selectedAccount.id,
+          p_receipt_number: `SYS-${enteredBillNumber.slice(0, 60)}-${Date.now()}`,
+          p_payment_date: paymentDate,
+          p_reference_number: referenceNumber.trim() || null,
+          p_remarks: notes.trim() || null,
+        },
       );
 
-      const newStatus =
-        newBalanceAmount <= 0
-          ? "paid"
-          : newPaidAmount > 0
-            ? "partial"
-            : "unpaid";
-
-      const receiptNumber =
-        "RCP-" +
-        Date.now() +
-        "-" +
-        Math.random()
-          .toString(36)
-          .slice(2, 6)
-          .toUpperCase();
-
-      /*
-       * CRITICAL FIX:
-       *
-       * fee_payments.account_id -> accounts.id
-       *
-       * selectedAccount.id comes from `accounts`, NOT `financial_accounts`.
-       */
-      const { data: paymentData, error: paymentInsertError } =
-        await supabase
-          .from("fee_payments")
-          .insert({
-            school_id: schoolId,
-            student_id: selectedStudent.id,
-            receipt_number: receiptNumber,
-            payment_date: paymentDate,
-            amount: paymentAmount,
-            payment_method: paymentMode,
-            account_id: selectedAccount.id,
-            reference_number:
-              referenceNumber.trim() || null,
-            notes: notes.trim() || null,
-            received_by: user.id,
-            receipt_generated: false,
-            bill_id: verifiedBill.id,
-          })
-          .select(
-            "id, receipt_number, bill_id, amount, payment_method, payment_date, reference_number, notes",
-          )
-          .single();
-
-      if (paymentInsertError) {
+      if (rpcError) {
         throw new Error(
-          `Unable to record payment: ${paymentInsertError.message}`,
+          `Unable to record payment: ${rpcError.message}`,
         );
       }
 
-      insertedPaymentId = paymentData?.id || null;
-
-      if (!insertedPaymentId) {
+      if (!result || result.success === false) {
         throw new Error(
-          "Payment was inserted but no payment ID was returned.",
+          result?.message || "Unable to record fee payment.",
+        );
+      }
+
+      const paymentId = result.payment_id as string | undefined;
+      const receiptNumber = enteredBillNumber;
+
+      if (!paymentId) {
+        throw new Error(
+          "Payment was recorded but no payment ID was returned.",
         );
       }
 
       /*
-       * Accounting:
-       *   DEBIT  selected Cash/Bank account
-       *   CREDIT Fee Income account
+       * The physical/manual Bill Number is stored on the same fee_bills row.
+       * Receipt page and Fee page therefore always read/edit the same number.
+       * We update it only after the payment succeeds so a failed payment does
+       * not unexpectedly change the bill number.
        */
-      accountingTransactionId =
-        await createFeeAccountingEntry({
-          schoolId,
-          paymentId: insertedPaymentId,
-          amount: paymentAmount,
-          paymentDate,
-          studentName: getStudentName(selectedStudent),
-          account: selectedAccount,
-          userId: user.id,
-          billNumber: verifiedBill.bill_number,
-          paymentMode: mode,
-        });
-
-      /*
-       * Update the bill after payment + accounting are valid.
-       */
-      const { data: updatedBill, error: billUpdateError } =
+      const { data: billWithManualNumber, error: billNumberError } =
         await supabase
           .from("fee_bills")
           .update({
-            paid_amount: newPaidAmount,
-            balance_amount: newBalanceAmount,
-            status: newStatus,
+            bill_number: enteredBillNumber,
+            updated_at: new Date().toISOString(),
           })
           .eq("id", verifiedBill.id)
           .eq("school_id", schoolId)
           .eq("student_id", selectedStudent.id)
           .select(
-            "id, bill_number, bill_date, due_date, total_amount, paid_amount, balance_amount, status",
+            "id, school_id, student_id, bill_number, bill_date, due_date, total_amount, paid_amount, balance_amount, status",
           )
           .single();
 
-      if (billUpdateError || !updatedBill) {
-        if (accountingTransactionId) {
-          await supabase
-            .from("transaction_entries")
-            .delete()
-            .eq("transaction_id", accountingTransactionId)
-            .eq("school_id", schoolId);
-
-          await supabase
-            .from("transactions")
-            .delete()
-            .eq("id", accountingTransactionId)
-            .eq("school_id", schoolId);
-
-          accountingTransactionId = null;
-        }
-
-        if (insertedPaymentId) {
-          await supabase
-            .from("fee_payments")
-            .delete()
-            .eq("id", insertedPaymentId)
-            .eq("school_id", schoolId);
-
-          insertedPaymentId = null;
-        }
-
+      if (billNumberError || !billWithManualNumber) {
         throw new Error(
-          `Payment could not be completed because the bill could not be updated: ${
-            billUpdateError?.message ||
-            "No updated bill was returned."
+          `Payment was recorded, but the manual bill number could not be synchronized: ${
+            billNumberError?.message || "bill was not returned"
           }`,
         );
       }
+
+      /*
+       * Generate the downloadable PDF from the canonical result.
+       * This is independent of receipt-history loading, so the new receipt
+       * can always be downloaded immediately after recording.
+       */
+      const newRemaining =
+        Number(result.remaining_balance ?? result.remaining_outstanding ?? 0);
 
       generateReceiptPDF({
         schoolName: school?.name || "School",
@@ -1837,28 +1989,28 @@ export default function FeesPage() {
         admissionNumber: selectedStudent.admission_no,
         className: selectedStudent.class_name,
         section: selectedStudent.section,
-        billNumber: verifiedBill.bill_number,
+        billNumber:
+          (result.bill_number as string | undefined) ||
+          billWithManualNumber.bill_number ||
+          enteredBillNumber,
         feeDescription: "School Fee Payment",
         amount: paymentAmount,
-        paymentMode,
-        referenceNumber:
-          referenceNumber.trim() || null,
+        paymentMode: mode,
+        referenceNumber: referenceNumber.trim() || null,
         previousOutstanding: currentOutstanding,
-        remainingOutstanding: newBalanceAmount,
+        remainingOutstanding: newRemaining,
         remarks: notes.trim() || null,
       });
 
       const { error: receiptFlagError } = await supabase
         .from("fee_payments")
-        .update({
-          receipt_generated: true,
-        })
-        .eq("id", insertedPaymentId)
+        .update({ receipt_generated: true })
+        .eq("id", paymentId)
         .eq("school_id", schoolId);
 
       if (receiptFlagError) {
-        console.error(
-          "Receipt generated flag update error:",
+        console.warn(
+          "Receipt generated flag could not be updated:",
           receiptFlagError.message,
         );
       }
@@ -1866,6 +2018,7 @@ export default function FeesPage() {
       setShowPaymentModal(false);
       setSelectedBill(null);
       setAmount("");
+      setManualBillNumber("");
       setReferenceNumber("");
       setRemarks("");
       setAccountId("");
@@ -1889,20 +2042,6 @@ export default function FeesPage() {
 
       console.error("PAYMENT RECORDING ERROR:", messageText, error);
 
-      /*
-       * If accounting creation failed after fee_payments was inserted,
-       * remove that payment so the user never gets a false partial save.
-       */
-      if (insertedPaymentId && !accountingTransactionId) {
-        await supabase
-          .from("fee_payments")
-          .delete()
-          .eq("id", insertedPaymentId)
-          .eq("school_id", schoolId);
-
-        insertedPaymentId = null;
-      }
-
       setMessage({
         type: "error",
         text: messageText,
@@ -1917,12 +2056,16 @@ export default function FeesPage() {
    * DOWNLOAD OLD RECEIPT
    * --------------------------------------------------
    */
-  function downloadOldReceipt(payment: FeePayment) {
-    if (!selectedStudent) {
+  async function downloadOldReceipt(payment: FeePayment) {
+    if (!selectedStudent || !schoolId) {
+      setMessage({
+        type: "error",
+        text: "Student or school context is not available.",
+      });
       return;
     }
 
-    if (!schoolId || selectedStudent.school_id !== schoolId) {
+    if (selectedStudent.school_id !== schoolId) {
       setMessage({
         type: "error",
         text: "This student does not belong to your school.",
@@ -1930,39 +2073,87 @@ export default function FeesPage() {
       return;
     }
 
-    const relatedBill = bills.find(
-      (bill) => bill.id === payment.bill_id,
-    );
+    try {
+      setMessage(null);
 
-    const previousOutstanding = relatedBill
-      ? Number(relatedBill.balance_amount || 0) +
-        Number(payment.amount || 0)
-      : Number(payment.amount || 0);
+      /*
+       * Never depend on the visible bill list for receipt download.
+       * A payment may be historical, while the visible Fee Bills list can
+       * be filtered to the current academic year. The payment itself stores
+       * the exact bill_id that it belongs to.
+       */
+      let relatedBill: FeeBill | null = null;
 
-    const remainingOutstanding = relatedBill
-      ? Number(relatedBill.balance_amount || 0)
-      : 0;
+      if (payment.bill_id) {
+        const { data: bill, error: billError } = await supabase
+          .from("fee_bills")
+          .select(
+            "id, academic_year_id, bill_number, bill_date, due_date, total_amount, paid_amount, balance_amount, status",
+          )
+          .eq("id", payment.bill_id)
+          .eq("school_id", schoolId)
+          .eq("student_id", selectedStudent.id)
+          .maybeSingle();
 
-    generateReceiptPDF({
-      schoolName: school?.name || "School",
-      schoolAddress: school?.address || "",
-      schoolPhone: school?.phone || "",
-      schoolEmail: school?.email || "",
-      receiptNumber: payment.receipt_number,
-      receiptDate: payment.payment_date,
-      studentName: getStudentName(selectedStudent),
-      admissionNumber: selectedStudent.admission_no,
-      className: selectedStudent.class_name,
-      section: selectedStudent.section,
-      billNumber: relatedBill?.bill_number || "—",
-      feeDescription: "School Fee Payment",
-      amount: Number(payment.amount || 0),
-      paymentMode: payment.payment_method,
-      referenceNumber: payment.reference_number,
-      previousOutstanding,
-      remainingOutstanding,
-      remarks: payment.notes,
-    });
+        if (billError) {
+          throw new Error(
+            `Unable to load the receipt bill: ${billError.message}`,
+          );
+        }
+
+        relatedBill = (bill as FeeBill | null) || null;
+      }
+
+      /*
+       * For a historical payment whose bill was removed, the receipt is
+       * still downloadable. We simply show the payment amount and omit the
+       * unavailable bill number.
+       */
+      const paymentAmount = Number(payment.amount || 0);
+      const remainingOutstanding = relatedBill
+        ? Number(relatedBill.balance_amount || 0)
+        : 0;
+      const previousOutstanding =
+        relatedBill
+          ? remainingOutstanding + paymentAmount
+          : paymentAmount;
+
+      generateReceiptPDF({
+        schoolName: school?.name || "School",
+        schoolAddress: school?.address || "",
+        schoolPhone: school?.phone || "",
+        schoolEmail: school?.email || "",
+        receiptNumber: relatedBill?.bill_number || payment.receipt_number,
+        receiptDate: payment.payment_date,
+        studentName: getStudentName(selectedStudent),
+        admissionNumber: selectedStudent.admission_no,
+        className: selectedStudent.class_name,
+        section: selectedStudent.section,
+        billNumber: relatedBill?.bill_number || "—",
+        feeDescription: "School Fee Payment",
+        amount: paymentAmount,
+        paymentMode: payment.payment_method,
+        referenceNumber: payment.reference_number,
+        previousOutstanding,
+        remainingOutstanding,
+        remarks: payment.notes,
+      });
+
+      setMessage({
+        type: "success",
+        text: `Bill ${relatedBill?.bill_number || payment.receipt_number} downloaded successfully.`,
+      });
+    } catch (error: unknown) {
+      console.error("DOWNLOAD RECEIPT ERROR:", error);
+
+      setMessage({
+        type: "error",
+        text:
+          error instanceof Error
+            ? error.message
+            : "Unable to download this receipt.",
+      });
+    }
   }
 
   return (
@@ -2189,6 +2380,31 @@ export default function FeesPage() {
                     selected individually.
                   </div>
 
+                  {assignmentPreview.pendingCarryForwards.length > 0 && (
+                    <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+                      <div className="text-xs font-bold uppercase tracking-wide text-amber-700">
+                        Previous Year Carry-Forward
+                      </div>
+                      <div className="mt-1 flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-sm text-amber-800">
+                          Unpaid balance from the previous academic year
+                        </span>
+                        <span className="text-sm font-bold text-amber-900">
+                          {formatMoney(
+                            assignmentPreview.pendingCarryForwards.reduce(
+                              (sum, record) =>
+                                sum + Math.max(Number(record.amount || 0), 0),
+                              0,
+                            ),
+                          )}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-xs text-amber-700">
+                        This amount will be included in the new academic-year bill.
+                      </p>
+                    </div>
+                  )}
+
                   <div className="flex flex-col gap-4 rounded-xl border border-blue-100 bg-blue-50/50 p-4 sm:flex-row sm:items-center sm:justify-between">
                     <div>
                       <div className="text-xs font-semibold uppercase tracking-wide text-blue-600">
@@ -2349,7 +2565,7 @@ export default function FeesPage() {
                       </div>
 
                       <span className="text-lg font-bold text-slate-900">
-                        {formatMoney(selectedAssignmentTotal)}
+                        {formatMoney(assignmentTotalWithCarry)}
                       </span>
                     </div>
                   </div>
@@ -2471,20 +2687,47 @@ export default function FeesPage() {
                           </td>
 
                           <td className="px-5 py-4 text-right">
-                            {Number(bill.balance_amount) > 0 ? (
-                              <button
-                                type="button"
-                                onClick={() => openPaymentModal(bill)}
-                                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 text-xs font-bold text-white transition hover:bg-blue-700"
-                              >
-                                <Plus size={14} />
-                                Add Payment
-                              </button>
-                            ) : (
-                              <span className="text-xs font-semibold text-green-600">
-                                Fully Paid
-                              </span>
-                            )}
+                            <div className="flex flex-wrap items-center justify-end gap-2">
+                              {Number(bill.balance_amount) > 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => openPaymentModal(bill)}
+                                  className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 text-xs font-bold text-white transition hover:bg-blue-700"
+                                >
+                                  <Plus size={14} />
+                                  Add Payment
+                                </button>
+                              )}
+
+                              {Number(bill.balance_amount) > 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    openPaymentModal(bill);
+                                    setShowConcessionForm(true);
+                                  }}
+                                  className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700 transition hover:bg-amber-100"
+                                >
+                                  Give Concession
+                                </button>
+                              )}
+
+                              {Number(bill.balance_amount) > 0 && bill.academic_year_id && (
+                                <button
+                                  type="button"
+                                  onClick={() => void handleCarryForward(bill)}
+                                  className="inline-flex items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700 transition hover:bg-amber-100"
+                                >
+                                  Carry Forward
+                                </button>
+                              )}
+
+                              {Number(bill.balance_amount) <= 0 && (
+                                <span className="text-xs font-semibold text-green-600">
+                                  Fully Paid
+                                </span>
+                              )}
+                            </div>
                           </td>
                         </tr>
                       ))}
@@ -2599,15 +2842,99 @@ export default function FeesPage() {
               className="space-y-5 p-5"
             >
               <div className="rounded-xl bg-red-50 p-4">
-                <div className="text-xs font-semibold uppercase tracking-wide text-red-500">
-                  Current Outstanding
-                </div>
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-xs font-semibold uppercase tracking-wide text-red-500">
+                      Current Outstanding
+                    </div>
 
-                <div className="mt-1 text-2xl font-bold text-red-700">
-                  {formatMoney(
-                    Number(selectedBill.balance_amount),
-                  )}
+                    <div className="mt-1 text-2xl font-bold text-red-700">
+                      {formatMoney(
+                        Number(selectedBill.balance_amount),
+                      )}
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowConcessionForm((visible) => !visible)}
+                    disabled={savingPayment || savingConcession}
+                    className="rounded-lg border border-amber-300 bg-white px-3 py-2 text-xs font-bold text-amber-800 hover:bg-amber-50 disabled:opacity-50"
+                  >
+                    Give Concession
+                  </button>
                 </div>
+              </div>
+
+              {showConcessionForm && (
+                <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
+                  <div className="text-sm font-bold text-amber-900">
+                    Give Concession
+                  </div>
+                  <p className="mt-1 text-xs text-amber-800">
+                    Enter the concession amount to reduce this bill's outstanding balance.
+                  </p>
+
+                  <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                    <input
+                      type="number"
+                      min="0.01"
+                      max={Number(selectedBill.balance_amount)}
+                      step="0.01"
+                      value={concessionAmount}
+                      onChange={(event) => setConcessionAmount(event.target.value)}
+                      placeholder="Concession amount"
+                      className="w-full rounded-lg border border-amber-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-amber-500 focus:ring-2 focus:ring-amber-100"
+                    />
+
+                    <input
+                      value={concessionReason}
+                      onChange={(event) => setConcessionReason(event.target.value)}
+                      placeholder="Reason (optional)"
+                      className="w-full rounded-lg border border-amber-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-amber-500 focus:ring-2 focus:ring-amber-100"
+                    />
+                  </div>
+
+                  <div className="mt-3 flex justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setShowConcessionForm(false)}
+                      disabled={savingConcession}
+                      className="rounded-lg border border-amber-200 bg-white px-3 py-2 text-xs font-semibold text-amber-800"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void applyConcession()}
+                      disabled={savingConcession}
+                      className="rounded-lg bg-amber-600 px-3 py-2 text-xs font-bold text-white hover:bg-amber-700 disabled:opacity-50"
+                    >
+                      {savingConcession ? "Applying..." : "Apply Concession"}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div>
+                <label className="mb-2 block text-sm font-semibold text-slate-700">
+                  Manual Bill Number
+                  <span className="ml-1 text-xs font-normal text-red-500">*</span>
+                </label>
+
+                <input
+                  value={manualBillNumber}
+                  onChange={(event) => setManualBillNumber(event.target.value)}
+                  placeholder="Enter physical/manual bill number"
+                  maxLength={100}
+                  required
+                  autoComplete="off"
+                  className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm font-semibold outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                />
+
+                <p className="mt-1.5 text-xs text-slate-500">
+                  This number is saved on the same fee bill used by the Receipt page.
+                </p>
               </div>
 
               <div>
@@ -2684,7 +3011,7 @@ export default function FeesPage() {
                   className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
                 >
                   <option value="cash">Cash</option>
-                  <option value="bank">Bank Transfer</option>
+                  <option value="bank_transfer">Bank Transfer</option>
                   <option value="upi">UPI</option>
                   <option value="cheque">Cheque</option>
                   <option value="card">Card</option>
@@ -2927,6 +3254,8 @@ function StatusBadge({ status }: { status: string }) {
     classes = "bg-orange-50 text-orange-700";
   } else if (normalized === "cancelled") {
     classes = "bg-slate-100 text-slate-500";
+  } else if (normalized === "carried_forward") {
+    classes = "bg-amber-50 text-amber-700";
   }
 
   return (

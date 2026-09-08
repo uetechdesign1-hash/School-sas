@@ -14,6 +14,7 @@ import {
   X,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
+import { AccountingExportActions } from "../accounting-export";
 
 type Account = {
   id: string;
@@ -1909,7 +1910,8 @@ export default function JournalPage() {
           onConfirm={confirmDelete}
         />
       )}
-    </main>
+          <AccountingExportActions fileName="journal" />
+</main>
   );
 }
 

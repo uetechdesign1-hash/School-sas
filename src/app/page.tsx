@@ -330,7 +330,7 @@ export default function HomePage() {
                       ["Students", "1,248"],
                       ["Staff", "86"],
                       ["Attendance", "94.8%"],
-                      ["Fees", "â‚¹12.4L"],
+                      ["Fees", "12.4L"],
                     ].map(([label, value]) => (
                       <div
                         key={label}
@@ -393,7 +393,7 @@ export default function HomePage() {
 
                       <div className="mt-7">
                         <div className="text-2xl font-bold text-slate-950">
-                          â‚¹18.6L
+                          18.6L
                         </div>
 
                         <div className="mt-2 text-xs text-emerald-600">

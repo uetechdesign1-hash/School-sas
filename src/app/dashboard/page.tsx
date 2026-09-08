@@ -11,6 +11,7 @@ import {
   BookOpen,
   Building2,
   CalendarCheck,
+  CalendarDays,
   Check,
   ChevronRight,
   GraduationCap,
@@ -93,6 +94,12 @@ const QUICK_ACTIONS: QuickActionProps[] = [
     description: "Manage classes and sections",
     href: "/dashboard/classes",
     icon: <School size={20} />,
+  },
+  {
+    title: "Academic Years",
+    description: "Manage academic sessions",
+    href: "/dashboard/academic-years",
+    icon: <CalendarDays size={20} />,
   },
   {
     title: "Fees",

@@ -37,6 +37,24 @@ type TransactionEntry = {
   credit: number | string | null;
 };
 
+type JournalEntry = {
+  id: string;
+  school_id: string;
+  entry_date: string;
+  entry_type: string | null;
+  reference_type: string | null;
+  reference_id: string | null;
+};
+
+type JournalLine = {
+  id: string;
+  school_id: string;
+  journal_entry_id: string;
+  account_id: string;
+  debit: number | string | null;
+  credit: number | string | null;
+};
+
 type ReportRow = {
   id: string;
   code: string;
@@ -105,6 +123,12 @@ export default function ProfitLossPage() {
 
   const [entries, setEntries] =
     useState<TransactionEntry[]>([]);
+
+  const [journalEntries, setJournalEntries] =
+    useState<JournalEntry[]>([]);
+
+  const [journalLines, setJournalLines] =
+    useState<JournalLine[]>([]);
 
   const [dateFrom, setDateFrom] =
     useState(
@@ -232,6 +256,8 @@ export default function ProfitLossPage() {
         accountResult,
         transactionResult,
         entryResult,
+        journalEntryResult,
+        journalLineResult,
       ] = await Promise.all([
         supabase
           .from("schools")
@@ -293,6 +319,40 @@ export default function ProfitLossPage() {
             "school_id",
             currentSchoolId
           ),
+
+        supabase
+          .from("journal_entries")
+          .select(
+            `
+            id,
+            school_id,
+            entry_date,
+            entry_type,
+            reference_type,
+            reference_id
+            `
+          )
+          .eq(
+            "school_id",
+            currentSchoolId
+          ),
+
+        supabase
+          .from("journal_lines")
+          .select(
+            `
+            id,
+            school_id,
+            journal_entry_id,
+            account_id,
+            debit,
+            credit
+            `
+          )
+          .eq(
+            "school_id",
+            currentSchoolId
+          ),
       ]);
 
       if (schoolResult.error) {
@@ -324,6 +384,18 @@ export default function ProfitLossPage() {
         );
       }
 
+      if (journalEntryResult.error) {
+        throw new Error(
+          `Unable to load journal entries: ${journalEntryResult.error.message}`
+        );
+      }
+
+      if (journalLineResult.error) {
+        throw new Error(
+          `Unable to load journal lines: ${journalLineResult.error.message}`
+        );
+      }
+
       setSchoolName(
         schoolResult.data?.name || ""
       );
@@ -341,6 +413,16 @@ export default function ProfitLossPage() {
       setEntries(
         (entryResult.data ||
           []) as TransactionEntry[]
+      );
+
+      setJournalEntries(
+        (journalEntryResult.data ||
+          []) as JournalEntry[]
+      );
+
+      setJournalLines(
+        (journalLineResult.data ||
+          []) as JournalLine[]
       );
     } catch (err: any) {
       console.error(
@@ -363,36 +445,57 @@ export default function ProfitLossPage() {
 
   /*
    * =====================================================
-   * TRANSACTION MAP
+   * CANONICAL ACCOUNTING MAP
+   *
+   * New accounting uses:
+   *   journal_entries -> journal_lines
+   *
+   * Legacy screens still use:
+   *   transactions -> transaction_entries
+   *
+   * P&L uses journal accounting first, then legacy entries only
+   * when that transaction has not already been represented by a
+   * journal entry. This prevents salary/payment double counting
+   * while keeping existing fee/income records visible during the
+   * migration to the canonical journal system.
    * =====================================================
    */
 
-  const transactionMap =
+  const journalEntryMap =
     useMemo(() => {
-      const map =
-        new Map<
-          string,
-          Transaction
-        >();
+      const map = new Map<string, JournalEntry>();
 
-      for (const transaction of transactions) {
-        map.set(
-          transaction.id,
-          transaction
-        );
+      for (const entry of journalEntries) {
+        map.set(entry.id, entry);
       }
 
       return map;
-    }, [transactions]);
+    }, [journalEntries]);
+
+  const journalReferenceIds =
+    useMemo(() => {
+      const ids = new Set<string>();
+
+      for (const entry of journalEntries) {
+        if (entry.reference_id) {
+          ids.add(entry.reference_id);
+        }
+      }
+
+      return ids;
+    }, [journalEntries]);
+
+  const legacyTransactions =
+    useMemo(() => {
+      return transactions.filter(
+        (transaction) =>
+          !journalReferenceIds.has(transaction.id)
+      );
+    }, [transactions, journalReferenceIds]);
 
   /*
    * =====================================================
    * INCOME
-   *
-   * Income accounts normally have credit balances.
-   *
-   * Net income =
-   * credit - debit
    * =====================================================
    */
 
@@ -407,63 +510,87 @@ export default function ProfitLossPage() {
           }
         >();
 
-      for (const entry of entries) {
-        const account =
-          accounts.find(
-            (item) =>
-              item.id ===
-              entry.account_id
-          );
-
-        if (!account) {
-          continue;
-        }
-
-        if (
-          account.account_type
-            .toLowerCase() !==
-          "income"
-        ) {
-          continue;
-        }
-
-        const transaction =
-          transactionMap.get(
-            entry.transaction_id
-          );
-
-        if (!transaction) {
-          continue;
-        }
-
-        if (
-          transaction.transaction_date <
-            dateFrom ||
-          transaction.transaction_date >
-            dateTo
-        ) {
-          continue;
-        }
-
+      const add = (
+        accountId: string,
+        debit: number,
+        credit: number
+      ) => {
         const current =
-          totals.get(
-            entry.account_id
-          ) || {
+          totals.get(accountId) || {
             debit: 0,
             credit: 0,
           };
 
-        current.debit += Number(
-          entry.debit || 0
+        current.debit += debit;
+        current.credit += credit;
+
+        totals.set(accountId, current);
+      };
+
+      // Canonical journal accounting.
+      for (const line of journalLines) {
+        const journal =
+          journalEntryMap.get(line.journal_entry_id);
+
+        if (!journal) continue;
+
+        if (
+          journal.entry_date < dateFrom ||
+          journal.entry_date > dateTo
+        ) {
+          continue;
+        }
+
+        const account = accounts.find(
+          (item) => item.id === line.account_id
         );
 
-        current.credit += Number(
-          entry.credit || 0
+        if (
+          !account ||
+          account.account_type.toLowerCase() !==
+            "income"
+        ) {
+          continue;
+        }
+
+        add(
+          line.account_id,
+          Number(line.debit || 0),
+          Number(line.credit || 0)
+        );
+      }
+
+      // Legacy transactions not already represented by journals.
+      for (const entry of entries) {
+        const transaction = legacyTransactions.find(
+          (item) => item.id === entry.transaction_id
         );
 
-        totals.set(
+        if (!transaction) continue;
+
+        if (
+          transaction.transaction_date < dateFrom ||
+          transaction.transaction_date > dateTo
+        ) {
+          continue;
+        }
+
+        const account = accounts.find(
+          (item) => item.id === entry.account_id
+        );
+
+        if (
+          !account ||
+          account.account_type.toLowerCase() !==
+            "income"
+        ) {
+          continue;
+        }
+
+        add(
           entry.account_id,
-          current
+          Number(entry.debit || 0),
+          Number(entry.credit || 0)
         );
       }
 
@@ -471,55 +598,40 @@ export default function ProfitLossPage() {
 
       for (const account of accounts) {
         if (
-          account.account_type
-            .toLowerCase() !==
+          account.account_type.toLowerCase() !==
           "income"
         ) {
           continue;
         }
 
-        const total =
-          totals.get(account.id);
+        const total = totals.get(account.id);
+        const debit = total?.debit || 0;
+        const credit = total?.credit || 0;
+        const amount = credit - debit;
 
-        const debit =
-          total?.debit || 0;
-
-        const credit =
-          total?.credit || 0;
-
-        const amount =
-          credit - debit;
-
-        if (
-          Math.abs(amount) <
-          0.000001
-        ) {
-          continue;
-        }
+        if (Math.abs(amount) < 0.000001) continue;
 
         result.push({
           id: account.id,
-          code:
-            account.code || "",
+          code: account.code || "",
           name: account.name,
-          type:
-            account.account_type,
-          amount:
-            amount,
+          type: account.account_type,
+          amount,
         });
       }
 
       result.sort((a, b) =>
-        a.name.localeCompare(
-          b.name
-        )
+        a.name.localeCompare(b.name)
       );
 
       return result;
     }, [
       accounts,
+      journalEntries,
+      journalLines,
+      journalEntryMap,
       entries,
-      transactionMap,
+      legacyTransactions,
       dateFrom,
       dateTo,
     ]);
@@ -527,11 +639,6 @@ export default function ProfitLossPage() {
   /*
    * =====================================================
    * EXPENSES
-   *
-   * Expense accounts normally have debit balances.
-   *
-   * Net expense =
-   * debit - credit
    * =====================================================
    */
 
@@ -546,63 +653,87 @@ export default function ProfitLossPage() {
           }
         >();
 
-      for (const entry of entries) {
-        const account =
-          accounts.find(
-            (item) =>
-              item.id ===
-              entry.account_id
-          );
-
-        if (!account) {
-          continue;
-        }
-
-        if (
-          account.account_type
-            .toLowerCase() !==
-          "expense"
-        ) {
-          continue;
-        }
-
-        const transaction =
-          transactionMap.get(
-            entry.transaction_id
-          );
-
-        if (!transaction) {
-          continue;
-        }
-
-        if (
-          transaction.transaction_date <
-            dateFrom ||
-          transaction.transaction_date >
-            dateTo
-        ) {
-          continue;
-        }
-
+      const add = (
+        accountId: string,
+        debit: number,
+        credit: number
+      ) => {
         const current =
-          totals.get(
-            entry.account_id
-          ) || {
+          totals.get(accountId) || {
             debit: 0,
             credit: 0,
           };
 
-        current.debit += Number(
-          entry.debit || 0
+        current.debit += debit;
+        current.credit += credit;
+
+        totals.set(accountId, current);
+      };
+
+      // Canonical journal accounting.
+      for (const line of journalLines) {
+        const journal =
+          journalEntryMap.get(line.journal_entry_id);
+
+        if (!journal) continue;
+
+        if (
+          journal.entry_date < dateFrom ||
+          journal.entry_date > dateTo
+        ) {
+          continue;
+        }
+
+        const account = accounts.find(
+          (item) => item.id === line.account_id
         );
 
-        current.credit += Number(
-          entry.credit || 0
+        if (
+          !account ||
+          account.account_type.toLowerCase() !==
+            "expense"
+        ) {
+          continue;
+        }
+
+        add(
+          line.account_id,
+          Number(line.debit || 0),
+          Number(line.credit || 0)
+        );
+      }
+
+      // Legacy transactions not already represented by journals.
+      for (const entry of entries) {
+        const transaction = legacyTransactions.find(
+          (item) => item.id === entry.transaction_id
         );
 
-        totals.set(
+        if (!transaction) continue;
+
+        if (
+          transaction.transaction_date < dateFrom ||
+          transaction.transaction_date > dateTo
+        ) {
+          continue;
+        }
+
+        const account = accounts.find(
+          (item) => item.id === entry.account_id
+        );
+
+        if (
+          !account ||
+          account.account_type.toLowerCase() !==
+            "expense"
+        ) {
+          continue;
+        }
+
+        add(
           entry.account_id,
-          current
+          Number(entry.debit || 0),
+          Number(entry.credit || 0)
         );
       }
 
@@ -610,55 +741,40 @@ export default function ProfitLossPage() {
 
       for (const account of accounts) {
         if (
-          account.account_type
-            .toLowerCase() !==
+          account.account_type.toLowerCase() !==
           "expense"
         ) {
           continue;
         }
 
-        const total =
-          totals.get(account.id);
+        const total = totals.get(account.id);
+        const debit = total?.debit || 0;
+        const credit = total?.credit || 0;
+        const amount = debit - credit;
 
-        const debit =
-          total?.debit || 0;
-
-        const credit =
-          total?.credit || 0;
-
-        const amount =
-          debit - credit;
-
-        if (
-          Math.abs(amount) <
-          0.000001
-        ) {
-          continue;
-        }
+        if (Math.abs(amount) < 0.000001) continue;
 
         result.push({
           id: account.id,
-          code:
-            account.code || "",
+          code: account.code || "",
           name: account.name,
-          type:
-            account.account_type,
-          amount:
-            amount,
+          type: account.account_type,
+          amount,
         });
       }
 
       result.sort((a, b) =>
-        a.name.localeCompare(
-          b.name
-        )
+        a.name.localeCompare(b.name)
       );
 
       return result;
     }, [
       accounts,
+      journalEntries,
+      journalLines,
+      journalEntryMap,
       entries,
-      transactionMap,
+      legacyTransactions,
       dateFrom,
       dateTo,
     ]);
@@ -1428,7 +1544,7 @@ export default function ProfitLossPage() {
             Loading Profit & Loss...
           </div>
         )}
-      </main>
+</main>
     </>
   );
 }

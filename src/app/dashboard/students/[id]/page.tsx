@@ -36,6 +36,14 @@ type Section = {
   name: string;
 };
 
+type AcademicYear = {
+  id: string;
+  name: string;
+  start_date: string;
+  end_date: string;
+  is_current: boolean;
+};
+
 type Student = {
   id: string;
   school_id: string;
@@ -119,6 +127,15 @@ export default function StudentDetailsPage() {
 
   const [sectionId, setSectionId] =
     useState("");
+
+  const [academicYearId, setAcademicYearId] =
+    useState("");
+
+  const [academicYears, setAcademicYears] =
+    useState<AcademicYear[]>([]);
+
+  const [academicYearsLoading, setAcademicYearsLoading] =
+    useState(true);
 
   const [classes, setClasses] =
     useState<SchoolClass[]>([]);
@@ -349,11 +366,39 @@ export default function StudentDetailsPage() {
       }
 
       setClassesLoading(true);
+      setAcademicYearsLoading(true);
+
+      const academicYearsPromise = supabase
+        .from("academic_years")
+        .select("id, name, start_date, end_date, is_current")
+        .eq("school_id", schoolId)
+        .order("start_date", { ascending: false });
 
       await loadClasses(
         supabase,
         schoolId
       );
+
+      const {
+        data: academicYearsData,
+        error: academicYearsError,
+      } = await academicYearsPromise;
+
+      if (academicYearsError) {
+        throw academicYearsError;
+      }
+
+      const loadedAcademicYears =
+        (academicYearsData || []) as AcademicYear[];
+
+      setAcademicYears(loadedAcademicYears);
+
+      const currentAcademicYear =
+        loadedAcademicYears.find((year) => year.is_current);
+
+      if (currentAcademicYear) {
+        setAcademicYearId(currentAcademicYear.id);
+      }
 
       const {
         data,
@@ -441,6 +486,7 @@ export default function StudentDetailsPage() {
       );
     } finally {
       setClassesLoading(false);
+      setAcademicYearsLoading(false);
       setLoading(false);
     }
   }
@@ -448,6 +494,10 @@ export default function StudentDetailsPage() {
   function fillForm(
     record: Student
   ) {
+    setAcademicYearId(
+      record.academic_year_id || ""
+    );
+
     setAdmissionNo(
       record.admission_no || ""
     );
@@ -557,7 +607,17 @@ export default function StudentDetailsPage() {
         return;
       }
 
+      if (!academicYearId) {
+        setError(
+          "Please select an academic year."
+        );
+        return;
+      }
+
       const updates = {
+        academic_year_id:
+          academicYearId,
+
         admission_no:
           admissionNo.trim(),
 
@@ -1038,6 +1098,47 @@ export default function StudentDetailsPage() {
                   />
                 </Field>
 
+                {/* ACADEMIC YEAR */}
+
+                <Field label="Academic Year" required>
+                  <select
+                    value={academicYearId}
+                    onChange={(event) =>
+                      setAcademicYearId(
+                        event.target.value
+                      )
+                    }
+                    disabled={
+                      academicYearsLoading ||
+                      saving
+                    }
+                    required
+                    className={inputClass}
+                  >
+                    <option value="">
+                      {academicYearsLoading
+                        ? "Loading academic years..."
+                        : academicYears.length === 0
+                        ? "No academic years"
+                        : "Select academic year"}
+                    </option>
+
+                    {academicYears.map(
+                      (year) => (
+                        <option
+                          key={year.id}
+                          value={year.id}
+                        >
+                          {year.name}
+                          {year.is_current
+                            ? " (Current)"
+                            : ""}
+                        </option>
+                      )
+                    )}
+                  </select>
+                </Field>
+
                 {/* CLASS */}
 
                 <Field label="Class">
@@ -1354,6 +1455,16 @@ export default function StudentDetailsPage() {
                 />
 
                 <Info
+                  label="Academic Year"
+                  value={
+                    getAcademicYearName(
+                      academicYears,
+                      student.academic_year_id
+                    )
+                  }
+                />
+
+                <Info
                   label="Class"
                   value={
                     getClassName(
@@ -1461,6 +1572,21 @@ function getStudentName(
   ]
     .filter(Boolean)
     .join(" ");
+}
+
+function getAcademicYearName(
+  academicYears: AcademicYear[],
+  academicYearId: string | null
+) {
+  if (!academicYearId) {
+    return "Not assigned";
+  }
+
+  return (
+    academicYears.find(
+      (item) => item.id === academicYearId
+    )?.name || "—"
+  );
 }
 
 function getClassName(

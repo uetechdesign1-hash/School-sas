@@ -3,6 +3,7 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { AccountingExportActions } from "../accounting-export";
 import {
   ArrowLeft,
   CheckCircle2,
@@ -880,7 +881,8 @@ export default function AccountsPage() {
           </div>
         </Modal>
       )}
-    </main>
+          <AccountingExportActions fileName="accounts" />
+</main>
   );
 }
 

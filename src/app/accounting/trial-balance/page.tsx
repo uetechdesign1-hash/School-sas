@@ -1375,7 +1375,7 @@ export default function TrialBalancePage() {
             Loading Trial Balance...
           </div>
         )}
-      </main>
+</main>
     </>
   );
 }

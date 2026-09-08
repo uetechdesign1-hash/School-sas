@@ -137,7 +137,7 @@ export function generateReceiptPDF(data: ReceiptData) {
   pdf.setFontSize(9);
   pdf.setFont("helvetica", "bold");
 
-  pdf.text("Receipt Number", left, 73);
+  pdf.text("Manual Bill Number", left, 73);
   pdf.text("Date", right - 55, 73);
 
   pdf.setFont("helvetica", "normal");
