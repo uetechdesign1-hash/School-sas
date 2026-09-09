@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { Clock3, Save, Users } from "lucide-react";
 
 type AttendanceSettings = {
   school_id: string;
@@ -14,6 +15,23 @@ type AttendanceSettings = {
   work_end_time: string;
   grace_period_minutes: number;
   minimum_work_minutes: number;
+};
+
+type Teacher = {
+  id: string;
+  first_name: string;
+  middle_name: string | null;
+  last_name: string | null;
+  designation: string | null;
+};
+
+type TeacherTiming = {
+  id?: string;
+  staff_id: string;
+  work_start_time: string;
+  work_end_time: string;
+  grace_period_minutes: string;
+  minimum_work_minutes: string;
 };
 
 export default function StaffAttendanceSettingsPage() {
@@ -40,6 +58,11 @@ export default function StaffAttendanceSettingsPage() {
 
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [teachers, setTeachers] = useState<Teacher[]>([]);
+  const [teacherTimings, setTeacherTimings] = useState<TeacherTiming[]>([]);
+  const [selectedTeacherId, setSelectedTeacherId] = useState("");
+  const [teacherTiming, setTeacherTiming] = useState<TeacherTiming | null>(null);
+  const [teacherSaving, setTeacherSaving] = useState(false);
 
   // ---------------------------------------------------------
   // LOAD SCHOOL
@@ -190,23 +213,140 @@ export default function StaffAttendanceSettingsPage() {
           ? String(settings.minimum_work_minutes)
           : "450"
       );
-    } catch (err: any) {
-      console.error("ATTENDANCE SETTINGS LOAD ERROR:", {
-        message: err?.message,
-        details: err?.details,
-        hint: err?.hint,
-        code: err?.code,
-        error: err,
-      });
 
-      setError(
-        err?.message ||
-          "Unable to load attendance settings."
-      );
+      const [{ data: teacherData, error: teacherError }, { data: timingData, error: timingError }] =
+        await Promise.all([
+          supabase
+            .from("staff")
+            .select("id, first_name, middle_name, last_name, designation")
+            .eq("school_id", activeSchoolId)
+            .eq("status", "active")
+            .order("first_name"),
+          supabase
+            .from("staff_attendance_timings")
+            .select("id, staff_id, work_start_time, work_end_time, grace_period_minutes, minimum_work_minutes")
+            .eq("school_id", activeSchoolId),
+        ]);
+
+      if (teacherError) throw teacherError;
+      setTeachers((teacherData || []) as Teacher[]);
+      if (timingError) {
+        if (timingError.code !== "42P01" && timingError.code !== "PGRST205") {
+          throw timingError;
+        }
+        setTeacherTimings([]);
+        setMessage(
+          "Teacher-specific timings are unavailable until the latest database migration is applied.",
+        );
+      } else {
+        setTeacherTimings(
+          ((timingData || []) as TeacherTiming[]).map((timing) => ({
+            ...timing,
+            work_start_time: String(timing.work_start_time).slice(0, 5),
+            work_end_time: String(timing.work_end_time).slice(0, 5),
+            grace_period_minutes: String(timing.grace_period_minutes),
+            minimum_work_minutes: String(timing.minimum_work_minutes),
+          })),
+        );
+      }
+    } catch (err: unknown) {
+      const message =
+        err instanceof Error ? err.message : "Unable to load attendance settings.";
+      setError(message);
     } finally {
       setLoading(false);
     }
   };
+
+  function teacherName(teacher: Teacher) {
+    return [teacher.first_name, teacher.middle_name, teacher.last_name]
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  function selectTeacher(staffId: string) {
+    setSelectedTeacherId(staffId);
+    const existing = teacherTimings.find((timing) => timing.staff_id === staffId);
+    setTeacherTiming(existing ? { ...existing } : {
+      staff_id: staffId,
+      work_start_time: workStartTime,
+      work_end_time: workEndTime,
+      grace_period_minutes: gracePeriod,
+      minimum_work_minutes: minimumWorkMinutes,
+    });
+  }
+
+  async function saveTeacherTiming() {
+    if (!teacherTiming || !schoolId) return;
+    setTeacherSaving(true);
+    setError("");
+    setMessage("");
+    try {
+      const { data, error } = await supabase
+        .from("staff_attendance_timings")
+        .upsert({
+          school_id: schoolId,
+          staff_id: teacherTiming.staff_id,
+          work_start_time: teacherTiming.work_start_time,
+          work_end_time: teacherTiming.work_end_time,
+          grace_period_minutes: Number(teacherTiming.grace_period_minutes),
+          minimum_work_minutes: Number(teacherTiming.minimum_work_minutes),
+        }, { onConflict: "school_id,staff_id" })
+        .select("id, staff_id, work_start_time, work_end_time, grace_period_minutes, minimum_work_minutes")
+        .single();
+      if (error) throw error;
+      const normalized = {
+        ...(data as TeacherTiming),
+        work_start_time: String(data.work_start_time).slice(0, 5),
+        work_end_time: String(data.work_end_time).slice(0, 5),
+        grace_period_minutes: String(data.grace_period_minutes),
+        minimum_work_minutes: String(data.minimum_work_minutes),
+      };
+      setTeacherTimings((current) => [
+        ...current.filter((timing) => timing.staff_id !== normalized.staff_id),
+        normalized,
+      ]);
+      setTeacherTiming(normalized);
+      setMessage("Teacher timing saved. It overrides universal timing for attendance and payroll.");
+    } catch (err) {
+      const databaseError = err as {
+        message?: string;
+        details?: string;
+        hint?: string;
+        code?: string;
+      };
+      const detail = [databaseError.message, databaseError.details, databaseError.hint]
+        .filter(Boolean)
+        .join(" ");
+      setError(
+        databaseError.code === "42P01" || databaseError.code === "PGRST205"
+          ? "Teacher timings are not available yet. Apply the migration 20260909143000_add_teacher_attendance_timings.sql in Supabase, then refresh this page."
+          : detail || "Unable to save teacher timing.",
+      );
+    } finally {
+      setTeacherSaving(false);
+    }
+  }
+
+  async function removeTeacherTiming() {
+    if (!schoolId || !selectedTeacherId) return;
+    setTeacherSaving(true);
+    try {
+      const { error } = await supabase
+        .from("staff_attendance_timings")
+        .delete()
+        .eq("school_id", schoolId)
+        .eq("staff_id", selectedTeacherId);
+      if (error) throw error;
+      setTeacherTimings((current) => current.filter((timing) => timing.staff_id !== selectedTeacherId));
+      selectTeacher(selectedTeacherId);
+      setMessage("Teacher timing removed. Universal timing applies again.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to remove teacher timing.");
+    } finally {
+      setTeacherSaving(false);
+    }
+  }
 
   // ---------------------------------------------------------
   // CAPTURE SCHOOL GPS LOCATION
@@ -848,6 +988,144 @@ export default function StaffAttendanceSettingsPage() {
                 Current default: 450 minutes = 7.5 hours.
               </p>
             </div>
+          </div>
+        </section>
+
+        {/* TEACHER-SPECIFIC TIMINGS */}
+        <section className="rounded-2xl border border-indigo-200 bg-indigo-50/40 shadow-sm">
+          <div className="border-b border-indigo-100 p-5 md:p-6">
+            <div className="flex items-start gap-3">
+              <div className="rounded-xl bg-indigo-100 p-2 text-indigo-700">
+                <Users size={20} />
+              </div>
+              <div>
+                <h2 className="text-lg font-bold text-slate-900">
+                  Teacher-specific timings
+                </h2>
+                <p className="mt-1 text-sm text-slate-500">
+                  Select a teacher to override the universal working hours above. These timings are used for attendance and payroll.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-4 p-5 md:p-6">
+            <select
+              value={selectedTeacherId}
+              onChange={(event) => selectTeacher(event.target.value)}
+              className="w-full rounded-xl border bg-white px-4 py-3 text-sm font-semibold"
+            >
+              <option value="">Select a teacher</option>
+              {teachers.map((teacher) => (
+                <option key={teacher.id} value={teacher.id}>
+                  {teacherName(teacher)}
+                  {teacher.designation ? ` — ${teacher.designation}` : ""}
+                  {teacherTimings.some((timing) => timing.staff_id === teacher.id)
+                    ? " (Custom timing)"
+                    : " (Universal timing)"}
+                </option>
+              ))}
+            </select>
+
+            {teacherTiming && (
+              <div className="space-y-4 rounded-xl border border-indigo-100 bg-white p-4">
+                <div className="flex items-center gap-2 text-sm font-bold text-indigo-700">
+                  <Clock3 size={17} />
+                  Timing override for{" "}
+                  {(() => {
+                    const teacher = teachers.find(
+                      (item) => item.id === selectedTeacherId,
+                    );
+                    return teacher ? teacherName(teacher) : "selected teacher";
+                  })()}
+                </div>
+                <div className="grid gap-4 md:grid-cols-2">
+                  {[
+                    ["work_start_time", "Work Start", "time"],
+                    ["work_end_time", "Work End", "time"],
+                    ["grace_period_minutes", "Grace Period (minutes)", "number"],
+                    ["minimum_work_minutes", "Minimum Work Minutes", "number"],
+                  ].map(([key, label, type]) => (
+                    <div key={key}>
+                      <label className="mb-1.5 block text-xs font-bold uppercase text-slate-500">
+                        {label}
+                      </label>
+                      <input
+                        type={type}
+                        min={type === "number" ? "0" : undefined}
+                        value={teacherTiming[key as keyof TeacherTiming] as string}
+                        onChange={(event) =>
+                          setTeacherTiming((current) =>
+                            current ? { ...current, [key]: event.target.value } : current,
+                          )
+                        }
+                        className="w-full rounded-xl border px-4 py-3 text-sm font-semibold"
+                      />
+                    </div>
+                  ))}
+                </div>
+                <div className="flex flex-wrap gap-3">
+                  <button
+                    type="button"
+                    onClick={saveTeacherTiming}
+                    disabled={teacherSaving}
+                    className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-bold text-white disabled:opacity-50"
+                  >
+                    <Save size={16} />
+                    {teacherSaving ? "Saving..." : "Save Teacher Timing"}
+                  </button>
+                  {teacherTimings.some((timing) => timing.staff_id === selectedTeacherId) && (
+                    <button
+                      type="button"
+                      onClick={removeTeacherTiming}
+                      disabled={teacherSaving}
+                      className="rounded-xl border px-4 py-2.5 text-sm font-bold text-slate-700 disabled:opacity-50"
+                    >
+                      Use Universal Timing
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {teacherTimings.length > 0 && (
+              <div className="rounded-xl border border-indigo-100 bg-white p-4">
+                <div className="mb-3">
+                  <p className="font-bold text-slate-900">
+                    Teachers with custom timings
+                  </p>
+                  <p className="mt-1 text-xs text-slate-500">
+                    Only teachers whose timing differs from the universal setting appear here.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {teacherTimings.map((timing) => {
+                    const teacher = teachers.find(
+                      (item) => item.id === timing.staff_id,
+                    );
+                    if (!teacher) return null;
+
+                    return (
+                      <button
+                        key={timing.staff_id}
+                        type="button"
+                        onClick={() => selectTeacher(timing.staff_id)}
+                        className={`rounded-xl border px-3 py-2 text-left text-sm font-bold transition ${
+                          selectedTeacherId === timing.staff_id
+                            ? "border-indigo-600 bg-indigo-600 text-white"
+                            : "border-indigo-200 bg-indigo-50 text-indigo-800 hover:bg-indigo-100"
+                        }`}
+                      >
+                        <span className="block">{teacherName(teacher)}</span>
+                        <span className="mt-0.5 block text-xs font-medium opacity-80">
+                          {timing.work_start_time} - {timing.work_end_time}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
         </section>
 

@@ -39,6 +39,14 @@ type Attendance = {
   is_early_checkout: boolean | null;
 };
 
+type StaffTiming = {
+  work_start_time: string;
+  work_end_time: string;
+  grace_period_minutes: number;
+  minimum_work_minutes: number;
+  is_override: boolean;
+};
+
 function staffName(staff: Staff) {
   return [
     staff.first_name,
@@ -91,6 +99,7 @@ export default function StaffHomePage() {
 
   const [attendance, setAttendance] =
     useState<Attendance | null>(null);
+  const [timing, setTiming] = useState<StaffTiming | null>(null);
 
   const [schoolName, setSchoolName] =
     useState("School");
@@ -164,6 +173,38 @@ export default function StaffHomePage() {
         }
 
         setStaff(staffRow);
+
+        const { data: universalTiming, error: universalTimingError } =
+          await supabase.rpc("get_staff_attendance_settings", {
+            p_school_id: staffRow.school_id,
+          });
+        if (universalTimingError) throw universalTimingError;
+
+        const { data: teacherTiming, error: teacherTimingError } = await supabase
+          .from("staff_attendance_timings")
+          .select("work_start_time, work_end_time, grace_period_minutes, minimum_work_minutes")
+          .eq("school_id", staffRow.school_id)
+          .eq("staff_id", staffRow.id)
+          .maybeSingle();
+        if (teacherTimingError && teacherTimingError.code !== "PGRST116") {
+          throw teacherTimingError;
+        }
+
+        setTiming({
+          work_start_time: String(
+            teacherTiming?.work_start_time || universalTiming?.work_start_time || "09:00",
+          ).slice(0, 5),
+          work_end_time: String(
+            teacherTiming?.work_end_time || universalTiming?.work_end_time || "17:00",
+          ).slice(0, 5),
+          grace_period_minutes: Number(
+            teacherTiming?.grace_period_minutes ?? universalTiming?.grace_period_minutes ?? 10,
+          ),
+          minimum_work_minutes: Number(
+            teacherTiming?.minimum_work_minutes ?? universalTiming?.minimum_work_minutes ?? 450,
+          ),
+          is_override: Boolean(teacherTiming),
+        });
 
         // ==========================================
         // SCHOOL
@@ -345,6 +386,46 @@ export default function StaffHomePage() {
                   <div className="flex h-16 w-16 items-center justify-center rounded-full bg-emerald-50 text-emerald-600">
                     <MapPin className="h-7 w-7" />
                   </div>
+
+                  {timing && (
+                    <div className="mt-6 rounded-2xl border border-indigo-200 bg-indigo-50/50 p-5 shadow-sm">
+                      <div className="flex items-start gap-3">
+                        <div className="rounded-xl bg-indigo-100 p-2 text-indigo-700">
+                          <Clock3 className="h-5 w-5" />
+                        </div>
+                        <div>
+                          <h2 className="font-bold text-slate-900">My Attendance Timing</h2>
+                          <p className="mt-1 text-sm text-slate-600">
+                            {timing.is_override
+                              ? "These timings were set specifically for you by your administrator."
+                              : "You are using the school's universal attendance timing."}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                        <div className="rounded-xl bg-white p-3">
+                          <p className="text-xs text-slate-500">Working Hours</p>
+                          <p className="mt-1 font-bold text-slate-900">
+                            {timing.work_start_time} - {timing.work_end_time}
+                          </p>
+                        </div>
+                        <div className="rounded-xl bg-white p-3">
+                          <p className="text-xs text-slate-500">Grace Period</p>
+                          <p className="mt-1 font-bold text-slate-900">{timing.grace_period_minutes} minutes</p>
+                        </div>
+                        <div className="rounded-xl bg-white p-3">
+                          <p className="text-xs text-slate-500">Minimum Work</p>
+                          <p className="mt-1 font-bold text-slate-900">{timing.minimum_work_minutes} minutes</p>
+                        </div>
+                        <div className="rounded-xl bg-white p-3">
+                          <p className="text-xs text-slate-500">Timing Source</p>
+                          <p className="mt-1 font-bold text-indigo-700">
+                            {timing.is_override ? "Administrator Override" : "Universal"}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
                   <h2 className="mt-4 text-xl font-bold text-slate-900">
                     Ready for Attendance
