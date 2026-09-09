@@ -45,6 +45,7 @@ type Staff = {
   status: string;
   photo_url: string | null;
   user_id: string | null;
+  gross_salary: number | null;
 };
 
 type SchoolMembership = {
@@ -86,6 +87,18 @@ function label(
     .replace(/\b\w/g, (letter) =>
       letter.toUpperCase()
     );
+}
+
+function formatSalary(value: number | null) {
+  if (value === null) {
+    return "Not set";
+  }
+
+  return new Intl.NumberFormat("en-IN", {
+    style: "currency",
+    currency: "INR",
+    maximumFractionDigits: 0,
+  }).format(value);
 }
 
 function statusClass(status: string) {
@@ -250,8 +263,62 @@ export default function StaffPage() {
         throw staffError;
       }
 
+      const staffRows = (staffData || []) as Omit<
+        Staff,
+        "gross_salary"
+      >[];
+      const staffIds = staffRows.map((item) => item.id);
+      const grossSalaryByStaff = new Map<string, number>();
+
+      if (staffIds.length > 0) {
+        const {
+          data: salaryData,
+          error: salaryError,
+        } = await supabase
+          .from("staff_salary_structures")
+          .select(
+            `
+              staff_id,
+              effective_from,
+              basic_salary,
+              house_allowance,
+              transport_allowance,
+              medical_allowance,
+              other_allowance
+            `
+          )
+          .in("staff_id", staffIds)
+          .eq("school_id", membershipData.school_id)
+          .order("effective_from", {
+            ascending: false,
+          });
+
+        if (salaryError) {
+          throw salaryError;
+        }
+
+        for (const salary of salaryData || []) {
+          if (grossSalaryByStaff.has(salary.staff_id)) {
+            continue;
+          }
+
+          grossSalaryByStaff.set(
+            salary.staff_id,
+            Number(salary.basic_salary || 0) +
+              Number(salary.house_allowance || 0) +
+              Number(salary.transport_allowance || 0) +
+              Number(salary.medical_allowance || 0) +
+              Number(salary.other_allowance || 0)
+          );
+        }
+      }
+
       setStaff(
-        (staffData || []) as Staff[]
+        staffRows.map((item) => ({
+          ...item,
+          gross_salary:
+            grossSalaryByStaff.get(item.id) ?? null,
+        }))
       );
     } catch (err) {
       console.error(
@@ -729,7 +796,7 @@ export default function StaffPage() {
 
               <div className="hidden overflow-x-auto lg:block">
 
-                <table className="w-full min-w-[950px]">
+                <table className="w-full min-w-[1100px]">
 
                   <thead>
                     <tr className="border-b border-slate-200 bg-slate-50/70 text-left">
@@ -752,6 +819,10 @@ export default function StaffPage() {
 
                       <th className="px-4 py-3 text-[10px] font-black uppercase tracking-wider text-slate-400">
                         Employment
+                      </th>
+
+                      <th className="px-4 py-3 text-[10px] font-black uppercase tracking-wider text-slate-400">
+                        Gross Salary
                       </th>
 
                       <th className="px-4 py-3 text-[10px] font-black uppercase tracking-wider text-slate-400">
@@ -835,6 +906,12 @@ export default function StaffPage() {
                           <td className="px-4 py-4 text-sm text-slate-600">
                             {label(
                               item.employment_type
+                            )}
+                          </td>
+
+                          <td className="px-4 py-4 text-sm font-bold text-slate-700">
+                            {formatSalary(
+                              item.gross_salary
                             )}
                           </td>
 
@@ -937,6 +1014,13 @@ export default function StaffPage() {
                           </div>
 
                           <div className="mt-3 flex flex-wrap gap-2">
+
+                            <span className="rounded-full bg-blue-50 px-2.5 py-1 text-[10px] font-bold text-blue-700">
+                              Gross:{" "}
+                              {formatSalary(
+                                item.gross_salary
+                              )}
+                            </span>
 
                             <span
                               className={`rounded-full border px-2.5 py-1 text-[10px] font-bold ${statusClass(
