@@ -68,6 +68,16 @@ export default function NewStaffPage() {
         throw new Error("Joining date is required.");
       }
 
+      const email = form.email.trim().toLowerCase();
+
+      if (!email) {
+        throw new Error("Email is required for staff password recovery.");
+      }
+
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        throw new Error("Please enter a valid email address.");
+      }
+
       const supabase = createClient();
 
       const {
@@ -144,7 +154,7 @@ export default function NewStaffPage() {
               form.phone.trim() || null,
 
             email:
-              form.email.trim() || null,
+              email,
 
             address:
               form.address.trim() || null,
@@ -472,7 +482,8 @@ export default function NewStaffPage() {
               />
 
               <Field
-                label="Email"
+                label="Email (used for login and password reset)"
+                required
                 type="email"
                 value={form.email}
                 onChange={(value) =>

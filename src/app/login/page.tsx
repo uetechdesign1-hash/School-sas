@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 
 import { createClient } from "@/lib/supabase/client";
+import Link from "next/link";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -410,6 +411,13 @@ export default function LoginPage() {
               </button>
 
             </form>
+
+            <Link
+              href="/forgot-password"
+              className="mt-4 block text-center text-sm font-semibold text-blue-600 hover:text-blue-700"
+            >
+              Forgot password?
+            </Link>
 
             {/* STAFF INFO */}
 

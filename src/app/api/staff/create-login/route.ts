@@ -382,6 +382,30 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const staffEmail = staff.email?.trim().toLowerCase() || "";
+
+    if (!staffEmail) {
+      return json(
+        {
+          success: false,
+          error:
+            "Add an email address to the staff record before creating a login.",
+        },
+        400
+      );
+    }
+
+    if (email !== staffEmail) {
+      return json(
+        {
+          success: false,
+          error:
+            "The login email must match the staff member's email address.",
+        },
+        400
+      );
+    }
+
     // =====================================================
     // CHECK STAFF STATUS
     // =====================================================

@@ -206,6 +206,7 @@ export default function StaffProfilePage() {
   const [showPassword, setShowPassword] = useState(false);
 
   const [creatingLogin, setCreatingLogin] = useState(false);
+  const [sendingResetEmail, setSendingResetEmail] = useState(false);
 
   /*
    * Store credentials only for the current successful
@@ -519,6 +520,44 @@ export default function StaffProfilePage() {
       setError(
         "Unable to copy credentials."
       );
+    }
+  };
+
+  const sendResetEmail = async () => {
+    if (!staff?.email) {
+      setError("Add an email address to this staff member first.");
+      return;
+    }
+
+    setSendingResetEmail(true);
+    setError("");
+    setSuccess("");
+
+    try {
+      const { error: resetError } =
+        await supabase.auth.resetPasswordForEmail(
+          staff.email.trim().toLowerCase(),
+          {
+            redirectTo: `${window.location.origin}/auth/update-password`,
+          }
+        );
+
+      if (resetError) {
+        throw resetError;
+      }
+
+      setSuccess(
+        `Password reset email sent to ${staff.email}.`
+      );
+    } catch (err) {
+      console.error("SEND STAFF RESET EMAIL ERROR:", err);
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Unable to send password reset email."
+      );
+    } finally {
+      setSendingResetEmail(false);
     }
   };
 
@@ -1008,6 +1047,18 @@ export default function StaffProfilePage() {
                         <KeyRound className="h-4 w-4" />
                         Reset Staff Password
                       </Link>
+
+                      <button
+                        type="button"
+                        onClick={() => void sendResetEmail()}
+                        disabled={sendingResetEmail || !staff.email}
+                        className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm font-bold text-blue-700 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <Mail className="h-4 w-4" />
+                        {sendingResetEmail
+                          ? "Sending Reset Email..."
+                          : "Send Reset Email"}
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -1090,8 +1141,8 @@ export default function StaffProfilePage() {
                         </div>
 
                         <p className="mt-2 text-xs leading-5 text-slate-500">
-                          This account will automatically
-                          be linked to:
+                          The staff email is used for login and
+                          password recovery:
                         </p>
 
                         <p className="mt-1 text-sm font-bold text-slate-900">
@@ -1104,7 +1155,7 @@ export default function StaffProfilePage() {
 
                       <div>
                         <label className="mb-1.5 block text-xs font-semibold text-slate-700">
-                          Login Email
+                          Staff Email
                         </label>
 
                         <div className="relative">
@@ -1113,15 +1164,10 @@ export default function StaffProfilePage() {
 
                           <input
                             type="email"
-                            value={loginEmail}
-                            onChange={(event) =>
-                              setLoginEmail(
-                                event.target.value
-                              )
-                            }
-                            placeholder="teacher@school.com"
+                            value={staff.email || ""}
+                            readOnly
                             disabled={creatingLogin}
-                            className="w-full rounded-xl border border-slate-200 bg-white py-3 pl-10 pr-3.5 text-sm outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-100 disabled:bg-slate-100"
+                            className="w-full rounded-xl border border-slate-200 bg-slate-100 py-3 pl-10 pr-3.5 text-sm outline-none"
                           />
 
                         </div>
@@ -1413,6 +1459,3 @@ export default function StaffProfilePage() {
     </div>
   );
 }
-
-
-
