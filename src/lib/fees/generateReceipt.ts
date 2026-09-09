@@ -19,6 +19,7 @@ export type ReceiptData = {
   feeDescription: string;
 
   amount: number;
+  concessionAmount?: number;
   paymentMode: string;
 
   referenceNumber?: string | null;
@@ -273,7 +274,7 @@ export function generateReceiptPDF(data: ReceiptData) {
     left,
     y,
     right - left,
-    42,
+    52,
     2,
     2,
     "F",
@@ -298,7 +299,7 @@ export function generateReceiptPDF(data: ReceiptData) {
   pdf.text(
     "Payment Received",
     left + 6,
-    y + 20,
+    y + 30,
   );
 
   pdf.setFont("helvetica", "bold");
@@ -306,24 +307,39 @@ export function generateReceiptPDF(data: ReceiptData) {
   pdf.text(
     money(data.amount),
     right - 6,
-    y + 20,
+    y + 30,
     { align: "right" },
   );
 
   pdf.text(
     "Remaining Outstanding",
     left + 6,
-    y + 32,
+    y + 42,
   );
 
   pdf.text(
     money(data.remainingOutstanding),
     right - 6,
-    y + 32,
+    y + 42,
     { align: "right" },
   );
 
-  y += 53;
+  pdf.setFont("helvetica", "normal");
+
+  pdf.text(
+    "Concession Given",
+    left + 6,
+    y + 20,
+  );
+
+  pdf.text(
+    money(data.concessionAmount || 0),
+    right - 6,
+    y + 20,
+    { align: "right" },
+  );
+
+  y += 63;
 
   if (data.remarks) {
     pdf.setFont("helvetica", "bold");

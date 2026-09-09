@@ -17,6 +17,7 @@ import {
   X,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
+import { ensureBuiltInExpenseCategories } from "@/lib/accounting/expense-categories";
 import { AccountingExportActions } from "../accounting-export";
 
 type Account = {
@@ -1380,11 +1381,23 @@ export default function PaymentPage() {
         const { data: userData } =
           await supabase.auth.getUser();
 
+        const expenseCategories = await ensureBuiltInExpenseCategories(
+          supabase,
+          schoolId,
+        );
+        const expenseCategory = expenseCategories.get(
+          (payrollMode ? "Salary" : "Fee").toLowerCase(),
+        );
+
+        if (!expenseCategory) {
+          throw new Error("Built-in expense category could not be created.");
+        }
+
         const { error: expenseRowError } = await supabase
           .from("expenses")
           .insert({
             school_id: schoolId,
-            expense_category_id: null,
+            expense_category_id: expenseCategory.id,
             expense_date: paymentDate,
             amount: numericAmount,
             paid_from_account_id: paidFromAccountId,

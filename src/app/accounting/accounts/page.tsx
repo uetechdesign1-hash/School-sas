@@ -81,7 +81,6 @@ export default function AccountsPage() {
   const [code, setCode] = useState("");
   const [name, setName] = useState("");
   const [accountType, setAccountType] = useState("");
-  const [openingBalance, setOpeningBalance] = useState("0");
   const [isActive, setIsActive] = useState(true);
 
   async function loadAccounts(currentSchoolId?: string) {
@@ -172,7 +171,6 @@ export default function AccountsPage() {
     setCode("");
     setName("");
     setAccountType("");
-    setOpeningBalance("0");
     setIsActive(true);
   }
 
@@ -181,9 +179,6 @@ export default function AccountsPage() {
     setCode(account.code || "");
     setName(account.name);
     setAccountType(account.account_type);
-    setOpeningBalance(
-      Number(account.opening_balance || 0).toFixed(2)
-    );
     setIsActive(account.is_active);
     setViewing(null);
     setError("");
@@ -211,8 +206,6 @@ export default function AccountsPage() {
 
     const cleanName = name.trim();
     const cleanCode = code.trim() || null;
-    const balance = Number(openingBalance || 0);
-
     if (!cleanName) {
       setError("Account name is required.");
       return;
@@ -220,11 +213,6 @@ export default function AccountsPage() {
 
     if (!accountType) {
       setError("Select an account type.");
-      return;
-    }
-
-    if (!Number.isFinite(balance)) {
-      setError("Opening balance must be a valid number.");
       return;
     }
 
@@ -256,7 +244,6 @@ export default function AccountsPage() {
             code: cleanCode,
             name: cleanName,
             account_type: accountType,
-            opening_balance: balance,
             is_active: isActive,
           })
           .eq("id", editingId)
@@ -309,7 +296,6 @@ export default function AccountsPage() {
             code: cleanCode,
             name: cleanName,
             account_type: accountType,
-            opening_balance: balance,
             is_system: false,
             is_active: isActive,
           });
@@ -380,18 +366,50 @@ export default function AccountsPage() {
        * Used accounts should be deactivated, not deleted, because
        * deleting them would break historical ledger entries.
        */
-      const { count, error: usageError } = await supabase
-        .from("transaction_entries")
-        .select("id", {
-          count: "exact",
-          head: true,
-        })
-        .eq("school_id", schoolId)
-        .eq("account_id", account.id);
+      const [
+        transactionUsage,
+        journalUsage,
+        openingBalanceUsage,
+      ] = await Promise.all([
+        supabase
+          .from("transaction_entries")
+          .select("id", {
+            count: "exact",
+            head: true,
+          })
+          .eq("school_id", schoolId)
+          .eq("account_id", account.id),
+        supabase
+          .from("journal_lines")
+          .select("id", {
+            count: "exact",
+            head: true,
+          })
+          .eq("school_id", schoolId)
+          .eq("account_id", account.id),
+        supabase
+          .from("opening_balances")
+          .select("id", {
+            count: "exact",
+            head: true,
+          })
+          .eq("school_id", schoolId)
+          .eq("account_id", account.id),
+      ]);
+
+      const usageError =
+        transactionUsage.error ||
+        journalUsage.error ||
+        openingBalanceUsage.error;
 
       if (usageError) throw new Error(usageError.message);
 
-      if ((count || 0) > 0) {
+      const hasAccountingHistory =
+        (transactionUsage.count || 0) > 0 ||
+        (journalUsage.count || 0) > 0 ||
+        (openingBalanceUsage.count || 0) > 0;
+
+      if (hasAccountingHistory) {
         const { error: deactivateError } = await supabase
           .from("accounts")
           .update({ is_active: false })
@@ -552,15 +570,12 @@ export default function AccountsPage() {
                 </select>
               </Field>
 
-              <Field label="Opening Balance">
-                <input
-                  type="number"
-                  step="0.01"
-                  value={openingBalance}
-                  onChange={(e) => setOpeningBalance(e.target.value)}
-                  className="input"
-                />
-              </Field>
+            </div>
+
+            <div className="mt-4 rounded-xl border border-blue-100 bg-blue-50 p-4 text-sm text-blue-800">
+              Financial-year opening balances are managed from the Opening
+              Balance screen so the chart of accounts remains the single
+              account master.
             </div>
 
             <div className="mt-5 flex items-center justify-between rounded-xl border bg-slate-50 p-4">
@@ -691,7 +706,7 @@ export default function AccountsPage() {
                       Type
                     </th>
                     <th className="px-5 py-3 text-right text-xs font-semibold text-slate-500">
-                      Opening Balance
+                      Legacy Opening
                     </th>
                     <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500">
                       Status
@@ -805,7 +820,7 @@ export default function AccountsPage() {
               value={labelForType(viewing.account_type)}
             />
             <Detail
-              label="Opening Balance"
+              label="Legacy Opening Balance"
               value={money(Number(viewing.opening_balance || 0))}
             />
             <Detail

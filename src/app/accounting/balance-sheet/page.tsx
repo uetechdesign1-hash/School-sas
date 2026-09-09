@@ -529,7 +529,7 @@ export default function BalanceSheetPage() {
          * account type.
          *
          * Balance Sheet accounts only:
-         *   asset/cash/bank  -> Debit
+         *   asset/cash/bank/receivable  -> Debit
          *   liability/equity/payable -> Credit
          *
          * Income/expense are deliberately ignored.
@@ -548,7 +548,8 @@ export default function BalanceSheetPage() {
         if (
           type === "asset" ||
           type === "cash" ||
-          type === "bank"
+          type === "bank" ||
+          type === "receivable"
         ) {
           const current =
             totals.get(opening.account_id) || {
@@ -637,7 +638,7 @@ export default function BalanceSheetPage() {
    *
    * IMPORTANT:
    *
-   * asset + cash + bank
+   * asset + cash + bank + receivable
    *
    * are all Balance Sheet assets.
    *
@@ -661,7 +662,8 @@ export default function BalanceSheetPage() {
         if (
           type !== "asset" &&
           type !== "cash" &&
-          type !== "bank"
+          type !== "bank" &&
+          type !== "receivable"
         ) {
           continue;
         }

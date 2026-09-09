@@ -22,6 +22,7 @@ import {
   X,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
+import { ensureBuiltInExpenseCategories } from "@/lib/accounting/expense-categories";
 
 type Category = { id: string; school_id: string; name: string };
 type Account = {
@@ -178,7 +179,11 @@ export default function ExpensesPage() {
   async function loadData(id: string, selectedMonth = month) {
     const [schoolRes, catRes, accountRes] = await Promise.all([
       supabase.from("schools").select("id,name").eq("id", id).maybeSingle(),
-      supabase.from("expense_categories").select("id,school_id,name").eq("school_id", id).order("name"),
+      supabase
+        .from("expense_categories")
+        .select("id,school_id,name")
+        .eq("school_id", id)
+        .order("name"),
       supabase
         .from("accounts")
         .select("id,school_id,code,name,account_type,is_active")
@@ -191,8 +196,24 @@ export default function ExpensesPage() {
     if (catRes.error) throw catRes.error;
     if (accountRes.error) throw accountRes.error;
 
+    const builtInCategories = await ensureBuiltInExpenseCategories(
+      supabase,
+      id,
+    );
+    const categoriesById = new Map(
+      (catRes.data || []).map((category) => [category.id, category]),
+    );
+
+    for (const category of builtInCategories.values()) {
+      categoriesById.set(category.id, category);
+    }
+
     setSchoolName(schoolRes.data?.name || "School");
-    setCategories((catRes.data || []) as Category[]);
+    setCategories(
+      [...categoriesById.values()].sort((a, b) =>
+        a.name.localeCompare(b.name),
+      ) as Category[],
+    );
     setAccounts((accountRes.data || []) as Account[]);
 
     const [y, m] = selectedMonth.split("-");
@@ -214,6 +235,48 @@ export default function ExpensesPage() {
       .order("created_at", { ascending: false });
 
     if (expenseRes.error) throw expenseRes.error;
+
+    const salaryCategory = builtInCategories.get("salary");
+    const feeCategory = builtInCategories.get("fee");
+    const uncategorized = (expenseRes.data || []).filter(
+      (expense) => !expense.expense_category_id,
+    );
+
+    if (salaryCategory && feeCategory && uncategorized.length > 0) {
+      const backfillResults = await Promise.all(
+        uncategorized.map((expense) => {
+          const isSalary =
+            expense.invoice_number?.startsWith("PAYROLL-") ||
+            expense.description?.toLowerCase().startsWith("salary -");
+
+          return supabase
+            .from("expenses")
+            .update({
+              expense_category_id: isSalary
+                ? salaryCategory.id
+                : feeCategory.id,
+            })
+            .eq("id", expense.id)
+            .eq("school_id", id);
+        }),
+      );
+
+      const backfillError = backfillResults.find(
+        (result) => result.error,
+      )?.error;
+
+      if (backfillError) throw backfillError;
+
+      for (const expense of uncategorized) {
+        const isSalary =
+          expense.invoice_number?.startsWith("PAYROLL-") ||
+          expense.description?.toLowerCase().startsWith("salary -");
+        expense.expense_category_id = isSalary
+          ? salaryCategory.id
+          : feeCategory.id;
+      }
+    }
+
     setExpenses((expenseRes.data || []) as Expense[]);
   }
 
@@ -249,16 +312,23 @@ export default function ExpensesPage() {
   );
 
   const expenseAccounts = useMemo(
-    () => accounts.filter((x) => x.account_type === "expense"),
+    () =>
+      accounts.filter(
+        (x) => x.account_type.trim().toLowerCase() === "expense",
+      ),
     [accounts],
   );
   const paidAccounts = useMemo(
     () =>
       accounts.filter(
-        (x) =>
-          x.account_type === "cash" ||
-          x.account_type === "bank" ||
-          x.account_type === "asset",
+        (x) => {
+          const type = x.account_type.trim().toLowerCase();
+          return (
+            type === "cash" ||
+            type === "bank" ||
+            type === "asset"
+          );
+        },
       ),
     [accounts],
   );
@@ -367,7 +437,10 @@ export default function ExpensesPage() {
 
     const expenseAccount = accountMap.get(addExpenseAccount);
     const paidAccount = accountMap.get(addPaidFrom);
-    if (!expenseAccount || expenseAccount.account_type !== "expense") {
+    if (
+      !expenseAccount ||
+      expenseAccount.account_type.trim().toLowerCase() !== "expense"
+    ) {
       setError("Select a valid Expense account.");
       return;
     }
@@ -968,4 +1041,3 @@ function Info({label,value}:{label:string;value:string}) { return <div><div clas
 function Modal({title,children,onClose}:{title:string;children:React.ReactNode;onClose:()=>void}) {
   return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4"><div className="max-h-[92vh] w-full max-w-4xl overflow-hidden rounded-2xl bg-white shadow-2xl"><div className="flex items-center justify-between border-b px-6 py-4"><h2 className="text-lg font-bold text-slate-900">{title}</h2><button onClick={onClose} className="rounded-lg p-2 text-slate-400 hover:bg-slate-100"><X size={19}/></button></div><div className="max-h-[calc(92vh-73px)] overflow-y-auto p-6">{children}</div></div></div>;
 }
-

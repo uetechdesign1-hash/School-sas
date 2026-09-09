@@ -21,6 +21,7 @@ import {
   CreditCard,
   Download,
   Loader2,
+  Pencil,
 } from "lucide-react";
 
 import { createClient } from "@/lib/supabase/client";
@@ -66,6 +67,28 @@ type FeeBill = {
   status: string;
 };
 
+type FeeBillItem = {
+  id: string;
+  school_id: string;
+  bill_id: string;
+  fee_structure_id?: string | null;
+  fee_category_id?: string | null;
+  description: string;
+  fee_type?: string | null;
+  amount: number;
+  discount?: number;
+  net_amount?: number;
+};
+
+type FeePaymentAllocation = {
+  id: string;
+  school_id: string;
+  bill_id: string;
+  payment_id: string;
+  amount: number;
+  fee_bill_item_id?: string | null;
+};
+
 type CarryForwardRecord = {
   id: string;
   source_bill_id: string;
@@ -75,10 +98,19 @@ type CarryForwardRecord = {
   target_bill_id?: string | null;
 };
 
+type FeeConcession = {
+  id: string;
+  bill_id: string;
+  amount: number;
+  reason?: string | null;
+  notes?: string | null;
+};
+
 type FeePayment = {
   id: string;
   bill_id?: string | null;
   receipt_number: string;
+  manual_bill_number?: string | null;
   payment_date: string;
   amount: number;
   payment_method: string;
@@ -127,6 +159,7 @@ type AssignmentItem = {
   fee_category_id: string;
   category_name: string;
   amount: number;
+  annual_amount: number;
   frequency: string;
   mandatory: boolean;
 };
@@ -136,6 +169,7 @@ type AssignmentPreview = {
   structure: FeeStructure;
   items: AssignmentItem[];
   existingBill: FeeBill | null;
+  existingCategoryIds: string[];
   previousAcademicYear: AcademicYear | null;
   pendingCarryForwards: CarryForwardRecord[];
 };
@@ -146,6 +180,18 @@ function formatMoney(value: number) {
     currency: "INR",
     maximumFractionDigits: 2,
   }).format(Number(value) || 0);
+}
+
+function getAnnualizedFeeAmount(amount: number, frequency: string) {
+  const frequencyMultiplier: Record<string, number> = {
+    one_time: 1,
+    annual: 1,
+    monthly: 12,
+    quarterly: 4,
+    half_yearly: 2,
+  };
+
+  return Math.max(Number(amount) || 0, 0) * (frequencyMultiplier[frequency] || 1);
 }
 
 function formatDate(value?: string | null) {
@@ -189,7 +235,10 @@ export default function FeesPage() {
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
 
   const [bills, setBills] = useState<FeeBill[]>([]);
+  const [billItems, setBillItems] = useState<FeeBillItem[]>([]);
+  const [paymentAllocations, setPaymentAllocations] = useState<FeePaymentAllocation[]>([]);
   const [payments, setPayments] = useState<FeePayment[]>([]);
+  const [concessions, setConcessions] = useState<FeeConcession[]>([]);
   const [loadingLedger, setLoadingLedger] = useState(false);
 
   const [assignmentPreview, setAssignmentPreview] =
@@ -202,10 +251,15 @@ export default function FeesPage() {
 
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [selectedBill, setSelectedBill] = useState<FeeBill | null>(null);
+  const [selectedPaymentFeeItemId, setSelectedPaymentFeeItemId] = useState("");
   const [showConcessionForm, setShowConcessionForm] = useState(false);
   const [concessionAmount, setConcessionAmount] = useState("");
   const [concessionReason, setConcessionReason] = useState("");
   const [savingConcession, setSavingConcession] = useState(false);
+  const [editingConcession, setEditingConcession] = useState<FeeConcession | null>(null);
+  const [editConcessionAmount, setEditConcessionAmount] = useState("");
+  const [editConcessionReason, setEditConcessionReason] = useState("");
+  const [savingConcessionEdit, setSavingConcessionEdit] = useState(false);
 
   const [amount, setAmount] = useState("");
   const [paymentMode, setPaymentMode] = useState("cash");
@@ -539,7 +593,7 @@ export default function FeesPage() {
         const { data: billData, error: billError } = await supabase
           .from("fee_bills")
           .select(
-            "id, academic_year_id, bill_number, bill_date, due_date, total_amount, paid_amount, balance_amount, status",
+            "id, academic_year_id, bill_number, bill_date, due_date, discount, total_amount, paid_amount, balance_amount, status",
           )
           .eq("student_id", student.id)
           .order("bill_date", { ascending: false });
@@ -550,13 +604,66 @@ export default function FeesPage() {
           );
         }
 
-        // Show bills even if payment history has a separate RLS/schema problem.
-        setBills((billData || []) as FeeBill[]);
+        // Keep bill items separate from the bill header so an existing paid
+        // bill can receive a genuinely new fee category without replacing
+        // historical items or payments.
+        const loadedBills = (billData || []) as FeeBill[];
+        setBills(loadedBills);
+
+        const billIds = loadedBills.map((bill) => bill.id);
+
+        if (billIds.length > 0) {
+          const { data: itemData, error: itemError } = await supabase
+            .from("fee_bill_items")
+            .select(
+              "id, school_id, bill_id, fee_structure_id, fee_category_id, description, fee_type, amount, discount, net_amount",
+            )
+            .eq("school_id", schoolId)
+            .in("bill_id", billIds)
+            .order("id", { ascending: true });
+
+          if (itemError) {
+            throw new Error(`Unable to load fee bill items: ${itemError.message}`);
+          }
+
+          setBillItems((itemData || []) as FeeBillItem[]);
+
+          const { data: allocationData, error: allocationError } = await supabase
+            .from("fee_payment_allocations")
+            .select("id, school_id, bill_id, payment_id, amount, fee_bill_item_id")
+            .eq("school_id", schoolId)
+            .in("bill_id", billIds);
+
+          if (allocationError) {
+            throw new Error(
+              `Unable to load fee payment allocations. Run the fee category migration first: ${allocationError.message}`,
+            );
+          }
+
+          setPaymentAllocations((allocationData || []) as FeePaymentAllocation[]);
+        } else {
+          setBillItems([]);
+          setPaymentAllocations([]);
+        }
+
+        const { data: concessionData, error: concessionError } = await supabase
+          .from("fee_concessions")
+          .select("id, bill_id, amount, reason, notes")
+          .eq("school_id", schoolId)
+          .eq("student_id", student.id)
+          .order("id", { ascending: false });
+
+        if (concessionError) {
+          console.error("Concession history loading error:", concessionError);
+          setConcessions([]);
+        } else {
+          setConcessions((concessionData || []) as FeeConcession[]);
+        }
 
         const { data: paymentData, error: paymentError } = await supabase
           .from("fee_payments")
           .select(
-            "id, school_id, bill_id, receipt_number, payment_date, amount, payment_method, reference_number, notes, account_id, received_by, receipt_generated",
+            "id, school_id, bill_id, receipt_number, manual_bill_number, payment_date, amount, payment_method, reference_number, notes, account_id, received_by, receipt_generated",
           )
           .eq("school_id", schoolId)
           .eq("student_id", student.id)
@@ -686,7 +793,7 @@ export default function FeesPage() {
         const pendingCarryForwards =
           (pendingCarryData || []) as CarryForwardRecord[];
 
-        const { data: structureData, error: structureError } =
+        let { data: structureData, error: structureError } =
           await supabase
             .from("fee_structures")
             .select(
@@ -699,6 +806,32 @@ export default function FeesPage() {
             .order("created_at", { ascending: false })
             .limit(1)
             .maybeSingle();
+
+        if (structureError) {
+          throw new Error(
+            `Unable to load the class fee structure: ${structureError.message}`,
+          );
+        }
+
+        // A structure may be configured for every class by leaving class_id
+        // empty. Use it only when no class-specific structure exists.
+        if (!structureData) {
+          const fallbackStructureResult = await supabase
+            .from("fee_structures")
+            .select(
+              "id, name, academic_year_id, class_id, active",
+            )
+            .eq("school_id", schoolId)
+            .eq("academic_year_id", academicYear.id)
+            .is("class_id", null)
+            .eq("active", true)
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+          structureData = fallbackStructureResult.data;
+          structureError = fallbackStructureResult.error;
+        }
 
         if (structureError) {
           throw new Error(
@@ -777,6 +910,10 @@ export default function FeesPage() {
             categoryMap.get(item.fee_category_id) ||
             "Fee",
           amount: Number(item.amount || 0),
+          annual_amount: getAnnualizedFeeAmount(
+            Number(item.amount || 0),
+            item.frequency || "annual",
+          ),
           frequency: item.frequency || "annual",
           mandatory: Boolean(item.mandatory),
         }));
@@ -785,7 +922,7 @@ export default function FeesPage() {
           await supabase
             .from("fee_bills")
             .select(
-              "id, academic_year_id, bill_number, bill_date, due_date, total_amount, paid_amount, balance_amount, status",
+              "id, academic_year_id, bill_number, bill_date, due_date, discount, total_amount, paid_amount, balance_amount, status",
             )
             .eq("school_id", schoolId)
             .eq("student_id", student.id)
@@ -800,15 +937,107 @@ export default function FeesPage() {
           );
         }
 
-        const existingBill =
+        let existingBill =
           (existingBillData as FeeBill | null) || null;
 
-        // Mandatory fees are selected automatically.
-        // Optional fees require an explicit student-level choice.
+        let existingCategoryIds: string[] = [];
+
+        if (existingBill) {
+          const { data: existingItemData, error: existingItemError } = await supabase
+            .from("fee_bill_items")
+            .select("fee_category_id")
+            .eq("school_id", schoolId)
+            .eq("bill_id", existingBill.id);
+
+          if (existingItemError) {
+            throw new Error(
+              `Unable to inspect existing fee categories: ${existingItemError.message}`,
+            );
+          }
+
+          existingCategoryIds = Array.from(
+            new Set(
+              (existingItemData || [])
+                .map((row) => row.fee_category_id as string | null)
+                .filter((id): id is string => Boolean(id)),
+            ),
+          );
+
+          if (existingBill.status !== "cancelled") {
+            const newMandatoryItems = items.filter(
+              (item) =>
+                item.mandatory &&
+                !existingCategoryIds.includes(item.fee_category_id),
+            );
+
+            if (newMandatoryItems.length > 0) {
+              const { data: syncData, error: syncError } = await supabase.rpc(
+                "add_fee_items_to_bill",
+                {
+                  p_bill_id: existingBill.id,
+                  p_items: newMandatoryItems.map((item) => ({
+                    fee_category_id: item.fee_category_id,
+                    fee_structure_item_id: item.id,
+                    description: item.category_name,
+                    fee_type: item.frequency,
+                    amount: item.annual_amount,
+                  })),
+                },
+              );
+
+              if (syncError) {
+                throw new Error(
+                  `Unable to apply new mandatory fees: ${syncError.message}`,
+                );
+              }
+
+              if (!syncData?.success) {
+                throw new Error(
+                  syncData?.message || "Unable to apply new mandatory fees.",
+                );
+              }
+
+              const { data: refreshedBill, error: refreshedBillError } =
+                await supabase
+                  .from("fee_bills")
+                  .select(
+                    "id, academic_year_id, bill_number, bill_date, due_date, discount, total_amount, paid_amount, balance_amount, status",
+                  )
+                  .eq("school_id", schoolId)
+                  .eq("id", existingBill.id)
+                  .maybeSingle();
+
+              if (refreshedBillError) {
+                throw new Error(
+                  `Unable to refresh the updated fee bill: ${refreshedBillError.message}`,
+                );
+              }
+
+              existingBill = (refreshedBill as FeeBill | null) || existingBill;
+              existingCategoryIds = [
+                ...existingCategoryIds,
+                ...newMandatoryItems.map((item) => item.fee_category_id),
+              ];
+            }
+          }
+        }
+
+        // With a new bill, mandatory fees are selected automatically. When
+        // the structure gains new mandatory categories, select those new
+        // items too so the student's existing bill can be updated without
+        // silently leaving the new fees outstanding from the assignment flow.
         setSelectedAssignmentItemIds(
-          items
-            .filter((item) => item.mandatory)
-            .map((item) => item.id),
+          existingBill
+            ? items
+                .filter(
+                  (item) =>
+                    item.mandatory &&
+                    !existingCategoryIds.includes(item.fee_category_id),
+                )
+                .map((item) => item.id)
+            : items
+                .filter((item) => item.mandatory)
+                .map((item) => item.id),
         );
 
         setAssignmentPreview({
@@ -816,6 +1045,7 @@ export default function FeesPage() {
           structure,
           items,
           existingBill,
+          existingCategoryIds,
           previousAcademicYear,
           pendingCarryForwards,
         });
@@ -841,7 +1071,7 @@ export default function FeesPage() {
       (candidate) => candidate.id === itemId,
     );
 
-    if (!item || item.mandatory || assignmentPreview?.existingBill) {
+    if (!item || item.mandatory || assignmentPreview?.existingCategoryIds.includes(item.fee_category_id)) {
       return;
     }
 
@@ -859,7 +1089,7 @@ export default function FeesPage() {
 
   const selectedAssignmentTotal = selectedAssignmentItems.reduce(
     (sum, item) =>
-      sum + Math.max(Number(item.amount || 0), 0),
+      sum + item.annual_amount,
     0,
   );
 
@@ -879,23 +1109,26 @@ export default function FeesPage() {
     }
 
     const existingBill = assignmentPreview.existingBill;
+    const existingCategoryIds = new Set(assignmentPreview.existingCategoryIds);
+    const newItems = assignmentPreview.items.filter(
+      (item) =>
+        selectedAssignmentItemIds.includes(item.id) &&
+        !existingCategoryIds.has(item.fee_category_id),
+    );
 
-    if (Number(existingBill.paid_amount || 0) > 0) {
+    if (newItems.length === 0) {
       setMessage({
         type: "error",
-        text:
-          "This bill already has a payment. Its fee selection cannot be changed.",
+        text: "Select at least one new fee category. Existing assigned fees are locked.",
       });
       return;
     }
 
-    const confirmed = window.confirm(
-      `Change the fee selection for ${getStudentName(
-        selectedStudent,
-      )}? The unpaid bill ${existingBill.bill_number} will be removed and you can create a new bill with only the selected fees.`,
-    );
-
-    if (!confirmed) {
+    if (existingBill.status === "cancelled") {
+      setMessage({
+        type: "error",
+        text: "Cancelled fee bills cannot receive new fee categories.",
+      });
       return;
     }
 
@@ -903,98 +1136,40 @@ export default function FeesPage() {
     setMessage(null);
 
     try {
-      const { data: paymentRows, error: paymentCheckError } =
-        await supabase
-          .from("fee_payments")
-          .select("id")
-          .eq("school_id", schoolId)
-          .eq("student_id", selectedStudent.id)
-          .eq("bill_id", existingBill.id)
-          .limit(1);
+      const { data, error } = await supabase.rpc("add_fee_items_to_bill", {
+        p_bill_id: existingBill.id,
+        p_items: newItems.map((item) => ({
+          fee_category_id: item.fee_category_id,
+          fee_structure_item_id: item.id,
+          description: item.category_name,
+          fee_type: item.frequency,
+          amount: item.annual_amount,
+        })),
+      });
 
-      if (paymentCheckError) {
-        throw paymentCheckError;
+      if (error) {
+        throw new Error(`Unable to add new fee categories: ${error.message}`);
       }
 
-      if (paymentRows && paymentRows.length > 0) {
-        throw new Error(
-          "This bill has payment history and cannot be changed.",
-        );
+      if (!data?.success) {
+        throw new Error(data?.message || "Unable to add new fee categories.");
       }
 
-      // A bill that contains a previous-year carry-forward cannot be
-      // deleted by the fee-selection editor because that would orphan the
-      // applied carry record. Keep the carry-forward attached to its bill.
-      const { data: appliedCarryRows, error: appliedCarryError } =
-        await supabase
-          .from("fee_carry_forwards")
-          .select("id")
-          .eq("school_id", schoolId)
-          .eq("student_id", selectedStudent.id)
-          .eq("target_bill_id", existingBill.id)
-          .eq("status", "applied")
-          .limit(1);
-
-      if (appliedCarryError) {
-        throw appliedCarryError;
-      }
-
-      if (appliedCarryRows && appliedCarryRows.length > 0) {
-        throw new Error(
-          "This bill contains a previous-year carry-forward and cannot be changed.",
-        );
-      }
-
-      const { error: itemDeleteError } = await supabase
-        .from("fee_bill_items")
-        .delete()
-        .eq("school_id", schoolId)
-        .eq("bill_id", existingBill.id);
-
-      if (itemDeleteError) {
-        throw new Error(
-          `Unable to remove the existing fee items: ${itemDeleteError.message}`,
-        );
-      }
-
-      const { error: billDeleteError } = await supabase
-        .from("fee_bills")
-        .delete()
-        .eq("school_id", schoolId)
-        .eq("id", existingBill.id);
-
-      if (billDeleteError) {
-        throw new Error(
-          `Unable to remove the existing fee bill: ${billDeleteError.message}`,
-        );
-      }
-
-      setSelectedAssignmentItemIds(
-        assignmentPreview.items
-          .filter((item) => item.mandatory)
-          .map((item) => item.id),
-      );
-
-      await loadAssignmentPreview(selectedStudent);
       await loadLedger(selectedStudent);
+      await loadAssignmentPreview(selectedStudent);
 
       setMessage({
         type: "success",
-        text:
-          "Existing unpaid bill removed. Select the fees you want and click Assign Fees.",
+        text: `${data.added_count || newItems.length} new fee categor${(data.added_count || newItems.length) === 1 ? "y" : "ies"} added to ${existingBill.bill_number}. Previous fees and payments were kept unchanged.`,
       });
     } catch (error) {
-      console.error(
-        "CHANGE FEE SELECTION ERROR:",
-        error,
-      );
-
+      console.error("ADD NEW FEE CATEGORY ERROR:", error);
       setMessage({
         type: "error",
         text:
           error instanceof Error
             ? error.message
-            : "Unable to change the fee selection.",
+            : "Unable to add new fee categories.",
       });
     } finally {
       setChangingAssignment(false);
@@ -1027,13 +1202,7 @@ export default function FeesPage() {
     }
 
     if (assignmentPreview.existingBill) {
-      setMessage({
-        type: "error",
-        text:
-          "This student already has a fee bill for " +
-          assignmentPreview.academicYear.name +
-          ".",
-      });
+      await handleChangeFeeSelection();
       return;
     }
 
@@ -1065,7 +1234,7 @@ export default function FeesPage() {
     }
 
     const structureTotal = selectedItems.reduce(
-      (sum, item) => sum + Math.max(Number(item.amount || 0), 0),
+      (sum, item) => sum + item.annual_amount,
       0,
     );
 
@@ -1178,7 +1347,7 @@ export default function FeesPage() {
             created_by: user.id,
           })
           .select(
-            "id, academic_year_id, bill_number, bill_date, due_date, total_amount, paid_amount, balance_amount, status",
+            "id, academic_year_id, bill_number, bill_date, due_date, discount, total_amount, paid_amount, balance_amount, status",
           )
           .single();
 
@@ -1198,11 +1367,12 @@ export default function FeesPage() {
         school_id: schoolId,
         bill_id: billData.id,
         fee_structure_id: assignmentPreview.structure.id,
+        fee_category_id: item.fee_category_id,
         description: item.category_name,
         fee_type: item.frequency,
-        amount: Number(item.amount || 0),
+        amount: item.annual_amount,
         discount: 0,
-        net_amount: Number(item.amount || 0),
+        net_amount: item.annual_amount,
       }));
 
       const { error: billItemsError } = await supabase
@@ -1417,6 +1587,9 @@ export default function FeesPage() {
       await loadLedger(student);
       try {
         await loadAssignmentPreview(student);
+        // Loading the preview can apply newly added mandatory structure fees
+        // to an existing bill, so refresh the ledger totals afterward.
+        await loadLedger(student);
       } catch (assignmentError) {
         console.error(
           "Fee assignment preview error:",
@@ -1440,6 +1613,8 @@ export default function FeesPage() {
       console.error("Ledger loading error:", error);
 
       setBills([]);
+      setBillItems([]);
+      setPaymentAllocations([]);
       setPayments([]);
 
       setMessage({
@@ -1523,9 +1698,10 @@ export default function FeesPage() {
     }
 
     setSelectedBill(bill);
+    setSelectedPaymentFeeItemId("");
     setAmount("");
     setPaymentMode("cash");
-    setManualBillNumber(bill.bill_number || "");
+    setManualBillNumber("");
     setShowConcessionForm(false);
     setConcessionAmount("");
     setConcessionReason("");
@@ -1543,10 +1719,85 @@ export default function FeesPage() {
 
     setShowPaymentModal(false);
     setSelectedBill(null);
+    setSelectedPaymentFeeItemId("");
     setShowConcessionForm(false);
     setConcessionAmount("");
     setConcessionReason("");
     setManualBillNumber("");
+  }
+
+  function openEditConcession(concession: FeeConcession) {
+    setEditingConcession(concession);
+    setEditConcessionAmount(String(Number(concession.amount || 0)));
+    setEditConcessionReason(concession.reason || concession.notes || "");
+    setMessage(null);
+  }
+
+  function closeEditConcession() {
+    if (savingConcessionEdit) return;
+    setEditingConcession(null);
+    setEditConcessionAmount("");
+    setEditConcessionReason("");
+  }
+
+  async function saveConcessionEdit() {
+    if (!schoolId || !selectedStudent || !editingConcession) return;
+
+    const amount = Number(editConcessionAmount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setMessage({ type: "error", text: "Enter a valid concession amount." });
+      return;
+    }
+
+    setSavingConcessionEdit(true);
+    setMessage(null);
+
+    try {
+      const { data, error } = await supabase.rpc("update_fee_concession", {
+        p_concession_id: editingConcession.id,
+        p_amount: amount,
+        p_reason: editConcessionReason.trim() || null,
+        p_notes: editConcessionReason.trim() || null,
+      });
+
+      if (error) {
+        throw new Error(`Unable to update concession: ${error.message}`);
+      }
+
+      if (!data?.success) {
+        throw new Error(data?.message || "Concession was not updated.");
+      }
+
+      setConcessions((current) =>
+        current.map((item) =>
+          item.id === editingConcession.id
+            ? {
+                ...item,
+                amount,
+                reason: editConcessionReason.trim() || null,
+                notes: editConcessionReason.trim() || null,
+              }
+            : item,
+        ),
+      );
+
+      await loadLedger(selectedStudent);
+      setEditingConcession(null);
+      setEditConcessionAmount("");
+      setEditConcessionReason("");
+      setMessage({
+        type: "success",
+        text: `Concession updated to ${formatMoney(amount)}. Bill ${data.bill_number || ""} recalculated successfully.`,
+      });
+    } catch (error: unknown) {
+      console.error("UPDATE CONCESSION ERROR:", error);
+      setMessage({
+        type: "error",
+        text: error instanceof Error ? error.message : "Unable to update concession.",
+      });
+    } finally {
+      setSavingConcessionEdit(false);
+    }
   }
 
   async function applyConcession() {
@@ -1572,69 +1823,86 @@ export default function FeesPage() {
     setMessage(null);
 
     try {
-      const { error: concessionError } = await supabase
+      // Concession is stored as its own ledger adjustment. The database
+      // recalculation includes fee_concessions in fee_bills.discount.
+      const { data: concessionData, error: concessionError } = await supabase
         .from("fee_concessions")
         .insert({
           school_id: schoolId,
           student_id: selectedStudent.id,
           bill_id: selectedBill.id,
-          concession_type: "manual_amount",
+          concession_type: "fixed",
           percentage: null,
           amount: amountToConcede,
-          reason: concessionReason.trim() || null,
-        });
-
-      if (concessionError) throw concessionError;
-
-      const nextBalance = Math.max(0, outstanding - amountToConcede);
-      const nextTotal = Math.max(
-        Number(selectedBill.paid_amount || 0),
-        Number(selectedBill.total_amount || 0) - amountToConcede,
-      );
-      const nextDiscount =
-        Number(selectedBill.discount || 0) + amountToConcede;
-      const nextStatus =
-        nextBalance <= 0.005
-          ? "paid"
-          : Number(selectedBill.paid_amount || 0) > 0
-            ? "partial"
-            : "unpaid";
-
-      const { data: updatedBill, error: billError } = await supabase
-        .from("fee_bills")
-        .update({
-          discount: nextDiscount,
-          total_amount: nextTotal,
-          balance_amount: nextBalance,
-          status: nextStatus,
-          updated_at: new Date().toISOString(),
+          reason: concessionReason.trim() || "Fee concession",
+          notes: concessionReason.trim() || null,
+          created_by: (await supabase.auth.getUser()).data.user?.id || null,
         })
-        .eq("id", selectedBill.id)
-        .eq("school_id", schoolId)
-        .eq("student_id", selectedStudent.id)
-        .select(
-          "id, academic_year_id, bill_number, bill_date, due_date, discount, total_amount, paid_amount, balance_amount, status",
-        )
+        .select("id")
         .single();
 
-      if (billError || !updatedBill) {
-        throw billError || new Error("Concession was saved but the bill was not updated.");
+      if (concessionError) {
+        throw new Error(`Unable to apply concession: ${concessionError.message}`);
       }
 
-      const refreshedBill = updatedBill as FeeBill;
+      if (!concessionData?.id) {
+        throw new Error("Concession was not saved.");
+      }
+
+      const { error: recalculateError } = await supabase.rpc(
+        "recalculate_fee_bill",
+        { p_bill_id: selectedBill.id },
+      );
+
+      if (recalculateError) {
+        // Best-effort rollback so a failed recalculation never leaves an
+        // orphaned concession record.
+        await supabase
+          .from("fee_concessions")
+          .delete()
+          .eq("id", concessionData.id)
+          .eq("school_id", schoolId);
+
+        throw new Error(
+          `Concession could not be applied because the bill could not be recalculated: ${recalculateError.message}`,
+        );
+      }
+
+      const { data: refreshedBillData, error: refreshedBillError } =
+        await supabase
+          .from("fee_bills")
+          .select(
+            "id, academic_year_id, bill_number, bill_date, due_date, discount, total_amount, paid_amount, balance_amount, status",
+          )
+          .eq("id", selectedBill.id)
+          .eq("school_id", schoolId)
+          .eq("student_id", selectedStudent.id)
+          .single();
+
+      if (refreshedBillError || !refreshedBillData) {
+        throw new Error(
+          `Concession was saved, but the updated bill could not be loaded: ${
+            refreshedBillError?.message || "Bill not found"
+          }`,
+        );
+      }
+
+      const refreshedBill = refreshedBillData as FeeBill;
       setSelectedBill(refreshedBill);
       setBills((currentBills) =>
         currentBills.map((bill) =>
           bill.id === refreshedBill.id ? refreshedBill : bill,
         ),
       );
+
       setAmount("");
       setConcessionAmount("");
       setConcessionReason("");
       setShowConcessionForm(false);
+
       setMessage({
         type: "success",
-        text: `${formatMoney(amountToConcede)} concession applied to ${refreshedBill.bill_number}.`,
+        text: `${formatMoney(amountToConcede)} concession applied to ${refreshedBill.bill_number}. Outstanding is now ${formatMoney(Number(refreshedBill.balance_amount || 0))}.`,
       });
     } catch (error: unknown) {
       setMessage({
@@ -1648,6 +1916,7 @@ export default function FeesPage() {
       setSavingConcession(false);
     }
   }
+
 
   /*
    * --------------------------------------------------
@@ -1688,6 +1957,55 @@ export default function FeesPage() {
       setAccountId(accountOptions[0]?.id || "");
     }
   }, [showPaymentModal, accountOptions, accountId]);
+
+  const paymentFeeOptions = useMemo(() => {
+    if (!selectedBill) return [];
+
+    return billItems
+      .filter(
+        (item) =>
+          item.bill_id === selectedBill.id &&
+          Number(item.net_amount ?? item.amount ?? 0) > 0,
+      )
+      .map((item) => {
+        const paid = paymentAllocations
+          .filter(
+            (allocation) =>
+              allocation.bill_id === selectedBill.id &&
+              allocation.fee_bill_item_id === item.id,
+          )
+          .reduce((sum, allocation) => sum + Number(allocation.amount || 0), 0);
+
+        const gross = Number(item.net_amount ?? item.amount ?? 0);
+        const balance = Math.max(gross - paid, 0);
+
+        return {
+          ...item,
+          paid,
+          balance,
+        };
+      })
+      .filter((item) => item.balance > 0.005);
+  }, [billItems, paymentAllocations, selectedBill]);
+
+  useEffect(() => {
+    if (!showPaymentModal) return;
+
+    if (
+      selectedPaymentFeeItemId &&
+      paymentFeeOptions.some((item) => item.id === selectedPaymentFeeItemId)
+    ) {
+      return;
+    }
+
+    setSelectedPaymentFeeItemId(
+      paymentFeeOptions.length === 1 ? paymentFeeOptions[0].id : "",
+    );
+  }, [showPaymentModal, paymentFeeOptions, selectedPaymentFeeItemId]);
+
+  const selectedPaymentFeeItem = paymentFeeOptions.find(
+    (item) => item.id === selectedPaymentFeeItemId,
+  ) || null;
 
 
   async function submitPayment(event: FormEvent) {
@@ -1730,6 +2048,21 @@ export default function FeesPage() {
     }
 
     const outstanding = Number(selectedBill.balance_amount || 0);
+    const selectedPaymentItem = paymentFeeOptions.find(
+      (item) => item.id === selectedPaymentFeeItemId,
+    );
+
+    if (paymentFeeOptions.length > 0 && !selectedPaymentItem) {
+      setMessage({
+        type: "error",
+        text: "Select the fee category you are receiving payment for.",
+      });
+      return;
+    }
+
+    const selectedCategoryBalance = selectedPaymentItem
+      ? Number(selectedPaymentItem.balance || 0)
+      : outstanding;
 
     if (outstanding <= 0) {
       setMessage({
@@ -1746,6 +2079,15 @@ export default function FeesPage() {
           "Payment cannot be greater than the outstanding amount of " +
           formatMoney(outstanding) +
           ".",
+      });
+      return;
+    }
+
+    if (selectedPaymentItem && paymentAmount > selectedCategoryBalance + 0.005) {
+      setMessage({
+        type: "error",
+        text:
+          `Payment cannot be greater than the ${selectedPaymentItem.description} balance of ${formatMoney(selectedCategoryBalance)}.`,
       });
       return;
     }
@@ -1859,7 +2201,7 @@ export default function FeesPage() {
         await supabase
           .from("fee_bills")
           .select(
-            "id, school_id, student_id, bill_number, bill_date, due_date, total_amount, paid_amount, balance_amount, status",
+            "id, school_id, student_id, bill_number, bill_date, due_date, discount, total_amount, paid_amount, balance_amount, status",
           )
           .eq("id", selectedBill.id)
           .eq("school_id", schoolId)
@@ -1892,6 +2234,12 @@ export default function FeesPage() {
         );
       }
 
+      if (selectedPaymentItem && paymentAmount > selectedCategoryBalance + 0.005) {
+        throw new Error(
+          `Payment exceeds the selected ${selectedPaymentItem.description} balance of ${formatMoney(selectedCategoryBalance)}.`,
+        );
+      }
+
       /*
        * SINGLE SOURCE OF TRUTH:
        *
@@ -1917,6 +2265,7 @@ export default function FeesPage() {
           p_payment_date: paymentDate,
           p_reference_number: referenceNumber.trim() || null,
           p_remarks: notes.trim() || null,
+          p_fee_bill_item_id: selectedPaymentItem?.id || null,
         },
       );
 
@@ -1941,24 +2290,16 @@ export default function FeesPage() {
         );
       }
 
-      /*
-       * The physical/manual Bill Number is stored on the same fee_bills row.
-       * Receipt page and Fee page therefore always read/edit the same number.
-       * We update it only after the payment succeeds so a failed payment does
-       * not unexpectedly change the bill number.
-       */
       const { data: billWithManualNumber, error: billNumberError } =
         await supabase
-          .from("fee_bills")
+          .from("fee_payments")
           .update({
-            bill_number: enteredBillNumber,
-            updated_at: new Date().toISOString(),
+            manual_bill_number: enteredBillNumber,
           })
-          .eq("id", verifiedBill.id)
+          .eq("id", paymentId)
           .eq("school_id", schoolId)
-          .eq("student_id", selectedStudent.id)
           .select(
-            "id, school_id, student_id, bill_number, bill_date, due_date, total_amount, paid_amount, balance_amount, status",
+            "manual_bill_number",
           )
           .single();
 
@@ -1990,11 +2331,12 @@ export default function FeesPage() {
         className: selectedStudent.class_name,
         section: selectedStudent.section,
         billNumber:
+          billWithManualNumber.manual_bill_number ||
           (result.bill_number as string | undefined) ||
-          billWithManualNumber.bill_number ||
           enteredBillNumber,
         feeDescription: "School Fee Payment",
         amount: paymentAmount,
+        concessionAmount: Number(selectedBill.discount || 0),
         paymentMode: mode,
         referenceNumber: referenceNumber.trim() || null,
         previousOutstanding: currentOutstanding,
@@ -2017,6 +2359,7 @@ export default function FeesPage() {
 
       setShowPaymentModal(false);
       setSelectedBill(null);
+      setSelectedPaymentFeeItemId("");
       setAmount("");
       setManualBillNumber("");
       setReferenceNumber("");
@@ -2088,7 +2431,7 @@ export default function FeesPage() {
         const { data: bill, error: billError } = await supabase
           .from("fee_bills")
           .select(
-            "id, academic_year_id, bill_number, bill_date, due_date, total_amount, paid_amount, balance_amount, status",
+            "id, academic_year_id, bill_number, bill_date, due_date, discount, total_amount, paid_amount, balance_amount, status",
           )
           .eq("id", payment.bill_id)
           .eq("school_id", schoolId)
@@ -2123,15 +2466,18 @@ export default function FeesPage() {
         schoolAddress: school?.address || "",
         schoolPhone: school?.phone || "",
         schoolEmail: school?.email || "",
-        receiptNumber: relatedBill?.bill_number || payment.receipt_number,
+        receiptNumber:
+          payment.manual_bill_number || relatedBill?.bill_number || payment.receipt_number,
         receiptDate: payment.payment_date,
         studentName: getStudentName(selectedStudent),
         admissionNumber: selectedStudent.admission_no,
         className: selectedStudent.class_name,
         section: selectedStudent.section,
-        billNumber: relatedBill?.bill_number || "—",
+        billNumber:
+          payment.manual_bill_number || relatedBill?.bill_number || "—",
         feeDescription: "School Fee Payment",
         amount: paymentAmount,
+        concessionAmount: Number(relatedBill?.discount || 0),
         paymentMode: payment.payment_method,
         referenceNumber: payment.reference_number,
         previousOutstanding,
@@ -2141,7 +2487,7 @@ export default function FeesPage() {
 
       setMessage({
         type: "success",
-        text: `Bill ${relatedBill?.bill_number || payment.receipt_number} downloaded successfully.`,
+        text: `Bill ${payment.manual_bill_number || relatedBill?.bill_number || payment.receipt_number} downloaded successfully.`,
       });
     } catch (error: unknown) {
       console.error("DOWNLOAD RECEIPT ERROR:", error);
@@ -2433,28 +2779,30 @@ export default function FeesPage() {
                           </div>
                         </div>
 
-                        {Number(
-                          assignmentPreview.existingBill.paid_amount || 0,
-                        ) <= 0 && (
-                          <button
-                            type="button"
-                            onClick={() => void handleChangeFeeSelection()}
-                            disabled={changingAssignment}
-                            className="inline-flex items-center justify-center gap-2 rounded-xl border border-blue-200 bg-white px-4 py-2.5 text-sm font-bold text-blue-700 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-60"
-                          >
-                            {changingAssignment ? (
-                              <>
-                                <Loader2
-                                  size={16}
-                                  className="animate-spin"
-                                />
-                                Changing...
-                              </>
-                            ) : (
-                              "Change Fee Selection"
-                            )}
-                          </button>
-                        )}
+                        <button
+                          type="button"
+                          onClick={() => void handleChangeFeeSelection()}
+                          disabled={
+                            changingAssignment ||
+                            selectedAssignmentItems.length === 0
+                          }
+                          className="inline-flex items-center justify-center gap-2 rounded-xl border border-blue-200 bg-white px-4 py-2.5 text-sm font-bold text-blue-700 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {changingAssignment ? (
+                            <>
+                              <Loader2
+                                size={16}
+                                className="animate-spin"
+                              />
+                              Adding...
+                            </>
+                          ) : (
+                            <>
+                              <Plus size={16} />
+                              Add New Fees
+                            </>
+                          )}
+                        </button>
                       </div>
                     ) : (
                       <button
@@ -2488,7 +2836,7 @@ export default function FeesPage() {
                     <div className="grid grid-cols-[1fr_auto_auto] border-b border-slate-200 bg-slate-50 px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-slate-500">
                       <span>Fee</span>
                       <span className="px-4 text-right">Frequency</span>
-                      <span className="text-right">Amount</span>
+                      <span className="text-right">Annual Amount</span>
                     </div>
 
                     {assignmentPreview.items.map((item) => {
@@ -2510,8 +2858,8 @@ export default function FeesPage() {
                               checked={selected}
                               disabled={
                                 item.mandatory ||
-                                Boolean(
-                                  assignmentPreview.existingBill,
+                                assignmentPreview.existingCategoryIds.includes(
+                                  item.fee_category_id,
                                 )
                               }
                               onChange={() =>
@@ -2526,11 +2874,13 @@ export default function FeesPage() {
                               </div>
 
                               <div className="mt-0.5 text-xs text-slate-400">
-                                {item.mandatory
-                                  ? "Mandatory • Included"
-                                  : selected
-                                    ? "Optional • Included"
-                                    : "Optional • Not included"}
+                                {assignmentPreview.existingCategoryIds.includes(item.fee_category_id)
+                                  ? "Already assigned • Locked"
+                                  : item.mandatory
+                                    ? "Mandatory • Included"
+                                    : selected
+                                      ? "New • Selected"
+                                      : "New • Not selected"}
                               </div>
                             </div>
                           </div>
@@ -2546,7 +2896,18 @@ export default function FeesPage() {
                                 : "text-slate-400 line-through"
                             }`}
                           >
-                            {formatMoney(item.amount)}
+                            <div>{formatMoney(item.annual_amount)}</div>
+                            {item.frequency !== "annual" &&
+                              item.frequency !== "one_time" && (
+                                <div className="mt-0.5 text-[10px] font-medium text-slate-400">
+                                  {formatMoney(item.amount)} per{" "}
+                                  {item.frequency === "monthly"
+                                    ? "month"
+                                    : item.frequency === "quarterly"
+                                      ? "quarter"
+                                      : "half-year"}
+                                </div>
+                              )}
                           </div>
                         </div>
                       );
@@ -2560,7 +2921,8 @@ export default function FeesPage() {
 
                         <p className="mt-1 text-xs text-slate-500">
                           Mandatory fees are always included. Optional fees
-                          are included only when selected.
+                          are included only when selected. Recurring fees are
+                          multiplied for the full academic year.
                         </p>
                       </div>
 
@@ -2602,7 +2964,7 @@ export default function FeesPage() {
                   </h2>
 
                   <p className="mt-1 text-xs text-slate-500">
-                    Record partial or full payments against each bill.
+                    Record partial or full payments against each bill. Existing fee categories and payments are preserved; newly created categories can be added to the same bill.
                   </p>
                 </div>
               </div>
@@ -2664,6 +3026,59 @@ export default function FeesPage() {
                                 Due: {formatDate(bill.due_date)}
                               </div>
                             )}
+
+                            {billItems
+                              .filter((item) => item.bill_id === bill.id)
+                              .map((item) => {
+                                const paidForItem = paymentAllocations
+                                  .filter(
+                                    (allocation) =>
+                                      allocation.bill_id === bill.id &&
+                                      allocation.fee_bill_item_id === item.id,
+                                  )
+                                  .reduce(
+                                    (sum, allocation) =>
+                                      sum + Number(allocation.amount || 0),
+                                    0,
+                                  );
+                                const itemTotal = Number(item.net_amount ?? item.amount ?? 0);
+                                const itemBalance = Math.max(itemTotal - paidForItem, 0);
+
+                                return (
+                                  <div key={item.id} className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
+                                    <span className="font-semibold text-slate-700">{item.description}</span>
+                                    <span>{formatMoney(itemTotal)}</span>
+                                    {paidForItem > 0 && <span className="text-green-600">Paid {formatMoney(paidForItem)}</span>}
+                                    {itemBalance > 0.005 && <span className="text-red-500">Due {formatMoney(itemBalance)}</span>}
+                                  </div>
+                                );
+                              })}
+
+                            {concessions.filter((item) => item.bill_id === bill.id).map((concession) => (
+                              <div
+                                key={concession.id}
+                                className="mt-2 flex items-center gap-2 text-xs"
+                              >
+                                <span className="font-semibold text-amber-700">
+                                  Concession: {formatMoney(Number(concession.amount || 0))}
+                                </span>
+                                {concession.reason && (
+                                  <span className="max-w-[180px] truncate text-slate-400" title={concession.reason}>
+                                    • {concession.reason}
+                                  </span>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => openEditConcession(concession)}
+                                  disabled={savingConcessionEdit}
+                                  className="inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 font-bold text-amber-700 hover:bg-amber-100 disabled:opacity-50"
+                                  title="Edit concession"
+                                >
+                                  <Pencil size={12} />
+                                  Edit
+                                </button>
+                              </div>
+                            ))}
                           </td>
 
                           <td className="px-5 py-4 text-slate-600">
@@ -2778,6 +3193,20 @@ export default function FeesPage() {
                               : ""}
                           </div>
 
+                          {(() => {
+                            const allocation = paymentAllocations.find(
+                              (item) => item.payment_id === payment.id && item.fee_bill_item_id,
+                            );
+                            const categoryItem = allocation
+                              ? billItems.find((item) => item.id === allocation.fee_bill_item_id)
+                              : null;
+                            return categoryItem ? (
+                              <div className="mt-1 text-xs font-semibold text-blue-600">
+                                Fee: {categoryItem.description}
+                              </div>
+                            ) : null;
+                          })()}
+
                           {payment.notes && (
                             <div className="mt-1 text-xs text-slate-400">
                               {payment.notes}
@@ -2810,6 +3239,81 @@ export default function FeesPage() {
           </>
         )}
       </div>
+
+      {editingConcession && selectedStudent && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-md overflow-hidden rounded-2xl bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
+              <div>
+                <h2 className="font-bold text-slate-900">Edit Concession</h2>
+                <p className="mt-1 text-xs text-slate-500">Correct the concession amount or reason. The bill will be recalculated automatically.</p>
+              </div>
+              <button
+                type="button"
+                onClick={closeEditConcession}
+                disabled={savingConcessionEdit}
+                className="rounded-lg p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="space-y-4 p-5">
+              <div className="rounded-xl bg-amber-50 p-3 text-xs text-amber-800">
+                <div className="font-bold">Previous concession</div>
+                <div className="mt-1 text-lg font-bold">{formatMoney(Number(editingConcession.amount || 0))}</div>
+              </div>
+
+              <div>
+                <label className="mb-2 block text-sm font-semibold text-slate-700">
+                  Corrected concession amount
+                </label>
+                <input
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  value={editConcessionAmount}
+                  onChange={(event) => setEditConcessionAmount(event.target.value)}
+                  disabled={savingConcessionEdit}
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                />
+              </div>
+
+              <div>
+                <label className="mb-2 block text-sm font-semibold text-slate-700">
+                  Reason
+                </label>
+                <input
+                  value={editConcessionReason}
+                  onChange={(event) => setEditConcessionReason(event.target.value)}
+                  disabled={savingConcessionEdit}
+                  placeholder="Reason (optional)"
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={closeEditConcession}
+                  disabled={savingConcessionEdit}
+                  className="rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void saveConcessionEdit()}
+                  disabled={savingConcessionEdit}
+                  className="rounded-lg bg-blue-600 px-4 py-2.5 text-xs font-bold text-white hover:bg-blue-700 disabled:opacity-50"
+                >
+                  {savingConcessionEdit ? "Saving..." : "Save Correction"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showPaymentModal && selectedBill && selectedStudent && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-sm">
@@ -2937,6 +3441,39 @@ export default function FeesPage() {
                 </p>
               </div>
 
+              {paymentFeeOptions.length > 0 && (
+                <div>
+                  <label className="mb-2 block text-sm font-semibold text-slate-700">
+                    Fee Category
+                  </label>
+                  <select
+                    value={selectedPaymentFeeItemId}
+                    onChange={(event) => {
+                      const nextId = event.target.value;
+                      setSelectedPaymentFeeItemId(nextId);
+                      const nextItem = paymentFeeOptions.find((item) => item.id === nextId);
+                      if (nextItem) {
+                        setAmount("");
+                      }
+                    }}
+                    className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                    required
+                  >
+                    <option value="">Select fee category</option>
+                    {paymentFeeOptions.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.description} — Outstanding {formatMoney(item.balance)}
+                      </option>
+                    ))}
+                  </select>
+                  {selectedPaymentFeeItemId && (
+                    <p className="mt-1.5 text-xs text-slate-500">
+                      This payment will be allocated specifically to the selected fee category.
+                    </p>
+                  )}
+                </div>
+              )}
+
               <div>
                 <label className="mb-2 block text-sm font-semibold text-slate-700">
                   Payment Amount
@@ -2986,8 +3523,9 @@ export default function FeesPage() {
                     type="button"
                     onClick={() =>
                       setAmount(
-                        Number(
-                          selectedBill.balance_amount,
+                        (selectedPaymentFeeItem
+                          ? Number(selectedPaymentFeeItem.balance)
+                          : Number(selectedBill.balance_amount)
                         ).toFixed(2),
                       )
                     }

@@ -43,6 +43,24 @@ type TransactionEntry = {
   description: string | null;
 };
 
+type JournalEntry = {
+  id: string;
+  school_id: string;
+  entry_date: string;
+  entry_type: string | null;
+  reference_type: string | null;
+  reference_id: string | null;
+};
+
+type JournalLine = {
+  id: string;
+  school_id: string;
+  journal_entry_id: string;
+  account_id: string;
+  debit: number | string | null;
+  credit: number | string | null;
+};
+
 type OpeningBalance = {
   id: string;
   school_id: string;
@@ -104,7 +122,7 @@ function safeFileName(value: string) {
 function getDebitNormal(accountType?: string) {
   const type = String(accountType || "").toLowerCase();
 
-  return ["cash", "bank", "asset", "expense"].includes(type);
+  return ["cash", "bank", "asset", "receivable", "expense"].includes(type);
 }
 
 /**
@@ -147,6 +165,8 @@ export default function LedgerPage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [entries, setEntries] = useState<TransactionEntry[]>([]);
+  const [journalEntries, setJournalEntries] = useState<JournalEntry[]>([]);
+  const [journalLines, setJournalLines] = useState<JournalLine[]>([]);
   const [openingBalances, setOpeningBalances] = useState<OpeningBalance[]>([]);
 
   const [loading, setLoading] = useState(true);
@@ -307,6 +327,41 @@ export default function LedgerPage() {
     [supabase],
   );
 
+  const loadJournalData = useCallback(
+    async (currentSchoolId: string) => {
+      const [journalResult, lineResult] = await Promise.all([
+        supabase
+          .from("journal_entries")
+          .select(
+            "id, school_id, entry_date, entry_type, reference_type, reference_id",
+          )
+          .eq("school_id", currentSchoolId),
+        supabase
+          .from("journal_lines")
+          .select(
+            "id, school_id, journal_entry_id, account_id, debit, credit",
+          )
+          .eq("school_id", currentSchoolId),
+      ]);
+
+      if (journalResult.error) {
+        throw new Error(
+          `Unable to load journal entries: ${journalResult.error.message}`,
+        );
+      }
+
+      if (lineResult.error) {
+        throw new Error(
+          `Unable to load journal lines: ${lineResult.error.message}`,
+        );
+      }
+
+      setJournalEntries((journalResult.data || []) as JournalEntry[]);
+      setJournalLines((lineResult.data || []) as JournalLine[]);
+    },
+    [supabase],
+  );
+
   /**
    * IMPORTANT FIX:
    * Ledger must read saved opening_balances.
@@ -358,6 +413,7 @@ export default function LedgerPage() {
         loadAccounts(currentSchoolId),
         loadTransactions(currentSchoolId),
         loadTransactionEntries(currentSchoolId),
+        loadJournalData(currentSchoolId),
         loadOpeningBalances(currentSchoolId),
       ]);
     } catch (err: any) {
@@ -370,6 +426,7 @@ export default function LedgerPage() {
     getCurrentSchoolId,
     loadAccounts,
     loadOpeningBalances,
+    loadJournalData,
     loadSchool,
     loadTransactionEntries,
     loadTransactions,
@@ -433,7 +490,7 @@ export default function LedgerPage() {
       .filter(
         (row) =>
           row.account_id === selectedAccountId &&
-          row.as_of_date <= dateFrom,
+          row.as_of_date < dateFrom,
       )
       .sort((a, b) => {
         const dateCompare = b.as_of_date.localeCompare(a.as_of_date);
@@ -491,12 +548,22 @@ export default function LedgerPage() {
 
     const debitNormal = getDebitNormal(selectedAccount?.account_type);
 
-    const filtered = entries
+    const journalMap = new Map(
+      journalEntries.map((journal) => [journal.id, journal]),
+    );
+    const journalReferenceIds = new Set(
+      journalEntries
+        .map((journal) => journal.reference_id)
+        .filter((referenceId): referenceId is string => Boolean(referenceId)),
+    );
+
+    const legacyRows = entries
       .filter((entry) => entry.account_id === selectedAccountId)
       .map((entry) => ({
         entry,
         transaction: transactionMap.get(entry.transaction_id),
       }))
+      .filter((item) => !journalReferenceIds.has(item.transaction?.id || ""))
       .filter((item) => Boolean(item.transaction))
       .filter((item) => {
         const date = item.transaction!.transaction_date;
@@ -516,40 +583,94 @@ export default function LedgerPage() {
         );
       });
 
+    const canonicalRows = journalLines
+      .filter((line) => line.account_id === selectedAccountId)
+      .map((line) => ({
+        line,
+        journal: journalMap.get(line.journal_entry_id),
+      }))
+      .filter((item) => Boolean(item.journal))
+      .filter((item) => {
+        const date = item.journal!.entry_date;
+        return date >= dateFrom && date <= dateTo;
+      })
+      .sort((a, b) => {
+        const dateCompare = a.journal!.entry_date.localeCompare(
+          b.journal!.entry_date,
+        );
+        return dateCompare !== 0
+          ? dateCompare
+          : a.journal!.id.localeCompare(b.journal!.id);
+      });
+
+    const savedOpening = openingBalances
+      .filter(
+        (row) =>
+          row.account_id === selectedAccountId &&
+          row.as_of_date >= dateFrom &&
+          row.as_of_date <= dateTo,
+      )
+      .sort((a, b) => {
+        const dateCompare = a.as_of_date.localeCompare(b.as_of_date);
+        return dateCompare !== 0
+          ? dateCompare
+          : b.created_at.localeCompare(a.created_at);
+      })[0];
+
+    const events = [
+      ...(savedOpening
+        ? [{
+            id: `opening-${savedOpening.id}`,
+            date: savedOpening.as_of_date,
+            transactionId: "",
+            transactionType: "opening_balance",
+            particulars: "Opening Balance",
+            referenceType: "opening_balance",
+            debit: debitNormal ? Number(savedOpening.balance || 0) : 0,
+            credit: debitNormal ? 0 : Number(savedOpening.balance || 0),
+          }]
+        : []),
+      ...legacyRows.map(({ entry, transaction }) => ({
+        id: entry.id,
+        date: transaction!.transaction_date,
+        transactionId: transaction!.id,
+        transactionType: transaction!.transaction_type || "-",
+        particulars: entry.description || transaction!.description || "-",
+        referenceType: transaction!.reference_type || "-",
+        debit: Number(entry.debit || 0),
+        credit: Number(entry.credit || 0),
+      })),
+      ...canonicalRows.map(({ line, journal }) => ({
+        id: line.id,
+        date: journal!.entry_date,
+        transactionId: journal!.id,
+        transactionType: journal!.entry_type || "-",
+        particulars: journal!.reference_type || "Journal Entry",
+        referenceType: journal!.reference_type || "-",
+        debit: Number(line.debit || 0),
+        credit: Number(line.credit || 0),
+      })),
+    ].sort((a, b) => {
+      const dateCompare = a.date.localeCompare(b.date);
+      return dateCompare !== 0 ? dateCompare : a.id.localeCompare(b.id);
+    });
+
     let runningBalance = openingBalance;
 
-    return filtered.map(({ entry, transaction }) => {
-      const debit = Number(entry.debit || 0);
-      const credit = Number(entry.credit || 0);
-
+    return events.map((event) => {
       runningBalance += signedMovement(
-        debit,
-        credit,
+        event.debit,
+        event.credit,
         debitNormal,
       );
 
       const balanceType: "Dr" | "Cr" =
         runningBalance >= 0
-          ? debitNormal
-            ? "Dr"
-            : "Cr"
-          : debitNormal
-            ? "Cr"
-            : "Dr";
+          ? debitNormal ? "Dr" : "Cr"
+          : debitNormal ? "Cr" : "Dr";
 
       return {
-        id: entry.id,
-        date: transaction!.transaction_date,
-        transactionId: transaction!.id,
-        transactionType: transaction!.transaction_type || "-",
-        particulars:
-          entry.description ||
-          transaction!.description ||
-          "-",
-        referenceType:
-          transaction!.reference_type || "-",
-        debit,
-        credit,
+        ...event,
         balance: Math.abs(runningBalance),
         balanceType,
       };
@@ -558,6 +679,8 @@ export default function LedgerPage() {
     dateFrom,
     dateTo,
     entries,
+    journalEntries,
+    journalLines,
     openingBalance,
     selectedAccount,
     selectedAccountId,

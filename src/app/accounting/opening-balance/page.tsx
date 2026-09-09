@@ -1,7 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { AccountingExportActions } from "../accounting-export";
 import {
   ArrowLeft,
@@ -216,6 +222,7 @@ export default function OpeningBalancePage() {
 
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const loadRequestRef = useRef(0);
 
   /**
    * ---------------------------------------------------------
@@ -337,7 +344,9 @@ export default function OpeningBalancePage() {
             "id, school_id, account_id, balance, as_of_date, notes, created_at",
           )
           .eq("school_id", school)
-          .eq("as_of_date", asOfDate);
+          .eq("as_of_date", asOfDate)
+          .order("created_at", { ascending: false })
+          .order("id", { ascending: false });
 
       if (balanceError) {
         throw new Error(
@@ -354,10 +363,12 @@ export default function OpeningBalancePage() {
       >();
 
       for (const record of saved) {
-        balanceMap.set(
-          record.account_id,
-          Number(record.balance || 0),
-        );
+        if (!balanceMap.has(record.account_id)) {
+          balanceMap.set(
+            record.account_id,
+            Number(record.balance || 0),
+          );
+        }
       }
 
       return accountList
@@ -390,6 +401,8 @@ export default function OpeningBalancePage() {
       selectedYear: FinancialYear = financialYear,
       showLoading = true,
     ) => {
+      const requestId = ++loadRequestRef.current;
+
       try {
         if (showLoading) {
           setLoading(true);
@@ -419,7 +432,9 @@ export default function OpeningBalancePage() {
             openingDate,
           );
 
-        setRows(opening);
+        if (requestId === loadRequestRef.current) {
+          setRows(opening);
+        }
       } catch (err: unknown) {
         console.error(
           "OPENING BALANCE LOAD ERROR:",
@@ -427,13 +442,17 @@ export default function OpeningBalancePage() {
         );
         console.error("OPENING BALANCE LOAD RAW:", err);
 
-        setError(
-          getSupabaseErrorMessage(err) ||
-            "Unable to load opening balances.",
-        );
+        if (requestId === loadRequestRef.current) {
+          setError(
+            getSupabaseErrorMessage(err) ||
+              "Unable to load opening balances.",
+          );
+        }
       } finally {
-        setLoading(false);
-        setRefreshing(false);
+        if (requestId === loadRequestRef.current) {
+          setLoading(false);
+          setRefreshing(false);
+        }
       }
     },
     [
@@ -602,6 +621,10 @@ export default function OpeningBalancePage() {
    * ---------------------------------------------------------
    */
   async function handleSave() {
+    if (loading || refreshing || saving) {
+      return;
+    }
+
     if (!schoolId) {
       setError("School could not be identified. Please sign in again.");
       return;
@@ -629,6 +652,21 @@ export default function OpeningBalancePage() {
       // FY 2026-27 = 01-04-2026 to 31-03-2027.
       // Opening position is the previous day: 31-03-2026.
       const openingDate = getPreviousDate(financialYear.from);
+
+      const { data: existingRecords, error: existingError } =
+        await supabase
+          .from("opening_balances")
+          .select("school_id, account_id, balance, as_of_date, notes")
+          .eq("school_id", schoolId)
+          .eq("as_of_date", openingDate);
+
+      if (existingError) {
+        throw new Error(
+          `Could not read existing opening balances: ${getSupabaseErrorMessage(
+            existingError,
+          )}`,
+        );
+      }
 
       // Save acts as Create + Edit:
       // remove the old records for this school/opening date,
@@ -663,6 +701,18 @@ export default function OpeningBalancePage() {
           .insert(records);
 
         if (insertError) {
+          const { error: rollbackError } = await supabase
+            .from("opening_balances")
+            .insert(existingRecords || []);
+
+          if (rollbackError) {
+            throw new Error(
+              `Could not save opening balances, and restoring the previous values also failed: ${getSupabaseErrorMessage(
+                rollbackError,
+              )}`,
+            );
+          }
+
           throw new Error(
             `Could not save opening balances: ${getSupabaseErrorMessage(
               insertError,
@@ -941,7 +991,8 @@ export default function OpeningBalancePage() {
               <button
                 type="button"
                 onClick={handleReset}
-                className="inline-flex h-10 items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                disabled={loading || refreshing || saving}
+                className="inline-flex h-10 items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <RotateCcw size={15} />
                 Reset
@@ -950,7 +1001,8 @@ export default function OpeningBalancePage() {
               <button
                 type="button"
                 onClick={handleClearUnsaved}
-                className="inline-flex h-10 items-center gap-2 rounded-xl border border-amber-300 bg-white px-4 text-sm font-medium text-amber-700 hover:bg-amber-50"
+                disabled={loading || refreshing || saving}
+                className="inline-flex h-10 items-center gap-2 rounded-xl border border-amber-300 bg-white px-4 text-sm font-medium text-amber-700 hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Clear Unsaved
               </button>
@@ -963,7 +1015,7 @@ export default function OpeningBalancePage() {
                     false,
                   )
                 }
-                disabled={refreshing}
+                disabled={loading || refreshing || saving}
                 className="inline-flex h-10 items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
               >
                 <RefreshCw
@@ -981,6 +1033,8 @@ export default function OpeningBalancePage() {
                 type="button"
                 onClick={() => void handleSave()}
                 disabled={
+                  loading ||
+                  refreshing ||
                   saving ||
                   !totals.balanced
                 }
@@ -1071,13 +1125,18 @@ export default function OpeningBalancePage() {
                               min="0"
                               step="0.01"
                               value={row.balance}
+                              disabled={
+                                loading ||
+                                refreshing ||
+                                saving
+                              }
                               onChange={(event) =>
                                 updateBalance(
                                   row.account.id,
                                   event.target.value,
                                 )
                               }
-                              className="h-10 w-full rounded-xl border border-slate-300 bg-white pl-8 pr-3 text-right text-sm font-medium text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                              className="h-10 w-full rounded-xl border border-slate-300 bg-white pl-8 pr-3 text-right text-sm font-medium text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:opacity-70"
                             />
                           </div>
                         </div>
