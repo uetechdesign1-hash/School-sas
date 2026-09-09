@@ -106,6 +106,7 @@ export default function StaffHomePage() {
 
   const [loading, setLoading] =
     useState(true);
+  const [loadError, setLoadError] = useState("");
 
   const [clock, setClock] =
     useState(new Date());
@@ -121,6 +122,7 @@ export default function StaffHomePage() {
   useEffect(() => {
     const load = async () => {
       try {
+        setLoadError("");
         const {
           data: {
             user,
@@ -174,37 +176,42 @@ export default function StaffHomePage() {
 
         setStaff(staffRow);
 
-        const { data: universalTiming, error: universalTimingError } =
-          await supabase.rpc("get_staff_attendance_settings", {
-            p_school_id: staffRow.school_id,
+        try {
+          const { data: universalTiming, error: universalTimingError } =
+            await supabase.rpc("get_staff_attendance_settings", {
+              p_school_id: staffRow.school_id,
+            });
+          if (universalTimingError) throw universalTimingError;
+
+          const { data: teacherTiming, error: teacherTimingError } = await supabase
+            .from("staff_attendance_timings")
+            .select("work_start_time, work_end_time, grace_period_minutes, minimum_work_minutes")
+            .eq("school_id", staffRow.school_id)
+            .eq("staff_id", staffRow.id)
+            .maybeSingle();
+          if (teacherTimingError && teacherTimingError.code !== "PGRST116") {
+            throw teacherTimingError;
+          }
+
+          setTiming({
+            work_start_time: String(
+              teacherTiming?.work_start_time || universalTiming?.work_start_time || "09:00",
+            ).slice(0, 5),
+            work_end_time: String(
+              teacherTiming?.work_end_time || universalTiming?.work_end_time || "17:00",
+            ).slice(0, 5),
+            grace_period_minutes: Number(
+              teacherTiming?.grace_period_minutes ?? universalTiming?.grace_period_minutes ?? 10,
+            ),
+            minimum_work_minutes: Number(
+              teacherTiming?.minimum_work_minutes ?? universalTiming?.minimum_work_minutes ?? 450,
+            ),
+            is_override: Boolean(teacherTiming),
           });
-        if (universalTimingError) throw universalTimingError;
-
-        const { data: teacherTiming, error: teacherTimingError } = await supabase
-          .from("staff_attendance_timings")
-          .select("work_start_time, work_end_time, grace_period_minutes, minimum_work_minutes")
-          .eq("school_id", staffRow.school_id)
-          .eq("staff_id", staffRow.id)
-          .maybeSingle();
-        if (teacherTimingError && teacherTimingError.code !== "PGRST116") {
-          throw teacherTimingError;
+        } catch (timingError) {
+          console.error("STAFF TIMING LOAD ERROR:", timingError);
+          setTiming(null);
         }
-
-        setTiming({
-          work_start_time: String(
-            teacherTiming?.work_start_time || universalTiming?.work_start_time || "09:00",
-          ).slice(0, 5),
-          work_end_time: String(
-            teacherTiming?.work_end_time || universalTiming?.work_end_time || "17:00",
-          ).slice(0, 5),
-          grace_period_minutes: Number(
-            teacherTiming?.grace_period_minutes ?? universalTiming?.grace_period_minutes ?? 10,
-          ),
-          minimum_work_minutes: Number(
-            teacherTiming?.minimum_work_minutes ?? universalTiming?.minimum_work_minutes ?? 450,
-          ),
-          is_override: Boolean(teacherTiming),
-        });
 
         // ==========================================
         // SCHOOL
@@ -283,9 +290,11 @@ export default function StaffHomePage() {
           "STAFF HOME ERROR:",
           error
         );
-
-        window.location.href =
-          "/login";
+        setLoadError(
+          error instanceof Error
+            ? error.message
+            : "Unable to load the teacher dashboard.",
+        );
       } finally {
         setLoading(false);
       }
@@ -307,7 +316,16 @@ export default function StaffHomePage() {
   }
 
   if (!staff) {
-    return null;
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50 p-6">
+        <div className="max-w-md rounded-2xl border border-red-200 bg-white p-6 text-center shadow-sm">
+          <h1 className="font-bold text-slate-900">Teacher dashboard unavailable</h1>
+          <p className="mt-2 text-sm text-red-700">
+            {loadError || "Your login is not linked to a teacher account."}
+          </p>
+        </div>
+      </div>
+    );
   }
 
   const name = staffName(staff);
