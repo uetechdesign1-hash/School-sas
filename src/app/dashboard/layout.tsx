@@ -70,12 +70,12 @@ const PRINCIPAL_MENU: MenuItem[] = [
   },
   {
     name: "Cash Book",
-    href: "/dashboard/cash-book",
+    href: "/accounting/cash-bank?book=cash",
     icon: <Wallet size={18} />,
   },
   {
     name: "Bank Book",
-    href: "/dashboard/bank-book",
+    href: "/accounting/cash-bank?book=bank",
     icon: <Landmark size={18} />,
   },
   {

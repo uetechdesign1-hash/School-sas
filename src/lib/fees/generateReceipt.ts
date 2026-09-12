@@ -1,5 +1,10 @@
 import jsPDF from "jspdf";
 
+export type ReceiptFeeItem = {
+  description: string;
+  amount: number;
+};
+
 export type ReceiptData = {
   schoolName: string;
   schoolAddress?: string;
@@ -11,19 +16,21 @@ export type ReceiptData = {
 
   studentName: string;
   admissionNumber: string;
-
   className?: string | null;
   section?: string | null;
 
   billNumber: string;
   feeDescription: string;
+  feeItems?: ReceiptFeeItem[];
 
   amount: number;
   concessionAmount?: number;
   paymentMode: string;
-
   referenceNumber?: string | null;
 
+  // IMPORTANT:
+  // previousOutstanding is the balance BEFORE this payment.
+  // remainingOutstanding is the balance AFTER this payment.
   previousOutstanding: number;
   remainingOutstanding: number;
 
@@ -35,372 +42,351 @@ function money(value: number) {
     style: "currency",
     currency: "INR",
     maximumFractionDigits: 2,
-  }).format(value || 0);
+  }).format(Number(value) || 0);
 }
 
-function date(value: string) {
+function formatDate(value: string) {
   const parsed = new Date(value);
-
-  if (Number.isNaN(parsed.getTime())) {
-    return value || "—";
-  }
+  if (Number.isNaN(parsed.getTime())) return value || "—";
 
   return new Intl.DateTimeFormat("en-IN", {
     day: "2-digit",
-    month: "long",
+    month: "short",
     year: "numeric",
   }).format(parsed);
 }
 
+function safeText(value: string | null | undefined) {
+  return (value || "—").trim() || "—";
+}
+
 export function generateReceiptPDF(data: ReceiptData) {
+  // EXACT A5 LANDSCAPE:
+  // width  = 210 mm
+  // height = 148.5 mm
+  //
+  // This is intentionally NOT 105 x 148.5 portrait.
   const pdf = new jsPDF({
-    orientation: "portrait",
+    orientation: "landscape",
     unit: "mm",
-    format: "a4",
+    format: [210, 148.5],
+    compress: true,
   });
 
-  const pageWidth = pdf.internal.pageSize.getWidth();
-  const left = 18;
-  const right = pageWidth - 18;
+  const pageWidth = pdf.internal.pageSize.getWidth();   // 210
+  const pageHeight = pdf.internal.pageSize.getHeight(); // 148.5
 
-  pdf.setDrawColor(210, 210, 210);
-  pdf.setLineWidth(0.5);
+  const margin = 7;
+  const left = margin;
+  const right = pageWidth - margin;
+  const contentWidth = right - left;
 
-  pdf.roundedRect(12, 12, pageWidth - 24, 273, 3, 3);
-
-  pdf.setFont("helvetica", "bold");
-  pdf.setFontSize(19);
-
-  pdf.text(
-    data.schoolName || "SCHOOL NAME",
-    pageWidth / 2,
-    28,
-    { align: "center" },
-  );
-
-  pdf.setFont("helvetica", "normal");
-  pdf.setFontSize(9);
-
-  if (data.schoolAddress) {
-    pdf.text(
-      data.schoolAddress,
-      pageWidth / 2,
-      35,
-      { align: "center" },
-    );
-  }
-
-  let contactLine = "";
-
-  if (data.schoolPhone) {
-    contactLine = "Phone: " + data.schoolPhone;
-  }
-
-  if (data.schoolEmail) {
-    if (contactLine) {
-      contactLine += "   |   ";
-    }
-
-    contactLine += "Email: " + data.schoolEmail;
-  }
-
-  if (contactLine) {
-    pdf.text(
-      contactLine,
-      pageWidth / 2,
-      41,
-      { align: "center" },
-    );
-  }
-
-  pdf.setFillColor(245, 247, 250);
-
+  // Outer receipt border.
+  pdf.setDrawColor(150, 150, 150);
+  pdf.setLineWidth(0.45);
   pdf.roundedRect(
-    left,
-    48,
-    right - left,
-    13,
+    4,
+    4,
+    pageWidth - 8,
+    pageHeight - 8,
     2,
     2,
-    "F",
+    "S",
   );
 
+  let y = 10;
+
+  // ------------------------------------------------------------
+  // SCHOOL HEADER
+  // ------------------------------------------------------------
   pdf.setFont("helvetica", "bold");
   pdf.setFontSize(13);
+  pdf.text(safeText(data.schoolName).toUpperCase(), pageWidth / 2, y, {
+    align: "center",
+  });
 
-  pdf.text(
-    "FEE PAYMENT RECEIPT",
-    pageWidth / 2,
-    56,
-    { align: "center" },
-  );
-
-  pdf.setFontSize(9);
-  pdf.setFont("helvetica", "bold");
-
-  pdf.text("Manual Bill Number", left, 73);
-  pdf.text("Date", right - 55, 73);
+  y += 4.5;
 
   pdf.setFont("helvetica", "normal");
+  pdf.setFontSize(6.2);
 
-  pdf.text(data.receiptNumber || "—", left, 79);
-  pdf.text(date(data.receiptDate), right - 55, 79);
+  if (data.schoolAddress) {
+    const addressLines = pdf
+      .splitTextToSize(safeText(data.schoolAddress), 125)
+      .slice(0, 2);
 
-  let y = 91;
+    pdf.text(addressLines, pageWidth / 2, y, { align: "center" });
+    y += Math.max(3.2, addressLines.length * 2.7);
+  }
 
-  pdf.setFont("helvetica", "bold");
-  pdf.setFontSize(10);
+  const contact = [
+    data.schoolPhone ? `Phone: ${data.schoolPhone}` : "",
+    data.schoolEmail ? `Email: ${data.schoolEmail}` : "",
+  ]
+    .filter(Boolean)
+    .join("  |  ");
 
-  pdf.text("Student Details", left, y);
+  if (contact) {
+    pdf.text(pdf.splitTextToSize(contact, 145).slice(0, 1), pageWidth / 2, y, {
+      align: "center",
+    });
+    y += 3.5;
+  }
 
-  y += 8;
-
-  pdf.setDrawColor(225, 225, 225);
-  pdf.line(left, y, right, y);
-
-  y += 8;
-
-  pdf.setFontSize(9);
-  pdf.setFont("helvetica", "bold");
-
-  pdf.text("Student Name", left, y);
-  pdf.text("Admission No.", 110, y);
-
-  pdf.setFont("helvetica", "normal");
-
-  pdf.text(data.studentName || "—", left, y + 6);
-  pdf.text(data.admissionNumber || "—", 110, y + 6);
-
-  y += 19;
-
-  pdf.setFont("helvetica", "bold");
-
-  pdf.text("Class", left, y);
-  pdf.text("Section", 110, y);
-
-  pdf.setFont("helvetica", "normal");
-
-  pdf.text(data.className || "—", left, y + 6);
-  pdf.text(data.section || "—", 110, y + 6);
-
-  y += 22;
-
-  pdf.setFont("helvetica", "bold");
-  pdf.setFontSize(10);
-
-  pdf.text("Payment Details", left, y);
-
-  y += 8;
-
-  pdf.setDrawColor(225, 225, 225);
-  pdf.line(left, y, right, y);
-
-  y += 9;
-
+  // ------------------------------------------------------------
+  // TITLE
+  // ------------------------------------------------------------
   pdf.setFillColor(245, 247, 250);
-
-  pdf.rect(
-    left,
-    y - 6,
-    right - left,
-    10,
-    "F",
-  );
+  pdf.roundedRect(left, y, contentWidth, 8, 1.4, 1.4, "F");
 
   pdf.setFont("helvetica", "bold");
-  pdf.setFontSize(8);
+  pdf.setFontSize(9.5);
+  pdf.text("FEE PAYMENT RECEIPT", pageWidth / 2, y + 5.3, {
+    align: "center",
+  });
 
-  pdf.text("DESCRIPTION", left + 3, y);
-  pdf.text("BILL", 105, y);
+  y += 11;
 
-  pdf.text(
-    "AMOUNT",
-    right - 3,
-    y,
-    { align: "right" },
-  );
+  // ------------------------------------------------------------
+  // RECEIPT / BILL / DATE
+  // ------------------------------------------------------------
+  const idCol1 = left;
+  const idCol2 = 78;
+  const idCol3 = 145;
 
-  y += 10;
+  pdf.setFont("helvetica", "bold");
+  pdf.setFontSize(5.8);
+  pdf.text("RECEIPT NO.", idCol1, y);
+  pdf.text("BILL NO.", idCol2, y);
+  pdf.text("DATE", idCol3, y);
 
   pdf.setFont("helvetica", "normal");
-  pdf.setFontSize(9);
+  pdf.setFontSize(6.5);
+  pdf.text(safeText(data.receiptNumber), idCol1, y + 3.5);
+  pdf.text(safeText(data.billNumber), idCol2, y + 3.5);
+  pdf.text(formatDate(data.receiptDate), idCol3, y + 3.5);
 
-  pdf.text(
-    data.feeDescription || "Fee Payment",
-    left + 3,
-    y,
-  );
+  y += 8.5;
 
-  pdf.text(data.billNumber || "—", 105, y);
+  // ------------------------------------------------------------
+  // STUDENT DETAILS
+  // ------------------------------------------------------------
+  pdf.setFont("helvetica", "bold");
+  pdf.setFontSize(6.8);
+  pdf.text("STUDENT DETAILS", left, y);
 
-  pdf.text(
-    money(data.amount),
-    right - 3,
-    y,
-    { align: "right" },
-  );
+  y += 3;
 
-  y += 13;
-
-  pdf.setDrawColor(225, 225, 225);
+  pdf.setDrawColor(210, 210, 210);
   pdf.line(left, y, right, y);
+  y += 4;
 
-  y += 10;
+  const studentNameX = left;
+  const admissionX = 70;
+  const classX = 125;
+  const sectionX = 165;
 
   pdf.setFont("helvetica", "bold");
+  pdf.setFontSize(5.5);
+  pdf.text("STUDENT", studentNameX, y);
+  pdf.text("ADMISSION NO.", admissionX, y);
+  pdf.text("CLASS", classX, y);
+  pdf.text("SECTION", sectionX, y);
 
-  pdf.text("Payment Method", left, y);
-  pdf.text("Reference", 110, y);
+  y += 3.2;
 
   pdf.setFont("helvetica", "normal");
+  pdf.setFontSize(6.5);
 
   pdf.text(
-    (data.paymentMode || "other").toUpperCase(),
+    pdf.splitTextToSize(safeText(data.studentName), 58).slice(0, 1),
+    studentNameX,
+    y,
+  );
+  pdf.text(safeText(data.admissionNumber), admissionX, y);
+  pdf.text(safeText(data.className), classX, y);
+  pdf.text(safeText(data.section), sectionX, y);
+
+  y += 7;
+
+  // ------------------------------------------------------------
+  // PAYMENT DETAILS / CATEGORY TABLE
+  // ------------------------------------------------------------
+  pdf.setFont("helvetica", "bold");
+  pdf.setFontSize(6.8);
+  pdf.text("PAYMENT DETAILS", left, y);
+
+  y += 3;
+
+  pdf.line(left, y, right, y);
+  y += 3.5;
+
+  // Table header
+  pdf.setFillColor(245, 247, 250);
+  pdf.rect(left, y - 2.8, contentWidth, 6, "F");
+
+  pdf.setFont("helvetica", "bold");
+  pdf.setFontSize(5.6);
+  pdf.text("FEE CATEGORY", left + 2, y);
+  pdf.text("AMOUNT", right - 2, y, { align: "right" });
+
+  y += 5.2;
+
+  const items =
+    data.feeItems && data.feeItems.length > 0
+      ? data.feeItems
+      : [
+          {
+            description: data.feeDescription || "Fee Payment",
+            amount: data.amount,
+          },
+        ];
+
+  pdf.setFont("helvetica", "normal");
+  pdf.setFontSize(6);
+
+  // Keep the category table inside the A5 landscape page.
+  // If many categories exist, each is limited to one line.
+  for (const item of items.slice(0, 6)) {
+    const description = pdf
+      .splitTextToSize(safeText(item.description), 125)
+      .slice(0, 1);
+
+    pdf.text(description, left + 2, y);
+    pdf.text(money(item.amount), right - 2, y, { align: "right" });
+
+    y += 4.3;
+  }
+
+  if (items.length > 6) {
+    pdf.setFontSize(5);
+    pdf.text(`+ ${items.length - 6} more fee item(s)`, left + 2, y);
+    y += 4;
+  }
+
+  pdf.setDrawColor(205, 205, 205);
+  pdf.line(left, y, right, y);
+  y += 4;
+
+  // ------------------------------------------------------------
+  // PAYMENT METHOD / REFERENCE
+  // ------------------------------------------------------------
+  pdf.setFont("helvetica", "bold");
+  pdf.setFontSize(5.8);
+  pdf.text("PAYMENT METHOD", left, y);
+  pdf.text("REFERENCE", 105, y);
+
+  pdf.setFont("helvetica", "normal");
+  pdf.setFontSize(6.3);
+
+  pdf.text(
+    pdf.splitTextToSize(safeText(data.paymentMode).toUpperCase(), 88).slice(0, 1),
     left,
-    y + 6,
+    y + 3.3,
   );
 
   pdf.text(
-    data.referenceNumber || "—",
-    110,
-    y + 6,
+    pdf.splitTextToSize(safeText(data.referenceNumber), 90).slice(0, 1),
+    105,
+    y + 3.3,
   );
 
-  y += 22;
+  y += 8;
+
+  // ------------------------------------------------------------
+  // SUMMARY
+  // ------------------------------------------------------------
+  const summaryX = left;
+  const summaryY = y;
+  const summaryW = 105;
+  const summaryH = 25;
 
   pdf.setFillColor(248, 250, 252);
-
-  pdf.roundedRect(
-    left,
-    y,
-    right - left,
-    52,
-    2,
-    2,
-    "F",
-  );
+  pdf.roundedRect(summaryX, summaryY, summaryW, summaryH, 1.4, 1.4, "F");
 
   pdf.setFont("helvetica", "normal");
-  pdf.setFontSize(9);
+  pdf.setFontSize(5.8);
 
-  pdf.text(
-    "Previous Outstanding",
-    left + 6,
-    y + 10,
-  );
-
+  pdf.text("Previous Outstanding", summaryX + 3, summaryY + 6);
   pdf.text(
     money(data.previousOutstanding),
-    right - 6,
-    y + 10,
+    summaryX + summaryW - 3,
+    summaryY + 6,
     { align: "right" },
   );
 
+  pdf.text("Concession Given", summaryX + 3, summaryY + 11);
   pdf.text(
-    "Payment Received",
-    left + 6,
-    y + 30,
+    money(data.concessionAmount || 0),
+    summaryX + summaryW - 3,
+    summaryY + 11,
+    { align: "right" },
   );
 
   pdf.setFont("helvetica", "bold");
-
+  pdf.text("Payment Received", summaryX + 3, summaryY + 16.5);
   pdf.text(
     money(data.amount),
-    right - 6,
-    y + 30,
+    summaryX + summaryW - 3,
+    summaryY + 16.5,
     { align: "right" },
   );
 
-  pdf.text(
-    "Remaining Outstanding",
-    left + 6,
-    y + 42,
-  );
-
+  pdf.text("Remaining Outstanding", summaryX + 3, summaryY + 22);
   pdf.text(
     money(data.remainingOutstanding),
-    right - 6,
-    y + 42,
+    summaryX + summaryW - 3,
+    summaryY + 22,
     { align: "right" },
   );
 
-  pdf.setFont("helvetica", "normal");
-
-  pdf.text(
-    "Concession Given",
-    left + 6,
-    y + 20,
-  );
-
-  pdf.text(
-    money(data.concessionAmount || 0),
-    right - 6,
-    y + 20,
-    { align: "right" },
-  );
-
-  y += 63;
+  // ------------------------------------------------------------
+  // REMARKS + SIGNATURE
+  // ------------------------------------------------------------
+  const rightBlockX = 120;
+  const rightBlockW = right - rightBlockX;
 
   if (data.remarks) {
     pdf.setFont("helvetica", "bold");
-    pdf.setFontSize(9);
-
-    pdf.text("Remarks", left, y);
+    pdf.setFontSize(5.8);
+    pdf.text("REMARKS", rightBlockX, summaryY + 5);
 
     pdf.setFont("helvetica", "normal");
-
-    const lines = pdf.splitTextToSize(
-      data.remarks,
-      right - left,
+    pdf.setFontSize(6);
+    pdf.text(
+      pdf.splitTextToSize(safeText(data.remarks), rightBlockW).slice(0, 3),
+      rightBlockX,
+      summaryY + 9,
     );
-
-    pdf.text(lines, left, y + 6);
-
-    y += 6 + Math.max(lines.length * 5, 8);
   }
 
-  const signatureY = 246;
+  // Signature always stays inside the one-page receipt.
+  const signatureY = pageHeight - 18;
 
-  pdf.setDrawColor(150, 150, 150);
-
-  pdf.line(
-    right - 50,
-    signatureY,
-    right,
-    signatureY,
-  );
+  pdf.setDrawColor(130, 130, 130);
+  pdf.line(right - 38, signatureY, right, signatureY);
 
   pdf.setFont("helvetica", "normal");
-  pdf.setFontSize(8);
+  pdf.setFontSize(5.4);
+  pdf.text("Authorized Signature", right - 38, signatureY + 3.5);
 
+  pdf.setTextColor(105, 105, 105);
+  pdf.setFontSize(4.8);
   pdf.text(
-    "Authorized Signature",
-    right - 50,
-    signatureY + 5,
-  );
-
-  pdf.setFontSize(8);
-  pdf.setTextColor(120, 120, 120);
-
-  pdf.text(
-    "This is a computer-generated receipt.",
+    "Computer-generated receipt",
     pageWidth / 2,
-    268,
+    pageHeight - 6,
     { align: "center" },
   );
 
   pdf.setTextColor(0, 0, 0);
 
-  const safeReceiptNumber = (
-    data.receiptNumber || "receipt"
-  ).replace(
-    /[^a-zA-Z0-9-_]/g,
-    "-",
-  );
+  // File name is based ONLY on the receipt number.
+  // Bill number must never replace the receipt number.
+  const safeReceiptNumber = safeText(data.receiptNumber)
+    .replace(/[^a-zA-Z0-9-_]/g, "-");
 
-  pdf.save(
-    "Fee-Receipt-" + safeReceiptNumber + ".pdf",
-  );
+  pdf.save(`Fee-Receipt-${safeReceiptNumber}.pdf`);
 
   return pdf;
 }

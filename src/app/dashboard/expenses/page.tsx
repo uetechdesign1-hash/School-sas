@@ -22,6 +22,10 @@ import {
   X,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
+import {
+  ensureSchoolAccountingSetup,
+  postExpenseJournal,
+} from "@/lib/accounting/canonical-accounting";
 import { ensureBuiltInExpenseCategories } from "@/lib/accounting/expense-categories";
 
 type Category = { id: string; school_id: string; name: string };
@@ -498,24 +502,42 @@ export default function ExpensesPage() {
 
       if (entryError) throw entryError;
 
-      const { error: expenseError } = await supabase.from("expenses").insert({
-        school_id: schoolId,
-        expense_category_id: addCategory,
-        expense_date: addDate,
-        amount,
-        paid_from_account_id: addPaidFrom,
-        transaction_id: txn.id,
-        vendor_name: addVendor.trim() || null,
-        invoice_number: addInvoice.trim() || null,
-        description: addDescription.trim() || null,
-        created_by: (await supabase.auth.getUser()).data.user?.id || null,
-      });
+      const { data: insertedExpense, error: expenseError } = await supabase
+        .from("expenses")
+        .insert({
+          school_id: schoolId,
+          expense_category_id: addCategory,
+          expense_date: addDate,
+          amount,
+          paid_from_account_id: addPaidFrom,
+          transaction_id: txn.id,
+          vendor_name: addVendor.trim() || null,
+          invoice_number: addInvoice.trim() || null,
+          description: addDescription.trim() || null,
+          created_by: (await supabase.auth.getUser()).data.user?.id || null,
+        })
+        .select("id")
+        .single();
 
       if (expenseError) throw expenseError;
+      if (!insertedExpense?.id) throw new Error("Expense record was not created.");
+
+      const setup = await ensureSchoolAccountingSetup(supabase, schoolId);
+
+      await postExpenseJournal(supabase, {
+        schoolId,
+        fiscalYearId: setup.fiscalYearId,
+        entryDate: addDate,
+        sourceRecordId: insertedExpense.id,
+        expenseAccountId: addExpenseAccount,
+        paymentAccountId: addPaidFrom,
+        amount,
+        createdBy: (await supabase.auth.getUser()).data.user?.id || null,
+      });
 
       setShowAdd(false);
       resetAdd();
-      setSuccess("Expense recorded and accounting transaction created.");
+      setSuccess("Expense recorded and canonical accounting entry created.");
       await loadData(schoolId);
     } catch (e: any) {
       console.error(e);

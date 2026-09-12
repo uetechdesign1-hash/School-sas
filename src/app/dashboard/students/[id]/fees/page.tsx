@@ -26,6 +26,7 @@ import {
 
 import { createClient } from "@/lib/supabase/client";
 import { generateReceiptPDF } from "@/lib/fees/generateReceipt";
+import { ensureSchoolAccountingSetup } from "@/lib/accounting/canonical-accounting";
 
 const supabase = createClient();
 
@@ -106,11 +107,15 @@ type FeeConcession = {
   notes?: string | null;
 };
 
+type PaymentLine = {
+  feeBillItemId: string;
+  amount: string;
+};
+
 type FeePayment = {
   id: string;
   bill_id?: string | null;
   receipt_number: string;
-  manual_bill_number?: string | null;
   payment_date: string;
   amount: number;
   payment_method: string;
@@ -251,7 +256,7 @@ export default function FeesPage() {
 
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [selectedBill, setSelectedBill] = useState<FeeBill | null>(null);
-  const [selectedPaymentFeeItemId, setSelectedPaymentFeeItemId] = useState("");
+  const [paymentLines, setPaymentLines] = useState<PaymentLine[]>([]);
   const [showConcessionForm, setShowConcessionForm] = useState(false);
   const [concessionAmount, setConcessionAmount] = useState("");
   const [concessionReason, setConcessionReason] = useState("");
@@ -261,13 +266,18 @@ export default function FeesPage() {
   const [editConcessionReason, setEditConcessionReason] = useState("");
   const [savingConcessionEdit, setSavingConcessionEdit] = useState(false);
 
-  const [amount, setAmount] = useState("");
+  const [manualBillNumber, setManualBillNumber] = useState("");
+  const [manualReceiptNumber, setManualReceiptNumber] = useState("");
   const [paymentMode, setPaymentMode] = useState("cash");
+  const [collectionType, setCollectionType] = useState<"single" | "split">("single");
+  const [cashCollectionAmount, setCashCollectionAmount] = useState("");
+  const [bankCollectionAmount, setBankCollectionAmount] = useState("");
+  const [cashCollectionAccountId, setCashCollectionAccountId] = useState("");
+  const [bankCollectionAccountId, setBankCollectionAccountId] = useState("");
   const [financialAccounts, setFinancialAccounts] =
     useState<FinancialAccount[]>([]);
   const [accountId, setAccountId] = useState("");
   const [loadingAccounts, setLoadingAccounts] = useState(false);
-  const [manualBillNumber, setManualBillNumber] = useState("");
   const [referenceNumber, setReferenceNumber] = useState("");
   const [paymentDate, setPaymentDate] = useState(
     new Date().toISOString().split("T")[0],
@@ -663,7 +673,7 @@ export default function FeesPage() {
         const { data: paymentData, error: paymentError } = await supabase
           .from("fee_payments")
           .select(
-            "id, school_id, bill_id, receipt_number, manual_bill_number, payment_date, amount, payment_method, reference_number, notes, account_id, received_by, receipt_generated",
+            "id, school_id, bill_id, receipt_number, payment_date, amount, payment_method, reference_number, notes, account_id, received_by, receipt_generated",
           )
           .eq("school_id", schoolId)
           .eq("student_id", student.id)
@@ -1155,6 +1165,7 @@ export default function FeesPage() {
         throw new Error(data?.message || "Unable to add new fee categories.");
       }
 
+      setManualBillNumber("");
       await loadLedger(selectedStudent);
       await loadAssignmentPreview(selectedStudent);
 
@@ -1247,6 +1258,16 @@ export default function FeesPage() {
 
     const totalAmount = structureTotal + carryForwardTotal;
 
+    const enteredManualBillNumber = manualBillNumber.trim();
+    if (!assignmentPreview.existingBill && !enteredManualBillNumber) {
+      setMessage({ type: "error", text: "Enter the manual bill number before assigning fees." });
+      return;
+    }
+    if (enteredManualBillNumber.length > 100) {
+      setMessage({ type: "error", text: "Manual bill number is too long." });
+      return;
+    }
+
     if (totalAmount <= 0) {
       setMessage({
         type: "error",
@@ -1314,12 +1335,31 @@ export default function FeesPage() {
         );
       }
 
+      if (enteredManualBillNumber) {
+        const { data: manualBillExists, error: manualBillCheckError } = await supabase
+          .from("fee_bills")
+          .select("id, student_id, bill_number")
+          .eq("school_id", schoolId)
+          .eq("bill_number", enteredManualBillNumber)
+          .limit(1)
+          .maybeSingle();
+
+        if (manualBillCheckError) {
+          throw new Error(`Unable to validate the manual bill number: ${manualBillCheckError.message}`);
+        }
+
+        if (manualBillExists) {
+          throw new Error(`Manual bill number ${enteredManualBillNumber} is already used in this school.`);
+        }
+      }
+
       const today = new Date().toISOString().split("T")[0];
       const billNumber =
-        "BILL-" +
-        today.replace(/-/g, "") +
-        "-" +
-        crypto.randomUUID().slice(0, 8).toUpperCase();
+        enteredManualBillNumber ||
+        ("BILL-" +
+          today.replace(/-/g, "") +
+          "-" +
+          crypto.randomUUID().slice(0, 8).toUpperCase());
 
       const { data: billData, error: billError } =
         await supabase
@@ -1363,7 +1403,17 @@ export default function FeesPage() {
         );
       }
 
-      const billItems = selectedItems.map((item) => ({
+      const billItems: Array<{
+        school_id: string;
+        bill_id: string;
+        fee_structure_id: string | null;
+        fee_category_id: string;
+        description: string;
+        fee_type: string;
+        amount: number;
+        discount: number;
+        net_amount: number;
+      }> = selectedItems.map((item) => ({
         school_id: schoolId,
         bill_id: billData.id,
         fee_structure_id: assignmentPreview.structure.id,
@@ -1374,6 +1424,63 @@ export default function FeesPage() {
         discount: 0,
         net_amount: item.annual_amount,
       }));
+
+      if (carryForwardTotal > 0) {
+        const { data: oldFeeCategory, error: oldFeeCategoryError } =
+          await supabase
+            .from("fee_categories")
+            .select("id")
+            .eq("school_id", schoolId)
+            .ilike("name", "Old Fee")
+            .limit(1)
+            .maybeSingle();
+
+        if (oldFeeCategoryError) {
+          throw new Error(
+            `Unable to load the Old Fee category: ${oldFeeCategoryError.message}`,
+          );
+        }
+
+        let oldFeeCategoryId = oldFeeCategory?.id as string | undefined;
+        if (!oldFeeCategoryId) {
+          const { data: createdOldFeeCategory, error: createOldFeeError } =
+            await supabase
+              .from("fee_categories")
+              .insert({
+                school_id: schoolId,
+                name: "Old Fee",
+                description: "Previous-year fee carried forward",
+                default_frequency: "one_time",
+                is_active: true,
+              })
+              .select("id")
+              .single();
+
+          if (createOldFeeError) {
+            throw new Error(
+              `Unable to create the Old Fee category: ${createOldFeeError.message}`,
+            );
+          }
+
+          oldFeeCategoryId = createdOldFeeCategory.id;
+        }
+
+        if (!oldFeeCategoryId) {
+          throw new Error("Old Fee category could not be resolved.");
+        }
+
+        billItems.push({
+          school_id: schoolId,
+          bill_id: billData.id,
+          fee_structure_id: null,
+          fee_category_id: oldFeeCategoryId,
+          description: `Old Fee - ${assignmentPreview.previousAcademicYear?.name || "Previous Year"}`,
+          fee_type: "one_time",
+          amount: carryForwardTotal,
+          discount: 0,
+          net_amount: carryForwardTotal,
+        });
+      }
 
       const { error: billItemsError } = await supabase
         .from("fee_bill_items")
@@ -1698,13 +1805,17 @@ export default function FeesPage() {
     }
 
     setSelectedBill(bill);
-    setSelectedPaymentFeeItemId("");
-    setAmount("");
+    setPaymentLines([]);
     setPaymentMode("cash");
-    setManualBillNumber("");
+    setCollectionType("single");
+    setCashCollectionAmount("");
+    setBankCollectionAmount("");
+    setCashCollectionAccountId("");
+    setBankCollectionAccountId("");
     setShowConcessionForm(false);
     setConcessionAmount("");
     setConcessionReason("");
+    setManualReceiptNumber("");
     setReferenceNumber("");
     setPaymentDate(new Date().toISOString().split("T")[0]);
     setRemarks("");
@@ -1719,11 +1830,12 @@ export default function FeesPage() {
 
     setShowPaymentModal(false);
     setSelectedBill(null);
-    setSelectedPaymentFeeItemId("");
+    setPaymentLines([]);
     setShowConcessionForm(false);
     setConcessionAmount("");
     setConcessionReason("");
     setManualBillNumber("");
+    setManualReceiptNumber("");
   }
 
   function openEditConcession(concession: FeeConcession) {
@@ -1895,8 +2007,7 @@ export default function FeesPage() {
         ),
       );
 
-      setAmount("");
-      setConcessionAmount("");
+        setConcessionAmount("");
       setConcessionReason("");
       setShowConcessionForm(false);
 
@@ -1928,9 +2039,9 @@ export default function FeesPage() {
    * 2. selected student belongs to school
    * 3. selected bill belongs to selected student
    *
-   * The manual bill number is the only physical identifier entered by staff.
-   * The legacy receipt-number field remains system-generated for the current
-   * payment RPC contract and is never collected from the user.
+   * The physical/manual bill number belongs to the fee bill, not to an
+   * individual payment. One bill can therefore receive multiple category
+   * payments on the same day.
    */
   const accountOptions = useMemo(() => {
     const mode = paymentMode.toLowerCase();
@@ -1957,6 +2068,22 @@ export default function FeesPage() {
       setAccountId(accountOptions[0]?.id || "");
     }
   }, [showPaymentModal, accountOptions, accountId]);
+
+  const cashAccounts = useMemo(
+    () => financialAccounts.filter((account) => account.account_type.toLowerCase() === "cash"),
+    [financialAccounts],
+  );
+
+  const bankAccounts = useMemo(
+    () => financialAccounts.filter((account) => account.account_type.toLowerCase() === "bank"),
+    [financialAccounts],
+  );
+
+  useEffect(() => {
+    if (!showPaymentModal || collectionType !== "split") return;
+    if (!cashCollectionAccountId && cashAccounts[0]) setCashCollectionAccountId(cashAccounts[0].id);
+    if (!bankCollectionAccountId && bankAccounts[0]) setBankCollectionAccountId(bankAccounts[0].id);
+  }, [showPaymentModal, collectionType, cashAccounts, bankAccounts, cashCollectionAccountId, bankCollectionAccountId]);
 
   const paymentFeeOptions = useMemo(() => {
     if (!selectedBill) return [];
@@ -1991,21 +2118,27 @@ export default function FeesPage() {
   useEffect(() => {
     if (!showPaymentModal) return;
 
-    if (
-      selectedPaymentFeeItemId &&
-      paymentFeeOptions.some((item) => item.id === selectedPaymentFeeItemId)
-    ) {
-      return;
-    }
+    setPaymentLines((current) => {
+      const valid = current.filter((line) =>
+        paymentFeeOptions.some((item) => item.id === line.feeBillItemId),
+      );
 
-    setSelectedPaymentFeeItemId(
-      paymentFeeOptions.length === 1 ? paymentFeeOptions[0].id : "",
-    );
-  }, [showPaymentModal, paymentFeeOptions, selectedPaymentFeeItemId]);
+      if (valid.length > 0) return valid;
 
-  const selectedPaymentFeeItem = paymentFeeOptions.find(
-    (item) => item.id === selectedPaymentFeeItemId,
-  ) || null;
+      return paymentFeeOptions.length > 0
+        ? [{ feeBillItemId: paymentFeeOptions[0].id, amount: "" }]
+        : [];
+    });
+  }, [showPaymentModal, paymentFeeOptions]);
+
+  const paymentTotal = useMemo(
+    () =>
+      paymentLines.reduce(
+        (sum, line) => sum + Math.max(Number(line.amount || 0), 0),
+        0,
+      ),
+    [paymentLines],
+  );
 
 
   async function submitPayment(event: FormEvent) {
@@ -2014,165 +2147,164 @@ export default function FeesPage() {
     if (savingPayment) return;
 
     if (!selectedStudent) {
-      setMessage({
-        type: "error",
-        text: "Please select a student.",
-      });
+      setMessage({ type: "error", text: "Please select a student." });
       return;
     }
 
     if (!selectedBill) {
-      setMessage({
-        type: "error",
-        text: "Please select a fee bill.",
-      });
+      setMessage({ type: "error", text: "Please select a fee bill." });
       return;
     }
 
     if (!schoolId || selectedStudent.school_id !== schoolId) {
+      setMessage({ type: "error", text: "This student does not belong to your school." });
+      return;
+    }
+
+    const rows = paymentLines
+      .map((line) => ({
+        feeBillItemId: line.feeBillItemId,
+        amount: Number(line.amount),
+      }))
+      .filter((line) => Number.isFinite(line.amount) && line.amount > 0);
+
+    if (rows.length === 0) {
       setMessage({
         type: "error",
-        text: "This student does not belong to your school.",
+        text: "Enter an amount for at least one fee category.",
       });
       return;
     }
 
-    const paymentAmount = Number(amount);
-
-    if (!Number.isFinite(paymentAmount) || paymentAmount <= 0) {
+    if (!manualReceiptNumber.trim()) {
       setMessage({
         type: "error",
-        text: "Enter a valid payment amount.",
+        text: "Enter the manual receipt number printed on the physical receipt.",
+      });
+      return;
+    }
+
+    if (manualReceiptNumber.trim().length > 100) {
+      setMessage({ type: "error", text: "Manual receipt number is too long." });
+      return;
+    }
+
+    const { data: existingReceiptPayment, error: receiptLookupError } = await supabase
+      .from("fee_payments")
+      .select("id")
+      .eq("school_id", schoolId)
+      .eq("receipt_number", manualReceiptNumber.trim())
+      .limit(1)
+      .maybeSingle();
+
+    if (receiptLookupError) {
+      setMessage({
+        type: "error",
+        text: `Unable to validate the manual receipt number: ${receiptLookupError.message}`,
+      });
+      return;
+    }
+
+    if (existingReceiptPayment) {
+      setMessage({
+        type: "error",
+        text: `Manual receipt number ${manualReceiptNumber.trim()} is already used in this school.`,
+      });
+      return;
+    }
+
+    const uniqueIds = new Set(rows.map((row) => row.feeBillItemId));
+    if (uniqueIds.size !== rows.length) {
+      setMessage({
+        type: "error",
+        text: "Each fee category can be added only once to the same payment.",
       });
       return;
     }
 
     const outstanding = Number(selectedBill.balance_amount || 0);
-    const selectedPaymentItem = paymentFeeOptions.find(
-      (item) => item.id === selectedPaymentFeeItemId,
-    );
-
-    if (paymentFeeOptions.length > 0 && !selectedPaymentItem) {
-      setMessage({
-        type: "error",
-        text: "Select the fee category you are receiving payment for.",
-      });
-      return;
-    }
-
-    const selectedCategoryBalance = selectedPaymentItem
-      ? Number(selectedPaymentItem.balance || 0)
-      : outstanding;
+    const totalPayment = rows.reduce((sum, row) => sum + row.amount, 0);
 
     if (outstanding <= 0) {
+      setMessage({ type: "error", text: "This bill is already fully paid." });
+      return;
+    }
+
+    if (totalPayment > outstanding + 0.005) {
       setMessage({
         type: "error",
-        text: "This bill is already fully paid.",
+        text: `Total payment ${formatMoney(totalPayment)} cannot exceed the bill outstanding ${formatMoney(outstanding)}.`,
       });
       return;
     }
 
-    if (paymentAmount > outstanding + 0.005) {
-      setMessage({
-        type: "error",
-        text:
-          "Payment cannot be greater than the outstanding amount of " +
-          formatMoney(outstanding) +
-          ".",
-      });
-      return;
-    }
-
-    if (selectedPaymentItem && paymentAmount > selectedCategoryBalance + 0.005) {
-      setMessage({
-        type: "error",
-        text:
-          `Payment cannot be greater than the ${selectedPaymentItem.description} balance of ${formatMoney(selectedCategoryBalance)}.`,
-      });
-      return;
+    for (const row of rows) {
+      const item = paymentFeeOptions.find((option) => option.id === row.feeBillItemId);
+      if (!item) {
+        setMessage({ type: "error", text: "One of the selected fee categories is no longer available." });
+        return;
+      }
+      if (row.amount > Number(item.balance) + 0.005) {
+        setMessage({
+          type: "error",
+          text: `Payment for ${item.description} cannot exceed its outstanding ${formatMoney(Number(item.balance))}.`,
+        });
+        return;
+      }
     }
 
     if (!paymentDate) {
-      setMessage({
-        type: "error",
-        text: "Please select a payment date.",
-      });
+      setMessage({ type: "error", text: "Please select a payment date." });
       return;
     }
 
-    if (!accountId) {
-      setMessage({
-        type: "error",
-        text:
-          paymentMode.toLowerCase() === "cash"
+    const cashSplit = Number(cashCollectionAmount || 0);
+    const bankSplit = Number(bankCollectionAmount || 0);
+    if (collectionType === "split") {
+      if (cashSplit <= 0 || bankSplit <= 0) {
+        setMessage({ type: "error", text: "Enter both Cash and Bank/Online amounts for a split collection." });
+        return;
+      }
+      if (Math.abs(cashSplit + bankSplit - totalPayment) > 0.005) {
+        setMessage({ type: "error", text: `Cash + Bank/Online ${formatMoney(cashSplit + bankSplit)} must equal the fee payment total ${formatMoney(totalPayment)}.` });
+        return;
+      }
+      const cashAccount = financialAccounts.find((account) => account.id === cashCollectionAccountId);
+      const bankAccount = financialAccounts.find((account) => account.id === bankCollectionAccountId);
+      if (!cashAccount || cashAccount.account_type.toLowerCase() !== "cash") {
+        setMessage({ type: "error", text: "Select a valid Cash account for the cash portion." });
+        return;
+      }
+      if (!bankAccount || bankAccount.account_type.toLowerCase() !== "bank") {
+        setMessage({ type: "error", text: "Select a valid Bank account for the bank/online portion." });
+        return;
+      }
+    }
+
+    const selectedAccount = financialAccounts.find((account) => account.id === accountId);
+    const mode = paymentMode.toLowerCase();
+    if (collectionType === "single") {
+      if (!selectedAccount) {
+        setMessage({
+          type: "error",
+          text: mode === "cash"
             ? "Please select the cash account that received this payment."
             : "Please select the bank account that received this payment.",
-      });
-      return;
+        });
+        return;
+      }
+      const accountType = selectedAccount.account_type.toLowerCase();
+      if ((mode === "cash" && accountType !== "cash") || (mode !== "cash" && accountType !== "bank")) {
+        setMessage({
+          type: "error",
+          text: mode === "cash" ? "Please select a Cash account." : "Please select a Bank account.",
+        });
+        return;
+      }
     }
 
-    const selectedAccount = financialAccounts.find(
-      (account) => account.id === accountId,
-    );
-
-    if (!selectedAccount) {
-      setMessage({
-        type: "error",
-        text: "The selected Cash/Bank account is not available.",
-      });
-      return;
-    }
-
-    if (selectedAccount.school_id !== schoolId) {
-      setMessage({
-        type: "error",
-        text: "The selected account does not belong to your school.",
-      });
-      return;
-    }
-
-    const mode = paymentMode.toLowerCase();
-    const selectedAccountType = selectedAccount.account_type.toLowerCase();
-
-    const accountMatchesPayment =
-      mode === "cash"
-        ? selectedAccountType === "cash"
-        : selectedAccountType === "bank";
-
-    if (!accountMatchesPayment) {
-      setMessage({
-        type: "error",
-        text:
-          mode === "cash"
-            ? "Please select a Cash account."
-            : "Please select a Bank account.",
-      });
-      return;
-    }
-
-    const enteredBillNumber = manualBillNumber.trim();
-
-    if (!enteredBillNumber) {
-      setMessage({
-        type: "error",
-        text: "Enter the manual bill number printed on the physical bill.",
-      });
-      return;
-    }
-
-    if (enteredBillNumber.length > 100) {
-      setMessage({
-        type: "error",
-        text: "Manual bill number is too long.",
-      });
-      return;
-    }
-
-    if (mode === "upi" && !referenceNumber.trim()) {
-      setMessage({
-        type: "error",
-        text: "Enter the UPI transaction/reference number.",
-      });
+    if (collectionType === "single" && mode === "upi" && !referenceNumber.trim()) {
+      setMessage({ type: "error", text: "Enter the UPI transaction/reference number." });
       return;
     }
 
@@ -2180,215 +2312,152 @@ export default function FeesPage() {
     setMessage(null);
 
     try {
-      const {
-        data: { user },
-        error: authError,
-      } = await supabase.auth.getUser();
-
+      const { data: { user }, error: authError } = await supabase.auth.getUser();
       if (authError) throw authError;
+      if (!user) throw new Error("Your session has expired. Please sign in again.");
 
-      if (!user) {
-        throw new Error(
-          "Your session has expired. Please sign in again.",
-        );
+      const { data: verifiedBill, error: verifiedBillError } = await supabase
+        .from("fee_bills")
+        .select("id, school_id, student_id, bill_number, bill_date, due_date, discount, total_amount, paid_amount, balance_amount, status")
+        .eq("id", selectedBill.id)
+        .eq("school_id", schoolId)
+        .eq("student_id", selectedStudent.id)
+        .maybeSingle();
+
+      if (verifiedBillError) throw new Error(`Unable to verify fee bill: ${verifiedBillError.message}`);
+      if (!verifiedBill) throw new Error("Fee bill was not found for this student.");
+
+      const currentOutstanding = Number(verifiedBill.balance_amount || 0);
+      if (currentOutstanding <= 0) throw new Error("This bill is already fully paid.");
+      if (totalPayment > currentOutstanding + 0.005) {
+        throw new Error(`Total payment cannot exceed the current outstanding ${formatMoney(currentOutstanding)}.`);
       }
+
+      await ensureSchoolAccountingSetup(supabase, schoolId);
+
+      const receiptItems = rows.map((row) => {
+        const item = paymentFeeOptions.find((option) => option.id === row.feeBillItemId);
+        return {
+          description: item?.description || "Fee Payment",
+          amount: row.amount,
+        };
+      });
 
       /*
-       * Re-check the exact bill immediately before recording.
-       * The canonical RPC locks this same bill again during the transaction.
+       * IMPORTANT: One physical receipt must create ONE fee_payment.
+       * The category split belongs in fee_payment_allocations.
+       * Creating one payment per category reuses the same receipt number
+       * and violates fee_payments_school_id_receipt_number_key.
        */
-      const { data: verifiedBill, error: verifiedBillError } =
-        await supabase
-          .from("fee_bills")
-          .select(
-            "id, school_id, student_id, bill_number, bill_date, due_date, discount, total_amount, paid_amount, balance_amount, status",
-          )
-          .eq("id", selectedBill.id)
-          .eq("school_id", schoolId)
-          .eq("student_id", selectedStudent.id)
-          .maybeSingle();
-
-      if (verifiedBillError) {
-        throw new Error(
-          `Unable to verify fee bill: ${verifiedBillError.message}`,
-        );
-      }
-
-      if (!verifiedBill) {
-        throw new Error("Fee bill was not found for this student.");
-      }
-
-      const currentOutstanding = Number(
-        verifiedBill.balance_amount || 0,
-      );
-
-      if (currentOutstanding <= 0) {
-        throw new Error("This bill is already fully paid.");
-      }
-
-      if (paymentAmount > currentOutstanding + 0.005) {
-        throw new Error(
-          "Payment cannot be greater than the current outstanding amount of " +
-            formatMoney(currentOutstanding) +
-            ".",
-        );
-      }
-
-      if (selectedPaymentItem && paymentAmount > selectedCategoryBalance + 0.005) {
-        throw new Error(
-          `Payment exceeds the selected ${selectedPaymentItem.description} balance of ${formatMoney(selectedCategoryBalance)}.`,
-        );
-      }
-
-      /*
-       * SINGLE SOURCE OF TRUTH:
-       *
-       * record_fee_payment performs atomically:
-       *   fee_payments
-       *   fee_payment_allocations
-       *   recalculate_fee_bill
-       *   journal_entries / journal_lines
-       *   receipts
-       *
-       * The frontend must NOT create a second transactions/
-       * transaction_entries accounting record.
-       */
-      const { data: result, error: rpcError } = await supabase.rpc(
-        "record_fee_payment",
-        {
-          p_student_id: selectedStudent.id,
-          p_bill_id: verifiedBill.id,
-          p_amount: paymentAmount,
-          p_payment_mode: mode,
-          p_account_id: selectedAccount.id,
-          p_receipt_number: `SYS-${enteredBillNumber.slice(0, 60)}-${Date.now()}`,
-          p_payment_date: paymentDate,
-          p_reference_number: referenceNumber.trim() || null,
-          p_remarks: notes.trim() || null,
-          p_fee_bill_item_id: selectedPaymentItem?.id || null,
-        },
-      );
+      const { data: result, error: rpcError } = collectionType === "split"
+        ? await supabase.rpc("record_fee_payment_collection_split", {
+            p_student_id: selectedStudent.id,
+            p_bill_id: verifiedBill.id,
+            p_amount: totalPayment,
+            p_receipt_number: manualReceiptNumber.trim(),
+            p_payment_date: paymentDate,
+            p_reference_number: referenceNumber.trim() || null,
+            p_remarks: notes.trim() || null,
+            p_allocations: rows.map((row) => ({ fee_bill_item_id: row.feeBillItemId, amount: row.amount })),
+            p_splits: [
+              { account_id: cashCollectionAccountId, payment_mode: "cash", amount: cashSplit },
+              { account_id: bankCollectionAccountId, payment_mode: "online", amount: bankSplit },
+            ],
+          })
+        : await supabase.rpc("record_fee_payment_collection", {
+            p_student_id: selectedStudent.id,
+            p_bill_id: verifiedBill.id,
+            p_amount: totalPayment,
+            p_payment_mode: mode,
+            p_account_id: selectedAccount!.id,
+            p_receipt_number: manualReceiptNumber.trim(),
+            p_payment_date: paymentDate,
+            p_reference_number: referenceNumber.trim() || null,
+            p_remarks: notes.trim() || null,
+            p_allocations: rows.map((row) => ({ fee_bill_item_id: row.feeBillItemId, amount: row.amount })),
+          });
 
       if (rpcError) {
-        throw new Error(
-          `Unable to record payment: ${rpcError.message}`,
-        );
+        throw new Error(`Unable to record fee payment: ${rpcError.message}`);
       }
 
       if (!result || result.success === false) {
-        throw new Error(
-          result?.message || "Unable to record fee payment.",
-        );
+        throw new Error(result?.message || "Unable to record fee payment.");
       }
 
-      const paymentId = result.payment_id as string | undefined;
-      const receiptNumber = enteredBillNumber;
-
-      if (!paymentId) {
-        throw new Error(
-          "Payment was recorded but no payment ID was returned.",
-        );
+      const createdPaymentId = result.payment_id ? String(result.payment_id) : null;
+      if (!createdPaymentId) {
+        throw new Error("Payment was recorded but no payment ID was returned.");
       }
 
-      const { data: billWithManualNumber, error: billNumberError } =
-        await supabase
-          .from("fee_payments")
-          .update({
-            manual_bill_number: enteredBillNumber,
-          })
-          .eq("id", paymentId)
-          .eq("school_id", schoolId)
-          .select(
-            "manual_bill_number",
-          )
-          .single();
+      let lastRemaining = Number(
+        result.remaining_balance ?? Math.max(currentOutstanding - totalPayment, 0),
+      );
 
-      if (billNumberError || !billWithManualNumber) {
-        throw new Error(
-          `Payment was recorded, but the manual bill number could not be synchronized: ${
-            billNumberError?.message || "bill was not returned"
-          }`,
-        );
-      }
+      const { data: refreshedBill, error: refreshedBillError } = await supabase
+        .from("fee_bills")
+        .select("id, school_id, student_id, bill_number, bill_date, due_date, discount, total_amount, paid_amount, balance_amount, status")
+        .eq("id", verifiedBill.id)
+        .eq("school_id", schoolId)
+        .eq("student_id", selectedStudent.id)
+        .single();
 
-      /*
-       * Generate the downloadable PDF from the canonical result.
-       * This is independent of receipt-history loading, so the new receipt
-       * can always be downloaded immediately after recording.
-       */
-      const newRemaining =
-        Number(result.remaining_balance ?? result.remaining_outstanding ?? 0);
+      if (refreshedBillError) throw new Error(`Payments were recorded, but the updated bill could not be loaded: ${refreshedBillError.message}`);
+
+      lastRemaining = Number(refreshedBill.balance_amount || lastRemaining);
+
+      await supabase
+        .from("fee_payments")
+        .update({ receipt_generated: true })
+        .eq("school_id", schoolId)
+        .eq("id", createdPaymentId);
 
       generateReceiptPDF({
         schoolName: school?.name || "School",
         schoolAddress: school?.address || "",
         schoolPhone: school?.phone || "",
         schoolEmail: school?.email || "",
-        receiptNumber,
+        receiptNumber: manualReceiptNumber.trim(),
         receiptDate: paymentDate,
         studentName: getStudentName(selectedStudent),
         admissionNumber: selectedStudent.admission_no,
         className: selectedStudent.class_name,
         section: selectedStudent.section,
-        billNumber:
-          billWithManualNumber.manual_bill_number ||
-          (result.bill_number as string | undefined) ||
-          enteredBillNumber,
-        feeDescription: "School Fee Payment",
-        amount: paymentAmount,
-        concessionAmount: Number(selectedBill.discount || 0),
-        paymentMode: mode,
+        billNumber: refreshedBill.bill_number,
+        feeDescription: receiptItems.map((item) => item.description).join(", "),
+        particulars: `${getStudentName(selectedStudent)} • ${selectedStudent.class_name || "Class"}${selectedStudent.section ? ` • ${selectedStudent.section}` : ""} • ${receiptItems.map((item) => item.description).join(", ")}`,
+        feeItems: receiptItems,
+        amount: totalPayment,
+        concessionAmount: Number(refreshedBill.discount || 0),
+        paymentMode: collectionType === "split" ? `Split — Cash ${formatMoney(cashSplit)} + Bank/Online ${formatMoney(bankSplit)}` : mode,
         referenceNumber: referenceNumber.trim() || null,
         previousOutstanding: currentOutstanding,
-        remainingOutstanding: newRemaining,
+        remainingOutstanding: lastRemaining,
         remarks: notes.trim() || null,
       });
 
-      const { error: receiptFlagError } = await supabase
-        .from("fee_payments")
-        .update({ receipt_generated: true })
-        .eq("id", paymentId)
-        .eq("school_id", schoolId);
-
-      if (receiptFlagError) {
-        console.warn(
-          "Receipt generated flag could not be updated:",
-          receiptFlagError.message,
-        );
-      }
-
       setShowPaymentModal(false);
       setSelectedBill(null);
-      setSelectedPaymentFeeItemId("");
-      setAmount("");
-      setManualBillNumber("");
-      setReferenceNumber("");
+      setPaymentLines([]);
+        setReferenceNumber("");
       setRemarks("");
       setAccountId("");
+      setCollectionType("single");
+      setCashCollectionAmount("");
+      setBankCollectionAmount("");
+      setCashCollectionAccountId("");
+      setBankCollectionAccountId("");
 
       await loadLedger(selectedStudent);
 
       setMessage({
         type: "success",
-        text:
-          "Payment of " +
-          formatMoney(paymentAmount) +
-          " recorded successfully. Receipt " +
-          receiptNumber +
-          " downloaded.",
+        text: `${formatMoney(totalPayment)} received for ${receiptItems.length} fee ${receiptItems.length === 1 ? "category" : "categories"}. Bill ${refreshedBill.bill_number} receipt downloaded.`,
       });
     } catch (error: unknown) {
-      const messageText =
-        error instanceof Error
-          ? error.message
-          : "Unable to record payment. Please try again.";
-
+      const messageText = error instanceof Error ? error.message : "Unable to record payment. Please try again.";
       console.error("PAYMENT RECORDING ERROR:", messageText, error);
-
-      setMessage({
-        type: "error",
-        text: messageText,
-      });
+      setMessage({ type: "error", text: messageText });
     } finally {
       setSavingPayment(false);
     }
@@ -2461,21 +2530,33 @@ export default function FeesPage() {
           ? remainingOutstanding + paymentAmount
           : paymentAmount;
 
+      const oldAllocationIds = paymentAllocations
+        .filter((allocation) => allocation.payment_id === payment.id && allocation.fee_bill_item_id)
+        .map((allocation) => allocation.fee_bill_item_id as string);
+      const oldFeeItems = oldAllocationIds
+        .map((id) => billItems.find((item) => item.id === id))
+        .filter(Boolean)
+        .map((item) => ({
+          description: item!.description,
+          amount: Number(
+            paymentAllocations.find((allocation) => allocation.payment_id === payment.id && allocation.fee_bill_item_id === item!.id)?.amount || 0,
+          ),
+        }));
+
       generateReceiptPDF({
         schoolName: school?.name || "School",
         schoolAddress: school?.address || "",
         schoolPhone: school?.phone || "",
         schoolEmail: school?.email || "",
-        receiptNumber:
-          payment.manual_bill_number || relatedBill?.bill_number || payment.receipt_number,
+        receiptNumber: payment.receipt_number,
         receiptDate: payment.payment_date,
         studentName: getStudentName(selectedStudent),
         admissionNumber: selectedStudent.admission_no,
         className: selectedStudent.class_name,
         section: selectedStudent.section,
-        billNumber:
-          payment.manual_bill_number || relatedBill?.bill_number || "—",
-        feeDescription: "School Fee Payment",
+        billNumber: relatedBill?.bill_number || "—",
+        feeDescription: oldFeeItems.map((item) => item.description).join(", ") || "Fee Payment",
+        feeItems: oldFeeItems,
         amount: paymentAmount,
         concessionAmount: Number(relatedBill?.discount || 0),
         paymentMode: payment.payment_method,
@@ -2487,7 +2568,7 @@ export default function FeesPage() {
 
       setMessage({
         type: "success",
-        text: `Bill ${payment.manual_bill_number || relatedBill?.bill_number || payment.receipt_number} downloaded successfully.`,
+        text: `Bill ${relatedBill?.bill_number || payment.receipt_number} downloaded successfully.`,
       });
     } catch (error: unknown) {
       console.error("DOWNLOAD RECEIPT ERROR:", error);
@@ -2747,6 +2828,25 @@ export default function FeesPage() {
                       </div>
                       <p className="mt-1 text-xs text-amber-700">
                         This amount will be included in the new academic-year bill.
+                      </p>
+                    </div>
+                  )}
+
+                  {!assignmentPreview.existingBill && (
+                    <div className="mb-4 rounded-xl border border-slate-200 bg-white p-4">
+                      <label className="mb-2 block text-sm font-bold text-slate-700">
+                        Manual Bill Number <span className="text-red-500">*</span>
+                      </label>
+                      <input
+                        value={manualBillNumber}
+                        onChange={(event) => setManualBillNumber(event.target.value)}
+                        placeholder="Enter the physical/manual bill number"
+                        maxLength={100}
+                        autoComplete="off"
+                        className="w-full max-w-md rounded-xl border border-slate-200 px-4 py-3 text-sm font-semibold outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                      />
+                      <p className="mt-1.5 text-xs text-slate-500">
+                        This bill number will appear on the student fee receipt and Receipt History.
                       </p>
                     </div>
                   )}
@@ -3181,7 +3281,10 @@ export default function FeesPage() {
 
                         <div>
                           <div className="font-semibold text-slate-900">
-                            {payment.receipt_number}
+                            {(() => {
+                              const bill = bills.find((item) => item.id === payment.bill_id);
+                              return bill?.bill_number || payment.receipt_number;
+                            })()}
                           </div>
 
                           <div className="mt-1 text-xs text-slate-500">
@@ -3194,15 +3297,13 @@ export default function FeesPage() {
                           </div>
 
                           {(() => {
-                            const allocation = paymentAllocations.find(
-                              (item) => item.payment_id === payment.id && item.fee_bill_item_id,
-                            );
-                            const categoryItem = allocation
-                              ? billItems.find((item) => item.id === allocation.fee_bill_item_id)
-                              : null;
-                            return categoryItem ? (
+                            const categoryItems = paymentAllocations
+                              .filter((item) => item.payment_id === payment.id && item.fee_bill_item_id)
+                              .map((allocation) => billItems.find((item) => item.id === allocation.fee_bill_item_id))
+                              .filter(Boolean);
+                            return categoryItems.length ? (
                               <div className="mt-1 text-xs font-semibold text-blue-600">
-                                Fee: {categoryItem.description}
+                                Fee: {categoryItems.map((item) => item!.description).join(", ")}
                               </div>
                             ) : null;
                           })()}
@@ -3316,8 +3417,8 @@ export default function FeesPage() {
       )}
 
       {showPaymentModal && selectedBill && selectedStudent && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-sm">
-          <div className="w-full max-w-lg overflow-hidden rounded-2xl bg-white shadow-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-3 backdrop-blur-sm">
+          <div className="w-full max-w-6xl max-h-[94vh] overflow-hidden rounded-2xl bg-white shadow-2xl">
             <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
               <div>
                 <h2 className="font-bold text-slate-900">
@@ -3343,9 +3444,10 @@ export default function FeesPage() {
 
             <form
               onSubmit={submitPayment}
-              className="space-y-5 p-5"
+              className="max-h-[calc(94vh-82px)] overflow-y-auto p-5"
             >
-              <div className="rounded-xl bg-red-50 p-4">
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+              <div className="rounded-xl bg-red-50 p-4 lg:col-span-3">
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <div className="text-xs font-semibold uppercase tracking-wide text-red-500">
@@ -3371,7 +3473,7 @@ export default function FeesPage() {
               </div>
 
               {showConcessionForm && (
-                <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
+                <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 lg:col-span-3">
                   <div className="text-sm font-bold text-amber-900">
                     Give Concession
                   </div>
@@ -3420,204 +3522,178 @@ export default function FeesPage() {
                 </div>
               )}
 
+              <div className="lg:col-span-3 rounded-xl border border-blue-100 bg-blue-50/40 p-4">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <label className="block text-sm font-bold text-slate-800">
+                      Fee Categories & Payment Amounts
+                    </label>
+                    <p className="mt-1 text-xs text-slate-500">
+                      Add one or more categories. A student can pay Annual, Uniform, Transport, etc. on the same day in one collection.
+                    </p>
+                  </div>
+                  <div className="rounded-lg bg-white px-3 py-2 text-right shadow-sm">
+                    <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400">This Collection</div>
+                    <div className="text-lg font-bold text-blue-700">{formatMoney(paymentTotal)}</div>
+                  </div>
+                </div>
+
+                <div className="mt-4 space-y-3">
+                  {paymentLines.map((line, index) => {
+                    const item = paymentFeeOptions.find((option) => option.id === line.feeBillItemId);
+                    const usedIds = new Set(paymentLines.map((entry) => entry.feeBillItemId));
+                    return (
+                      <div key={`${line.feeBillItemId}-${index}`} className="grid grid-cols-1 gap-3 rounded-xl border border-slate-200 bg-white p-3 sm:grid-cols-[minmax(0,1fr)_240px_88px] sm:items-start">
+                        <div>
+                          <label className="mb-1.5 block text-xs font-bold text-slate-600">Fee Category</label>
+                          <select
+                            value={line.feeBillItemId}
+                            onChange={(event) => {
+                              const nextId = event.target.value;
+                              setPaymentLines((current) => current.map((entry, entryIndex) => entryIndex === index ? { ...entry, feeBillItemId: nextId, amount: "" } : entry));
+                            }}
+                            className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                          >
+                            {paymentFeeOptions.map((option) => (
+                              <option key={option.id} value={option.id} disabled={usedIds.has(option.id) && option.id !== line.feeBillItemId}>
+                                {option.description} — Due {formatMoney(Number(option.balance))}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div>
+                          <label className="mb-1.5 block text-xs font-bold text-slate-600">Amount</label>
+                          <input
+                            type="number"
+                            min="0.01"
+                            max={Number(item?.balance || 0)}
+                            step="0.01"
+                            value={line.amount}
+                            onChange={(event) => setPaymentLines((current) => current.map((entry, entryIndex) => entryIndex === index ? { ...entry, amount: event.target.value } : entry))}
+                            placeholder="Enter amount"
+                            className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm font-semibold outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                          />
+                          <div className="mt-1 flex gap-1.5">
+                            {[25, 50, 100].map((percent) => (
+                              <button
+                                key={percent}
+                                type="button"
+                                onClick={() => setPaymentLines((current) => current.map((entry, entryIndex) => entryIndex === index ? { ...entry, amount: ((Number(item?.balance || 0) * percent) / 100).toFixed(2) } : entry))}
+                                className="rounded border border-slate-200 px-2 py-1 text-[10px] font-bold text-slate-500 hover:bg-slate-50"
+                              >
+                                {percent}%
+                              </button>
+                            ))}
+                            <button
+                              type="button"
+                              onClick={() => setPaymentLines((current) => current.map((entry, entryIndex) => entryIndex === index ? { ...entry, amount: Number(item?.balance || 0).toFixed(2) } : entry))}
+                              className="rounded border border-blue-200 bg-blue-50 px-2 py-1 text-[10px] font-bold text-blue-600"
+                            >
+                              Full
+                            </button>
+                          </div>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => setPaymentLines((current) => current.filter((_, entryIndex) => entryIndex !== index))}
+                          disabled={paymentLines.length === 1}
+                          className="w-full rounded-lg border border-red-200 px-2.5 py-2.5 text-xs font-bold text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40 sm:mt-6"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {paymentLines.length < paymentFeeOptions.length && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const selectedIds = new Set(paymentLines.map((line) => line.feeBillItemId));
+                      const next = paymentFeeOptions.find((item) => !selectedIds.has(item.id));
+                      if (next) setPaymentLines((current) => [...current, { feeBillItemId: next.id, amount: "" }]);
+                    }}
+                    className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-blue-200 bg-white px-3 py-2 text-xs font-bold text-blue-700 hover:bg-blue-50"
+                  >
+                    <Plus size={14} />
+                    Add Another Fee Category
+                  </button>
+                )}
+              </div>
+
               <div>
                 <label className="mb-2 block text-sm font-semibold text-slate-700">
-                  Manual Bill Number
-                  <span className="ml-1 text-xs font-normal text-red-500">*</span>
+                  Manual Receipt Number <span className="text-red-500">*</span>
                 </label>
-
                 <input
-                  value={manualBillNumber}
-                  onChange={(event) => setManualBillNumber(event.target.value)}
-                  placeholder="Enter physical/manual bill number"
+                  value={manualReceiptNumber}
+                  onChange={(event) => setManualReceiptNumber(event.target.value)}
+                  placeholder="Enter physical receipt number"
                   maxLength={100}
-                  required
                   autoComplete="off"
-                  className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm font-semibold outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                  required
+                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
                 />
-
-                <p className="mt-1.5 text-xs text-slate-500">
-                  This number is saved on the same fee bill used by the Receipt page.
+                <p className="mt-1 text-[11px] text-slate-500">
+                  This same receipt number is linked to all fee categories in this collection.
                 </p>
               </div>
 
-              {paymentFeeOptions.length > 0 && (
-                <div>
-                  <label className="mb-2 block text-sm font-semibold text-slate-700">
-                    Fee Category
-                  </label>
-                  <select
-                    value={selectedPaymentFeeItemId}
-                    onChange={(event) => {
-                      const nextId = event.target.value;
-                      setSelectedPaymentFeeItemId(nextId);
-                      const nextItem = paymentFeeOptions.find((item) => item.id === nextId);
-                      if (nextItem) {
-                        setAmount("");
-                      }
-                    }}
-                    className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-                    required
-                  >
-                    <option value="">Select fee category</option>
-                    {paymentFeeOptions.map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {item.description} — Outstanding {formatMoney(item.balance)}
-                      </option>
-                    ))}
-                  </select>
-                  {selectedPaymentFeeItemId && (
-                    <p className="mt-1.5 text-xs text-slate-500">
-                      This payment will be allocated specifically to the selected fee category.
-                    </p>
-                  )}
-                </div>
-              )}
-
-              <div>
-                <label className="mb-2 block text-sm font-semibold text-slate-700">
-                  Payment Amount
-                </label>
-
-                <div className="relative">
-                  <IndianRupee
-                    size={17}
-                    className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
-                  />
-
-                  <input
-                    type="number"
-                    min="0.01"
-                    max={Number(selectedBill.balance_amount)}
-                    step="0.01"
-                    value={amount}
-                    onChange={(event) =>
-                      setAmount(event.target.value)
-                    }
-                    placeholder="Enter amount"
-                    required
-                    className="w-full rounded-xl border border-slate-200 py-3 pl-9 pr-4 text-sm font-semibold outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-                  />
+              <div className="lg:col-span-3 rounded-xl border border-slate-200 bg-white p-4">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <label className="block text-sm font-bold text-slate-800">Collection Method</label>
+                    <p className="mt-1 text-xs text-slate-500">One receipt can be collected fully in one mode or split between Cash and Bank/Online.</p>
+                  </div>
+                  <div className="flex rounded-lg border border-slate-200 bg-slate-50 p-1">
+                    <button type="button" onClick={() => setCollectionType("single")} className={`rounded-md px-4 py-2 text-xs font-bold ${collectionType === "single" ? "bg-blue-600 text-white" : "text-slate-600"}`}>Single Payment</button>
+                    <button type="button" onClick={() => setCollectionType("split")} className={`rounded-md px-4 py-2 text-xs font-bold ${collectionType === "split" ? "bg-blue-600 text-white" : "text-slate-600"}`}>Split Collection</button>
+                  </div>
                 </div>
 
-                <div className="mt-2 flex flex-wrap gap-2">
-                  {[25, 50, 100].map((percent) => (
-                    <button
-                      key={percent}
-                      type="button"
-                      onClick={() => {
-                        const value =
-                          (Number(selectedBill.balance_amount) *
-                            percent) /
-                          100;
-
-                        setAmount(value.toFixed(2));
-                      }}
-                      className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50"
-                    >
-                      {percent}%
-                    </button>
-                  ))}
-
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setAmount(
-                        (selectedPaymentFeeItem
-                          ? Number(selectedPaymentFeeItem.balance)
-                          : Number(selectedBill.balance_amount)
-                        ).toFixed(2),
-                      )
-                    }
-                    className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-bold text-blue-600"
-                  >
-                    Full
-                  </button>
-                </div>
-              </div>
-
-              <div>
-                <label className="mb-2 block text-sm font-semibold text-slate-700">
-                  Payment Mode
-                </label>
-
-                <select
-                  value={paymentMode}
-                  onChange={(event) =>
-                    setPaymentMode(event.target.value)
-                  }
-                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-                >
-                  <option value="cash">Cash</option>
-                  <option value="bank_transfer">Bank Transfer</option>
-                  <option value="upi">UPI</option>
-                  <option value="cheque">Cheque</option>
-                  <option value="card">Card</option>
-                  <option value="online">Online</option>
-                  <option value="other">Other</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="mb-2 block text-sm font-semibold text-slate-700">
-                  {paymentMode.toLowerCase() === "cash"
-                    ? "Cash Account"
-                    : paymentMode.toLowerCase() === "upi"
-                      ? "Bank Account (UPI)"
-                      : "Bank Account"}
-                </label>
-
-                <select
-                  value={accountId}
-                  onChange={(event) =>
-                    setAccountId(event.target.value)
-                  }
-                  disabled={loadingAccounts || accountOptions.length === 0}
-                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50"
-                  required
-                >
-                  <option value="">
-                    {loadingAccounts
-                      ? "Loading accounts..."
-                      : accountOptions.length
-                        ? `Select ${
-                            paymentMode.toLowerCase() === "cash"
-                              ? "cash"
-                              : "bank"
-                          } account`
-                        : `No ${
-                            paymentMode.toLowerCase() === "cash"
-                              ? "cash"
-                              : "bank"
-                          } accounts found`}
-                  </option>
-
-                  {accountOptions.map((account) => (
-                    <option
-                      key={account.id}
-                      value={account.id}
-                    >
-                      {account.name}
-                      {account.account_type
-                        ? ` — ${account.account_type.toUpperCase()}`
-                        : ""}
-                    </option>
-                  ))}
-                </select>
-
-                {!loadingAccounts &&
-                  accountOptions.length === 0 && (
-                    <p className="mt-1.5 text-xs text-amber-600">
-                      Create an active{" "}
-                      {paymentMode.toLowerCase() === "cash"
-                        ? "Cash"
-                        : "Bank"}{" "}
-                      account in Accounting first.
-                      {paymentMode.toLowerCase() === "upi"
-                        ? " UPI uses the selected Bank account."
-                        : ""}
-                    </p>
-                  )}
+                {collectionType === "split" ? (
+                  <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
+                    <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-3">
+                      <label className="mb-1.5 block text-xs font-bold text-slate-700">Cash Collection</label>
+                      <input type="number" min="0.01" step="0.01" value={cashCollectionAmount} onChange={(e) => setCashCollectionAmount(e.target.value)} placeholder="₹ 2,500" className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm font-semibold outline-none focus:border-blue-500" />
+                      <select value={cashCollectionAccountId} onChange={(e) => setCashCollectionAccountId(e.target.value)} className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none">
+                        <option value="">Select Cash Account</option>
+                        {cashAccounts.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}
+                      </select>
+                    </div>
+                    <div className="rounded-xl border border-blue-200 bg-blue-50/50 p-3">
+                      <label className="mb-1.5 block text-xs font-bold text-slate-700">Bank / Online Collection</label>
+                      <input type="number" min="0.01" step="0.01" value={bankCollectionAmount} onChange={(e) => setBankCollectionAmount(e.target.value)} placeholder="₹ 3,500" className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm font-semibold outline-none focus:border-blue-500" />
+                      <select value={bankCollectionAccountId} onChange={(e) => setBankCollectionAccountId(e.target.value)} className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none">
+                        <option value="">Select Bank Account</option>
+                        {bankAccounts.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}
+                      </select>
+                    </div>
+                    <div className="md:col-span-2 rounded-lg bg-slate-50 px-3 py-2 text-sm">
+                      <span className="font-semibold text-slate-600">Split Total:</span> <span className="font-bold text-blue-700">{formatMoney(Number(cashCollectionAmount || 0) + Number(bankCollectionAmount || 0))}</span>
+                      <span className="ml-2 text-slate-400">/ Fee Total {formatMoney(paymentTotal)}</span>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
+                    <div>
+                      <label className="mb-2 block text-sm font-semibold text-slate-700">Payment Mode</label>
+                      <select value={paymentMode} onChange={(event) => setPaymentMode(event.target.value)} className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100">
+                        <option value="cash">Cash</option><option value="bank_transfer">Bank Transfer</option><option value="upi">UPI</option><option value="cheque">Cheque</option><option value="card">Card</option><option value="online">Online</option><option value="other">Other</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="mb-2 block text-sm font-semibold text-slate-700">{paymentMode.toLowerCase() === "cash" ? "Cash Account" : paymentMode.toLowerCase() === "upi" ? "Bank Account (UPI)" : "Bank Account"}</label>
+                      <select value={accountId} onChange={(event) => setAccountId(event.target.value)} disabled={loadingAccounts || accountOptions.length === 0} className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50">
+                        <option value="">{loadingAccounts ? "Loading accounts..." : accountOptions.length ? `Select ${paymentMode.toLowerCase() === "cash" ? "cash" : "bank"} account` : `No ${paymentMode.toLowerCase() === "cash" ? "cash" : "bank"} accounts found`}</option>
+                        {accountOptions.map((account) => <option key={account.id} value={account.id}>{account.name}{account.account_type ? ` — ${account.account_type.toUpperCase()}` : ""}</option>)}
+                      </select>
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div>
@@ -3668,7 +3744,7 @@ export default function FeesPage() {
                 </div>
               </div>
 
-              <div>
+              <div className="lg:col-span-2">
                 <label className="mb-2 block text-sm font-semibold text-slate-700">
                   Notes
                   <span className="ml-1 text-xs font-normal text-slate-400">
@@ -3687,7 +3763,7 @@ export default function FeesPage() {
                 />
               </div>
 
-              <div className="flex gap-3 border-t border-slate-100 pt-5">
+              <div className="flex gap-3 border-t border-slate-100 pt-5 lg:col-span-3">
                 <button
                   type="button"
                   onClick={closePaymentModal}
@@ -3717,6 +3793,7 @@ export default function FeesPage() {
                     </>
                   )}
                 </button>
+              </div>
               </div>
             </form>
           </div>

@@ -20,9 +20,14 @@ import {
 } from "lucide-react";
 
 import { createClient } from "@/lib/supabase/client";
+import {
+  ensureSchoolAccountingSetup,
+  postFeeCollectionJournal,
+} from "@/lib/accounting/canonical-accounting";
 
 type Student = {
   id: string;
+  school_id: string;
   first_name: string;
   last_name: string | null;
   admission_no: string | null;
@@ -96,7 +101,7 @@ export default function RecordPaymentPage() {
         await supabase
           .from("students")
           .select(
-            "id, first_name, last_name, admission_no"
+            "id, school_id, first_name, last_name, admission_no"
           )
           .eq("id", studentId)
           .single();
@@ -259,6 +264,33 @@ export default function RecordPaymentPage() {
         throw new Error(
           "Payment could not be created."
         );
+      }
+
+      const setup = await ensureSchoolAccountingSetup(
+        supabase,
+        student?.school_id || ""
+      );
+
+      const paymentAccountKey =
+        method === "cash" ? "CASH" : "BANK";
+      const paymentAccountId =
+        setup.accountMap[paymentAccountKey] ||
+        Object.values(setup.accountMap)[0];
+
+      if (paymentAccountId && student?.school_id) {
+        await postFeeCollectionJournal(supabase, {
+          schoolId: student.school_id,
+          fiscalYearId: setup.fiscalYearId,
+          entryDate: paymentDate,
+          sourceRecordId: String(data.id),
+          paymentAccountId,
+          feeReceivableAccountId:
+            setup.accountMap.STUDENT_FEE_RECEIVABLE ||
+            setup.accountMap["STUDENT_FEE_RECEIVABLE"],
+          amount: numericAmount,
+          createdBy:
+            (await supabase.auth.getUser()).data.user?.id || null,
+        });
       }
 
       router.push(

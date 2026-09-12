@@ -1,6 +1,12 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import {
+  FormEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import Link from "next/link";
 import { AccountingExportActions } from "../accounting-export";
 import {
@@ -17,6 +23,10 @@ import {
 } from "lucide-react";
 
 import { createClient } from "@/lib/supabase/client";
+import {
+  ensureSchoolAccountingSetup,
+  postContraJournal,
+} from "@/lib/accounting/canonical-accounting";
 import { getCurrentSchoolId } from "@/lib/supabase/current-school";
 
 type Account = {
@@ -42,8 +52,6 @@ type ContraRow = {
   amount: number;
 };
 
-const supabase = createClient();
-
 function today() {
   return new Date().toISOString().split("T")[0];
 }
@@ -54,6 +62,26 @@ function money(value: number) {
     currency: "INR",
     maximumFractionDigits: 2,
   }).format(Number(value || 0));
+}
+
+function getReference(description: string | null) {
+  if (!description) return "";
+
+  const part = description
+    .split(" | ")
+    .find((item) => item.startsWith("Reference:"));
+
+  return part ? part.replace("Reference:", "").trim() : "";
+}
+
+function getNotes(description: string | null) {
+  if (!description) return "";
+
+  const part = description
+    .split(" | ")
+    .find((item) => item.startsWith("Notes:"));
+
+  return part ? part.replace("Notes:", "").trim() : "";
 }
 
 export default function ContraPage() {
@@ -81,6 +109,7 @@ export default function ContraPage() {
   const [referenceNumber, setReferenceNumber] = useState("");
   const [notes, setNotes] = useState("");
 
+  const supabase = useMemo(() => createClient(), []);
   const numericAmount = Number(amount || 0);
 
   const contraAccounts = useMemo(
@@ -102,85 +131,9 @@ export default function ContraPage() {
     (account) => account.id === toAccountId
   );
 
-  async function loadAccounts(currentSchoolId: string) {
-    const { data, error } = await supabase
-      .from("accounts")
-      .select(
-        `
-          id,
-          school_id,
-          code,
-          name,
-          account_type,
-          opening_balance,
-          is_system,
-          is_active
-        `
-      )
-      .eq("school_id", currentSchoolId)
-      .eq("is_active", true)
-      .in("account_type", ["cash", "bank"])
-      .order("account_type")
-      .order("name");
-
-    if (error) throw error;
-
-    setAccounts((data || []) as Account[]);
-  }
-
-  async function loadHistory(currentSchoolId: string) {
-    const { data: transactions, error: transactionError } =
-      await supabase
-        .from("transactions")
-        .select(
-          `
-            id,
-            transaction_number,
-            transaction_date,
-            description,
-            transaction_type,
-            reference_type
-          `
-        )
-        .eq("school_id", currentSchoolId)
-        .eq("transaction_type", "transfer")
-        .eq("reference_type", "contra")
-        .order("transaction_date", { ascending: false })
-        .order("created_at", { ascending: false })
-        .limit(100);
-
-    if (transactionError) throw transactionError;
-
-    if (!transactions?.length) {
-      setHistory([]);
-      return;
-    }
-
-    const transactionIds = transactions.map((t) => t.id);
-
-    const { data: entries, error: entriesError } = await supabase
-      .from("transaction_entries")
-      .select(
-        `
-          id,
-          transaction_id,
-          account_id,
-          debit,
-          credit,
-          description
-        `
-      )
-      .eq("school_id", currentSchoolId)
-      .in("transaction_id", transactionIds);
-
-    if (entriesError) throw entriesError;
-
-    const accountIds = Array.from(
-      new Set((entries || []).map((entry) => entry.account_id))
-    );
-
-    const { data: entryAccounts, error: accountError } =
-      await supabase
+  const loadAccounts = useCallback(
+    async (currentSchoolId: string) => {
+      const { data, error } = await supabase
         .from("accounts")
         .select(
           `
@@ -195,85 +148,182 @@ export default function ContraPage() {
           `
         )
         .eq("school_id", currentSchoolId)
-        .in("id", accountIds);
+        .eq("is_active", true)
+        .in("account_type", ["cash", "bank"])
+        .order("account_type")
+        .order("name");
 
-    if (accountError) throw accountError;
+      if (error) throw error;
 
-    const accountMap = new Map<string, Account>();
+      setAccounts((data || []) as Account[]);
+    },
+    [supabase]
+  );
 
-    (entryAccounts || []).forEach((account) => {
-      accountMap.set(account.id, account as Account);
-    });
+  const loadHistory = useCallback(
+    async (currentSchoolId: string) => {
+      const { data: transactions, error: transactionError } =
+        await supabase
+          .from("transactions")
+          .select(
+            `
+              id,
+              transaction_number,
+              transaction_date,
+              description,
+              transaction_type,
+              reference_type
+            `
+          )
+          .eq("school_id", currentSchoolId)
+          .eq("transaction_type", "transfer")
+          .eq("reference_type", "contra")
+          .order("transaction_date", { ascending: false })
+          .order("created_at", { ascending: false })
+          .limit(100);
 
-    const result: ContraRow[] = transactions.map((transaction) => {
-      const transactionEntries = (entries || []).filter(
-        (entry) => entry.transaction_id === transaction.id
+      if (transactionError) throw transactionError;
+
+      if (!transactions?.length) {
+        setHistory([]);
+        return;
+      }
+
+      const transactionIds = transactions.map((t) => t.id);
+
+      const { data: entries, error: entriesError } = await supabase
+        .from("transaction_entries")
+        .select(
+          `
+            id,
+            transaction_id,
+            account_id,
+            debit,
+            credit,
+            description
+          `
+        )
+        .eq("school_id", currentSchoolId)
+        .in("transaction_id", transactionIds);
+
+      if (entriesError) throw entriesError;
+
+      const accountIds = Array.from(
+        new Set((entries || []).map((entry) => entry.account_id))
       );
 
-      const debitEntry = transactionEntries.find(
-        (entry) => Number(entry.debit || 0) > 0
-      );
+      const { data: entryAccounts, error: accountError } =
+        await supabase
+          .from("accounts")
+          .select(
+            `
+              id,
+              school_id,
+              code,
+              name,
+              account_type,
+              opening_balance,
+              is_system,
+              is_active
+            `
+          )
+          .eq("school_id", currentSchoolId)
+          .in("id", accountIds);
 
-      const creditEntry = transactionEntries.find(
-        (entry) => Number(entry.credit || 0) > 0
-      );
+      if (accountError) throw accountError;
 
-      return {
-        id: transaction.id,
-        transaction_number: transaction.transaction_number,
-        transaction_date: transaction.transaction_date,
-        description: transaction.description,
+      const accountMap = new Map<string, Account>();
 
-        from_account_id: creditEntry?.account_id || "",
-        to_account_id: debitEntry?.account_id || "",
+      (entryAccounts || []).forEach((account) => {
+        accountMap.set(account.id, account as Account);
+      });
 
-        from_account:
-          accountMap.get(creditEntry?.account_id || "")?.name ||
-          "Unknown",
+      const result: ContraRow[] = transactions.map((transaction) => {
+        const transactionEntries = (entries || []).filter(
+          (entry) => entry.transaction_id === transaction.id
+        );
 
-        to_account:
-          accountMap.get(debitEntry?.account_id || "")?.name ||
-          "Unknown",
+        const debitEntry = transactionEntries.find(
+          (entry) => Number(entry.debit || 0) > 0
+        );
 
-        amount: Number(
-          debitEntry?.debit ||
-            creditEntry?.credit ||
-            0
-        ),
-      };
-    });
+        const creditEntry = transactionEntries.find(
+          (entry) => Number(entry.credit || 0) > 0
+        );
 
-    setHistory(result);
-  }
+        return {
+          id: transaction.id,
+          transaction_number: transaction.transaction_number,
+          transaction_date: transaction.transaction_date,
+          description: transaction.description,
 
-  async function loadPage() {
-    try {
-      setLoading(true);
-      setError("");
+          from_account_id: creditEntry?.account_id || "",
+          to_account_id: debitEntry?.account_id || "",
 
-      const currentSchoolId = await getCurrentSchoolId();
+          from_account:
+            accountMap.get(creditEntry?.account_id || "")?.name ||
+            "Unknown",
 
-      setSchoolId(currentSchoolId);
+          to_account:
+            accountMap.get(debitEntry?.account_id || "")?.name ||
+            "Unknown",
 
-      await Promise.all([
-        loadAccounts(currentSchoolId),
-        loadHistory(currentSchoolId),
-      ]);
-    } catch (err: any) {
-      console.error(err);
+          amount: Number(
+            debitEntry?.debit ||
+              creditEntry?.credit ||
+              0
+          ),
+        };
+      });
 
-      setError(
-        err?.message ||
-          "Unable to load Contra page."
-      );
-    } finally {
-      setLoading(false);
-    }
-  }
+      setHistory(result);
+    },
+    [supabase]
+  );
 
   useEffect(() => {
-    loadPage();
-  }, []);
+    let active = true;
+
+    const hydrate = async () => {
+      if (!active) return;
+
+      try {
+        setLoading(true);
+        setError("");
+
+        const currentSchoolId = await getCurrentSchoolId();
+
+        if (!active) return;
+
+        setSchoolId(currentSchoolId);
+
+        await Promise.all([
+          loadAccounts(currentSchoolId),
+          loadHistory(currentSchoolId),
+        ]);
+      } catch (err: unknown) {
+        if (!active) return;
+
+        console.error(err);
+
+        setError(
+          err instanceof Error
+            ? err.message
+            : "Unable to load Contra page."
+        );
+      } finally {
+        if (active) {
+          setLoading(false);
+        }
+      }
+    };
+
+    void hydrate();
+
+    return () => {
+      active = false;
+    };
+  }, [loadAccounts, loadHistory]);
 
   function resetForm() {
     setContraDate(today());
@@ -297,14 +347,16 @@ export default function ContraPage() {
     setError("");
     setSuccess("");
 
+    const description = row.description || "";
+
     setEditingRow(row);
     setContraDate(row.transaction_date);
     setFromAccountId(row.from_account_id);
     setToAccountId(row.to_account_id);
     setAmount(String(row.amount));
-    setParticulars(row.description || "");
-    setReferenceNumber("");
-    setNotes("");
+    setParticulars(description.split(" | ")[0] || "");
+    setReferenceNumber(getReference(description));
+    setNotes(getNotes(description));
 
     setShowForm(true);
   }
@@ -357,6 +409,7 @@ export default function ContraPage() {
     setSuccess("");
 
     if (!validateForm()) return;
+    if (!schoolId || !fromAccountId || !toAccountId) return;
 
     setSaving(true);
 
@@ -405,7 +458,7 @@ export default function ContraPage() {
         }
 
         if (notes.trim()) {
-          finalDescription += ` | ${notes.trim()}`;
+          finalDescription += ` | Notes: ${notes.trim()}`;
         }
 
         const { data: transaction, error: transactionError } =
@@ -467,6 +520,18 @@ export default function ContraPage() {
           throw entriesError;
         }
 
+        const setup = await ensureSchoolAccountingSetup(supabase, schoolId);
+        await postContraJournal(supabase, {
+          schoolId,
+          fiscalYearId: setup.fiscalYearId,
+          entryDate: contraDate,
+          sourceRecordId: transaction.id,
+          fromAccountId,
+          toAccountId,
+          amount: numericAmount,
+          createdBy: userData.user.id,
+        });
+
         setSuccess(
           `Contra saved successfully â€” ${
             transaction.transaction_number ||
@@ -483,12 +548,13 @@ export default function ContraPage() {
       if (schoolId) {
         await loadHistory(schoolId);
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error("CONTRA SAVE ERROR:", err);
 
       setError(
-        err?.message ||
-          "Unable to save Contra."
+        err instanceof Error
+          ? err.message
+          : "Unable to save Contra."
       );
     } finally {
       setSaving(false);
@@ -525,12 +591,13 @@ export default function ContraPage() {
       if (schoolId) {
         await loadHistory(schoolId!);
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error("CONTRA DELETE ERROR:", err);
 
       setError(
-        err?.message ||
-          "Unable to delete Contra."
+        err instanceof Error
+          ? err.message
+          : "Unable to delete Contra."
       );
     } finally {
       setSaving(false);

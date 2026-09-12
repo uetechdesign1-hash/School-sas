@@ -205,7 +205,7 @@ export default function StudentsPage() {
 
         supabase
           .from("fee_bills")
-          .select("id, student_id, academic_year_id, total_amount, paid_amount")
+          .select("id, student_id, academic_year_id, total_amount, paid_amount, balance_amount")
           .eq("school_id", schoolId),
 
         supabase
@@ -339,37 +339,26 @@ export default function StudentsPage() {
       // Students list must use the same source of truth. Counting raw
       // fee_payments here can miss a payment when its bill linkage is stale,
       // null, or not present in the currently loaded bill set.
-      const paidByStudent = new Map<string, number>();
+      /*
+       * CANONICAL OUTSTANDING:
+       * The Student Fee page uses fee_bills.balance_amount after
+       * concessions/payments are recalculated. Do not rebuild the balance
+       * from total_amount - concession - paid_amount here because that can
+       * subtract a concession twice or miss student-specific bill items.
+       *
+       * For students who do not yet have a current-year bill, keep the
+       * existing fee-structure fallback so the Students list can still show
+       * the configured expected fee.
+       */
+      const balanceByStudent = new Map<string, number>();
 
       for (const bill of bills) {
         if (!currentYear || bill.academic_year_id !== currentYear.id) continue;
 
-        paidByStudent.set(
+        balanceByStudent.set(
           bill.student_id,
-          (paidByStudent.get(bill.student_id) || 0) +
-            Math.max(Number(bill.paid_amount || 0), 0),
-        );
-      }
-
-      const concessionByStudent = new Map<string, number>();
-      for (const concession of concessions) {
-        if (!concession.bill_id) continue;
-        const bill = bills.find((candidate) => candidate.id === concession.bill_id);
-        if (!currentYear || !bill || bill.academic_year_id !== currentYear.id) continue;
-        concessionByStudent.set(
-          concession.student_id,
-          (concessionByStudent.get(concession.student_id) || 0) +
-            Math.max(Number(concession.amount || 0), 0),
-        );
-      }
-
-      const carryByStudent = new Map<string, number>();
-      for (const carry of carryForwards) {
-        if (!currentYear || carry.to_academic_year_id !== currentYear.id) continue;
-        carryByStudent.set(
-          carry.student_id,
-          (carryByStudent.get(carry.student_id) || 0) +
-            Math.max(Number(carry.amount || 0), 0),
+          (balanceByStudent.get(bill.student_id) || 0) +
+            Math.max(Number(bill.balance_amount || 0), 0),
         );
       }
 
@@ -384,34 +373,15 @@ export default function StudentsPage() {
           ? mandatoryTotalByStructure.get(structure.id) || 0
           : 0;
 
-        // If a current-year bill exists, use its total as the current-year
-        // charge. This keeps the Students list aligned with the Fee Ledger,
-        // including optional student-specific fees. If no bill exists yet,
-        // fall back to the mandatory fee structure so the list can still show
-        // the expected current-year fee before assignment.
-        const billedCurrentFee = bills
-          .filter(
-            (bill) =>
-              bill.student_id === student.id &&
-              bill.academic_year_id === currentYear.id,
-          )
-          .reduce(
-            (sum, bill) => sum + Math.max(Number(bill.total_amount || 0), 0),
-            0,
-          );
-
-        const currentFee = billedCurrentFee > 0
-          ? billedCurrentFee
-          : configuredCurrentFee;
-
-        const carryForward = carryByStudent.get(student.id) || 0;
-        const paid = paidByStudent.get(student.id) || 0;
-        const concession = concessionByStudent.get(student.id) || 0;
-
-        feeMap[student.id] = Math.max(
-          currentFee + carryForward - concession - paid,
-          0,
+        const hasCurrentYearBill = bills.some(
+          (bill) =>
+            bill.student_id === student.id &&
+            bill.academic_year_id === currentYear.id,
         );
+
+        feeMap[student.id] = hasCurrentYearBill
+          ? Math.max(balanceByStudent.get(student.id) || 0, 0)
+          : Math.max(configuredCurrentFee, 0);
       }
 
       setStudents(loadedStudents);

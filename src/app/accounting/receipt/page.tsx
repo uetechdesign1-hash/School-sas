@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import Link from "next/link";
-import { AccountingExportActions } from "../accounting-export";
+import jsPDF from "jspdf";
 import {
   ArrowLeft,
   CheckCircle2,
@@ -56,12 +56,6 @@ type SectionRow = {
   name: string;
 };
 
-type FeeCategoryRow = {
-  id: string;
-  school_id: string;
-  name: string;
-};
-
 type Student = {
   id: string;
   school_id: string;
@@ -86,6 +80,23 @@ type FeeConcession = {
   reason: string | null;
 };
 
+type FeeBillItem = {
+  id: string;
+  school_id: string;
+  bill_id: string;
+  fee_category_id: string | null;
+  description: string;
+  amount: number;
+  discount: number;
+  net_amount: number;
+  balance: number;
+};
+
+type ReceiptPaymentLine = {
+  feeBillItemId: string;
+  amount: string;
+};
+
 type FeeBill = {
   id: string;
   school_id: string;
@@ -107,6 +118,12 @@ type FeeBill = {
 type ReceiptHistoryRow = {
   id: string;
   transaction_number: string | null;
+  manual_bill_number?: string | null;
+  fee_categories?: string[];
+  fee_category_amounts?: Array<{ description: string; amount: number }>;
+  student_name?: string | null;
+  class_name?: string | null;
+  section_name?: string | null;
   transaction_date: string;
   description: string | null;
   debit_account: string;
@@ -114,8 +131,6 @@ type ReceiptHistoryRow = {
   amount: number;
   receipt_type: ReceiptType;
   reference_id: string | null;
-  student_id?: string | null;
-  manual_bill_number?: string | null;
 };
 
 type TransactionEntry = {
@@ -144,6 +159,7 @@ type FeePayment = {
   school_id: string;
   student_id: string;
   receipt_number: string;
+  manual_bill_number: string | null;
   payment_date: string;
   amount: number;
   payment_method: string;
@@ -183,27 +199,11 @@ function getStudentName(student: Student) {
     .join(" ");
 }
 
-function getStudentClassName(student: Student, classes: ClassRow[]) {
-  return (
-    classes.find((item) => item.id === student.class_id)?.name ||
-    "Class not assigned"
-  );
-}
-
-function createSystemReceiptNumber(manualBillNumber: string) {
-  return `SYS-${manualBillNumber.trim().slice(0, 60)}-${Date.now()}`;
-}
-
-function buildStudentFeeParticulars(
-  student: Student | null,
-  classRow: ClassRow | null,
-  feeCategory: FeeCategoryRow | null
-) {
-  const studentName = student ? getStudentName(student) : "Student";
-  const className = classRow?.name || "Class";
-  const feeCategoryName = feeCategory?.name || "Fee";
-
-  return `${studentName} - ${className} - ${feeCategoryName}`;
+function cleanFeeCategory(value: string) {
+  return value
+    .replace(/^Fee Management\s*-\s*/i, "")
+    .replace(/^Fee\s*[-:]\s*/i, "")
+    .trim();
 }
 
 function paymentMethodLabel(value: string) {
@@ -229,9 +229,15 @@ export default function ReceiptPage() {
 
   const [receiptDate, setReceiptDate] = useState(today());
   const [paymentMethod, setPaymentMethod] = useState("cash");
+  const [collectionType, setCollectionType] = useState<"single" | "split">("single");
+  const [cashCollectionAmount, setCashCollectionAmount] = useState("");
+  const [bankCollectionAmount, setBankCollectionAmount] = useState("");
+  const [cashCollectionAccountId, setCashCollectionAccountId] = useState("");
+  const [bankCollectionAccountId, setBankCollectionAccountId] = useState("");
   const [receiveIntoAccountId, setReceiveIntoAccountId] = useState("");
   const [amount, setAmount] = useState("");
   const [manualBillNumber, setManualBillNumber] = useState("");
+  const [manualReceiptNumber, setManualReceiptNumber] = useState("");
 
   const [classes, setClasses] = useState<ClassRow[]>([]);
   const [selectedClassId, setSelectedClassId] = useState("");
@@ -243,10 +249,10 @@ export default function ReceiptPage() {
   const [selectedStudentId, setSelectedStudentId] = useState("");
 
   const [feeBills, setFeeBills] = useState<FeeBill[]>([]);
-  const [feeCategories, setFeeCategories] = useState<FeeCategoryRow[]>([]);
   const [concessionsByBillId, setConcessionsByBillId] = useState<Record<string, number>>({});
   const [selectedBillId, setSelectedBillId] = useState("");
-  const [selectedFeeCategoryId, setSelectedFeeCategoryId] = useState("");
+  const [receiptFeeItems, setReceiptFeeItems] = useState<FeeBillItem[]>([]);
+  const [receiptPaymentLines, setReceiptPaymentLines] = useState<ReceiptPaymentLine[]>([]);
   const [feeManagementName, setFeeManagementName] = useState("");
   const [feeManagementAcademicYear, setFeeManagementAcademicYear] = useState("");
   const [feeManagementAmount, setFeeManagementAmount] = useState(0);
@@ -261,8 +267,8 @@ export default function ReceiptPage() {
   const [notes, setNotes] = useState("");
 
   const [history, setHistory] = useState<ReceiptHistoryRow[]>([]);
-  const [historySearch, setHistorySearch] = useState("");
-  const [historyType, setHistoryType] = useState<"all" | ReceiptType>("all");
+  const [historyTypeFilter, setHistoryTypeFilter] = useState<ReceiptType | "all">("all");
+  const [historyCategoryFilter, setHistoryCategoryFilter] = useState("all");
   const [historyFromDate, setHistoryFromDate] = useState("");
   const [historyToDate, setHistoryToDate] = useState("");
 
@@ -322,12 +328,6 @@ export default function ReceiptPage() {
     [feeBills, selectedBillId]
   );
 
-  const selectedFeeCategory = useMemo(
-    () =>
-      feeCategories.find((item) => item.id === selectedFeeCategoryId) || null,
-    [feeCategories, selectedFeeCategoryId]
-  );
-
   const selectedBillConcession = useMemo(
     () => (selectedBillId ? Number(concessionsByBillId[selectedBillId] || 0) : 0),
     [concessionsByBillId, selectedBillId]
@@ -341,45 +341,6 @@ export default function ReceiptPage() {
     [selectedBill]
   );
 
-  const filteredHistory = useMemo(() => {
-    const query = historySearch.trim().toLowerCase();
-
-    return history.filter((receipt) => {
-      if (historyType !== "all" && receipt.receipt_type !== historyType) {
-        return false;
-      }
-
-      if (historyFromDate && receipt.transaction_date < historyFromDate) {
-        return false;
-      }
-
-      if (historyToDate && receipt.transaction_date > historyToDate) {
-        return false;
-      }
-
-      if (!query) return true;
-
-      const student = receipt.student_id
-        ? students.find((item) => item.id === receipt.student_id)
-        : null;
-
-      return [
-        receipt.manual_bill_number,
-        receipt.description,
-        student ? getStudentName(student) : "",
-        student ? getStudentClassName(student, classes) : "",
-      ].some((value) => value?.toLowerCase().includes(query));
-    });
-  }, [
-    classes,
-    history,
-    historyFromDate,
-    historySearch,
-    historyToDate,
-    historyType,
-    students,
-  ]);
-
   const cashBankAccounts = useMemo(
     () =>
       accounts.filter(
@@ -390,6 +351,12 @@ export default function ReceiptPage() {
       ),
     [accounts]
   );
+
+  const cashAccounts = useMemo(() => accounts.filter((account) => account.is_active && account.account_type === "cash"), [accounts]);
+  const bankAccounts = useMemo(() => accounts.filter((account) => account.is_active && account.account_type === "bank"), [accounts]);
+  const cashSplit = Number(cashCollectionAmount || 0);
+  const bankSplit = Number(bankCollectionAmount || 0);
+  const splitCollectionTotal = cashSplit + bankSplit;
 
   const incomeAccounts = useMemo(
     () =>
@@ -419,6 +386,10 @@ export default function ReceiptPage() {
   );
 
   const numericAmount = Number(amount || 0);
+  const receiptPaymentTotal = useMemo(
+    () => receiptPaymentLines.reduce((sum, line) => sum + Math.max(Number(line.amount || 0), 0), 0),
+    [receiptPaymentLines],
+  );
 
   async function loadAccounts(currentSchoolId: string) {
     const { data, error } = await supabase
@@ -534,68 +505,75 @@ export default function ReceiptPage() {
     setStudents((data || []) as Student[]);
   }
 
-  async function loadFeeCategoriesForBills(billIds: string[]) {
-    if (!schoolId || !billIds.length) {
-      setFeeCategories([]);
-      setSelectedFeeCategoryId("");
-      return;
+  async function loadReceiptFeeItems(billId: string, excludePaymentId?: string) {
+    if (!schoolId || !billId) {
+      setReceiptFeeItems([]);
+      setReceiptPaymentLines([]);
+      return [];
     }
 
-    const { data: billItems, error: billItemsError } = await supabase
+    const { data: itemData, error: itemError } = await supabase
       .from("fee_bill_items")
-      .select("fee_category_id")
+      .select("id, school_id, bill_id, fee_category_id, description, amount, discount, net_amount")
       .eq("school_id", schoolId)
-      .in("bill_id", billIds);
+      .eq("bill_id", billId)
+      .order("created_at", { ascending: true });
 
-    if (billItemsError) {
-      throw new Error(
-        `Unable to load fee categories for the selected bill: ${billItemsError.message}`
+    if (itemError) throw new Error(`Unable to load fee categories: ${itemError.message}`);
+
+    const itemIds = (itemData || []).map((item) => item.id as string);
+    let allocationData: Array<{ fee_bill_item_id: string | null; amount: number; payment_id: string }> = [];
+
+    if (itemIds.length > 0) {
+      let query = supabase
+        .from("fee_payment_allocations")
+        .select("fee_bill_item_id, amount, payment_id")
+        .eq("school_id", schoolId)
+        .eq("bill_id", billId)
+        .in("fee_bill_item_id", itemIds);
+
+      if (excludePaymentId) query = query.neq("payment_id", excludePaymentId);
+
+      const { data, error } = await query;
+      if (error) throw new Error(`Unable to load fee payment allocations: ${error.message}`);
+      allocationData = (data || []) as typeof allocationData;
+    }
+
+    const paidByItem = new Map<string, number>();
+    for (const allocation of allocationData) {
+      if (!allocation.fee_bill_item_id) continue;
+      paidByItem.set(
+        allocation.fee_bill_item_id,
+        (paidByItem.get(allocation.fee_bill_item_id) || 0) + Number(allocation.amount || 0),
       );
     }
 
-    const categoryIds = Array.from(
-      new Set(
-        (billItems || [])
-          .map((row) => row.fee_category_id as string | null)
-          .filter((id): id is string => Boolean(id))
-      )
-    );
+    const items = (itemData || []).map((item) => {
+      const gross = Number(item.amount || 0);
+      const net = Number(item.net_amount ?? gross);
+      const balance = Math.max(net - (paidByItem.get(item.id) || 0), 0);
+      return {
+        ...(item as any),
+        fee_category_id: item.fee_category_id || null,
+        amount: gross,
+        discount: Number(item.discount || 0),
+        net_amount: net,
+        balance,
+        description: cleanFeeCategory(item.description || "Fee"),
+      } as FeeBillItem;
+    });
 
-    if (!categoryIds.length) {
-      setFeeCategories([]);
-      setSelectedFeeCategoryId("");
-      return;
-    }
-
-    const { data: categoryData, error: categoryError } = await supabase
-      .from("fee_categories")
-      .select("id, school_id, name")
-      .eq("school_id", schoolId)
-      .in("id", categoryIds);
-
-    if (categoryError) {
-      throw new Error(
-        `Unable to load fee categories: ${categoryError.message}`
-      );
-    }
-
-    const categories = (categoryData || []) as FeeCategoryRow[];
-    const selectedCategory =
-      categories.find((item) => item.id === selectedFeeCategoryId) || null;
-
-    setFeeCategories(categories);
-    setSelectedFeeCategoryId(
-      selectedCategory ? selectedCategory.id : categories[0]?.id || ""
-    );
+    setReceiptFeeItems(items);
+    return items;
   }
 
   async function loadStudentBills(studentId: string) {
     if (!schoolId || !studentId) {
       setFeeBills([]);
-      setFeeCategories([]);
       setConcessionsByBillId({});
       setSelectedBillId("");
-      setSelectedFeeCategoryId("");
+      setReceiptFeeItems([]);
+      setReceiptPaymentLines([]);
       setFeeManagementName("");
       setFeeManagementAcademicYear("");
       setFeeManagementAmount(0);
@@ -806,18 +784,23 @@ export default function ReceiptPage() {
       }
 
       setFeeBills(bills);
+      setSelectedBillId(bills[0]?.id || "");
+      setManualBillNumber(bills[0]?.bill_number || "");
+      if (bills[0]) {
+        const items = await loadReceiptFeeItems(bills[0].id);
+        const firstAvailable = items.find((item) => item.balance > 0);
+        setReceiptPaymentLines(
+          firstAvailable ? [{ feeBillItemId: firstAvailable.id, amount: "" }] : [],
+        );
+      } else {
+        setReceiptFeeItems([]);
+        setReceiptPaymentLines([]);
+      }
       setFeeManagementName(structure.name);
       setFeeManagementAcademicYear(academicYear.name);
       setFeeManagementAmount(currentFeeManagementAmount);
 
       const billIds = bills.map((bill) => bill.id);
-
-      if (billIds.length) {
-        await loadFeeCategoriesForBills(billIds);
-      } else {
-        setFeeCategories([]);
-        setSelectedFeeCategoryId("");
-      }
 
       if (billIds.length) {
         const { data: concessions, error: concessionError } =
@@ -845,20 +828,15 @@ export default function ReceiptPage() {
         setConcessionsByBillId({});
       }
 
-      setSelectedBillId("");
       setAmount("");
-    } catch (err: unknown) {
+    } catch (err: any) {
       setFeeBills([]);
-      setFeeCategories([]);
+      setReceiptFeeItems([]);
+      setReceiptPaymentLines([]);
       setConcessionsByBillId({});
       setSelectedBillId("");
-      setSelectedFeeCategoryId("");
       setAmount("");
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Unable to load Fee Management fees."
-      );
+      setError(err?.message || "Unable to load Fee Management fees.");
     } finally {
       setLoadingBills(false);
     }
@@ -871,119 +849,373 @@ export default function ReceiptPage() {
 
     if (error) throw new Error(error.message);
 
-    const receiptHistory = (data || []) as ReceiptHistoryRow[];
-    const paymentIds = receiptHistory
-      .filter(
-        (receipt) =>
-          receipt.receipt_type === "student_fee" && receipt.reference_id
-      )
-      .map((receipt) => receipt.reference_id as string);
+    const rows = (data || []) as ReceiptHistoryRow[];
+    const paymentIds = rows
+      .filter((row) => row.receipt_type === "student_fee" && row.reference_id)
+      .map((row) => row.reference_id as string);
 
-    if (!paymentIds.length) {
-      setHistory(receiptHistory);
+    if (paymentIds.length === 0) {
+      setHistory(rows);
       return;
     }
 
-    const { data: payments, error: paymentError } = await supabase
+    const { data: paymentData, error: paymentError } = await supabase
       .from("fee_payments")
-      .select("id, student_id, bill_id")
+      .select("id, student_id, receipt_number, manual_bill_number, bill_id")
       .eq("school_id", currentSchoolId)
       .in("id", paymentIds);
 
     if (paymentError) throw new Error(paymentError.message);
 
-    const paymentById = new Map(
-      (payments || []).map((payment) => [payment.id, payment])
-    );
-    const billIds = (payments || [])
-      .map((payment) => payment.bill_id)
-      .filter((billId): billId is string => Boolean(billId));
+    const payments = (paymentData || []) as Array<{
+      id: string;
+      student_id: string;
+      receipt_number: string;
+      manual_bill_number: string | null;
+      bill_id: string | null;
+    }>;
+    const billIds = Array.from(new Set(payments.map((payment) => payment.bill_id).filter(Boolean) as string[]));
+    const billNumberMap = new Map<string, string>();
 
-    const billById = new Map<string, { bill_number: string }>();
-
-    if (billIds.length) {
-      const { data: bills, error: billError } = await supabase
+    if (billIds.length > 0) {
+      const { data: billData, error: billError } = await supabase
         .from("fee_bills")
         .select("id, bill_number")
         .eq("school_id", currentSchoolId)
         .in("id", billIds);
-
       if (billError) throw new Error(billError.message);
-
-      (bills || []).forEach((bill) => {
-        billById.set(bill.id, bill);
-      });
+      for (const bill of billData || []) billNumberMap.set(bill.id, bill.bill_number);
     }
 
-    setHistory(
-      receiptHistory.map((receipt) => {
-        const payment = receipt.reference_id
-          ? paymentById.get(receipt.reference_id)
-          : undefined;
+    const { data: allocationData, error: allocationError } = await supabase
+      .from("fee_payment_allocations")
+      .select("payment_id, fee_bill_item_id, amount")
+      .eq("school_id", currentSchoolId)
+      .in("payment_id", paymentIds);
 
-        return {
-          ...receipt,
-          student_id: payment?.student_id || null,
-          manual_bill_number: payment?.bill_id
-            ? billById.get(payment.bill_id)?.bill_number || null
-            : null,
-        };
-      })
+    if (allocationError) throw new Error(allocationError.message);
+
+    const itemIds = Array.from(new Set((allocationData || []).map((item) => item.fee_bill_item_id).filter(Boolean) as string[]));
+    let itemData: Array<{ id: string; description: string }> = [];
+
+    if (itemIds.length > 0) {
+      const { data, error: itemError } = await supabase
+        .from("fee_bill_items")
+        .select("id, description")
+        .eq("school_id", currentSchoolId)
+        .in("id", itemIds);
+      if (itemError) throw new Error(itemError.message);
+      itemData = (data || []) as Array<{ id: string; description: string }>;
+    }
+
+    const paymentMap = new Map(payments.map((payment) => [payment.id, payment]));
+    const itemMap = new Map(itemData.map((item) => [item.id, cleanFeeCategory(item.description)]));
+    const paymentCategoryMap = new Map<string, string[]>();
+    const paymentCategoryAmountMap = new Map<string, Map<string, number>>();
+
+    for (const allocation of allocationData || []) {
+      if (!allocation.fee_bill_item_id) continue;
+
+      const description = itemMap.get(allocation.fee_bill_item_id);
+      if (!description) continue;
+
+      const current = paymentCategoryMap.get(allocation.payment_id) || [];
+      if (!current.includes(description)) current.push(description);
+      paymentCategoryMap.set(allocation.payment_id, current);
+      const amountMap = paymentCategoryAmountMap.get(allocation.payment_id) || new Map<string, number>();
+      amountMap.set(description, (amountMap.get(description) || 0) + Number(allocation.amount || 0));
+      paymentCategoryAmountMap.set(allocation.payment_id, amountMap);
+    }
+
+    // Resolve student/class/section BEFORE mapping rows. The row mapper must
+    // stay synchronous because Array.map() does not accept await.
+    const studentIds = Array.from(
+      new Set(
+        payments
+          .map((payment) => payment.student_id)
+          .filter(Boolean),
+      ),
     );
-  }
 
-  function downloadReceiptHistory() {
-    if (!filteredHistory.length) return;
+    const studentMap = new Map<string, Student>();
+    if (studentIds.length > 0) {
+      const { data: studentData, error: studentError } = await supabase
+        .from("students")
+        .select("id, school_id, admission_no, roll_no, first_name, middle_name, last_name, class_id, section_id, status")
+        .eq("school_id", currentSchoolId)
+        .in("id", studentIds);
+      if (studentError) throw new Error(studentError.message);
+      for (const student of (studentData || []) as Student[]) {
+        studentMap.set(student.id, student);
+      }
+    }
 
-    const escapeCsv = (value: string | number | null | undefined) =>
-      `"${String(value ?? "").replace(/"/g, '""')}"`;
+    const classIds = Array.from(
+      new Set(
+        Array.from(studentMap.values())
+          .map((student) => student.class_id)
+          .filter(Boolean) as string[],
+      ),
+    );
+    const classMap = new Map<string, string>();
+    if (classIds.length > 0) {
+      const { data: classData, error: classError } = await supabase
+        .from("classes")
+        .select("id, name")
+        .eq("school_id", currentSchoolId)
+        .in("id", classIds);
+      if (classError) throw new Error(classError.message);
+      for (const item of classData || []) classMap.set(item.id, item.name);
+    }
 
-    const rows = filteredHistory.map((receipt) => {
-      const student = receipt.student_id
-        ? students.find((item) => item.id === receipt.student_id)
-        : null;
+    const sectionIds = Array.from(
+      new Set(
+        Array.from(studentMap.values())
+          .map((student) => student.section_id)
+          .filter(Boolean) as string[],
+      ),
+    );
+    const sectionMap = new Map<string, string>();
+    if (sectionIds.length > 0) {
+      const { data: sectionData, error: sectionError } = await supabase
+        .from("sections")
+        .select("id, name")
+        .eq("school_id", currentSchoolId)
+        .in("id", sectionIds);
+      if (sectionError) throw new Error(sectionError.message);
+      for (const item of sectionData || []) sectionMap.set(item.id, item.name);
+    }
 
-      return [
-        receipt.transaction_date,
-        receipt.receipt_type === "student_fee" ? "Student Fee" : "Other Income",
-        receipt.manual_bill_number || "",
-        student ? getStudentName(student) : "",
-        student ? getStudentClassName(student, classes) : "",
-        receipt.debit_account,
-        receipt.credit_account,
-        receipt.description,
-        Number(receipt.amount || 0).toFixed(2),
-      ];
+    const enriched = rows.map((row) => {
+      if (row.receipt_type !== "student_fee" || !row.reference_id) return row;
+
+      const payment = paymentMap.get(row.reference_id);
+      const categories = payment
+        ? paymentCategoryMap.get(payment.id) || []
+        : [];
+      const student = payment?.student_id
+        ? studentMap.get(payment.student_id)
+        : undefined;
+      const studentName = student ? getStudentName(student) : "Student";
+      const className = student?.class_id
+        ? classMap.get(student.class_id) || "Class"
+        : "Class";
+      const sectionName = student?.section_id
+        ? sectionMap.get(student.section_id) || ""
+        : "";
+
+      const categoryAmounts = paymentCategoryAmountMap.get(payment.id);
+      const feeCategoryAmounts = categories.map((description) => ({
+        description,
+        amount: Number(categoryAmounts?.get(description) || 0),
+      }));
+      const particulars = [studentName, className].filter(Boolean).join(" • ");
+
+      return {
+        ...row,
+        transaction_number: payment?.receipt_number || row.transaction_number,
+        manual_bill_number: payment?.manual_bill_number || (payment?.bill_id ? billNumberMap.get(payment.bill_id) || null : null),
+        fee_categories: categories,
+        fee_category_amounts: feeCategoryAmounts,
+        student_name: studentName,
+        class_name: className,
+        section_name: sectionName || null,
+        description: particulars || row.description,
+      };
     });
 
-    const csv = [
-      [
-        "Date",
-        "Type",
-        "Manual Bill Number",
-        "Student",
-        "Class",
-        "Debit Account",
-        "Credit Account",
-        "Description",
-        "Amount",
-      ],
-      ...rows,
-    ]
-      .map((row) => row.map(escapeCsv).join(","))
-      .join("\n");
+    setHistory(enriched);
+  }
 
-    const url = URL.createObjectURL(
-      new Blob([csv], { type: "text/csv;charset=utf-8;" })
-    );
-    const link = document.createElement("a");
+  const historyCategories = useMemo(() => {
+    const values = history.flatMap((row) => row.fee_categories || []);
+    return Array.from(new Set(values)).sort((a, b) => a.localeCompare(b));
+  }, [history]);
 
-    link.href = url;
-    link.download = `receipt-history-${today()}.csv`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+  const filteredHistory = useMemo(() => {
+    return history.filter((row) => {
+      const typeMatches = historyTypeFilter === "all" || row.receipt_type === historyTypeFilter;
+      const categoryMatches = historyCategoryFilter === "all" || (row.fee_categories || []).includes(historyCategoryFilter);
+      const fromMatches = !historyFromDate || row.transaction_date >= historyFromDate;
+      const toMatches = !historyToDate || row.transaction_date <= historyToDate;
+      return typeMatches && categoryMatches && fromMatches && toMatches;
+    });
+  }, [history, historyTypeFilter, historyCategoryFilter, historyFromDate, historyToDate]);
+
+  function getDisplayedHistoryCategories(row: ReceiptHistoryRow) {
+    const categories = row.fee_categories || [];
+    return historyCategoryFilter === "all" ? categories : categories.filter((category) => category === historyCategoryFilter);
+  }
+
+  function getDisplayedHistoryAmount(row: ReceiptHistoryRow) {
+    if (historyCategoryFilter === "all") return Number(row.amount || 0);
+    return (row.fee_category_amounts || [])
+      .filter((item) => item.description === historyCategoryFilter)
+      .reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  }
+
+  const filteredHistoryTotal = useMemo(
+    () =>
+      filteredHistory.reduce(
+        (sum, row) => sum + getDisplayedHistoryAmount(row),
+        0,
+      ),
+    [filteredHistory, historyCategoryFilter],
+  );
+
+  const historyDateRangeLabel = useMemo(() => {
+    if (historyFromDate && historyToDate) {
+      return `${historyFromDate} to ${historyToDate}`;
+    }
+    if (historyFromDate) return `From ${historyFromDate}`;
+    if (historyToDate) return `Up to ${historyToDate}`;
+    return "All dates";
+  }, [historyFromDate, historyToDate]);
+
+  function exportHistoryExcel() {
+    const rows = filteredHistory.map((row) => ({
+      Date: row.transaction_date,
+      "Receipt No.": row.transaction_number || row.id.slice(0, 8),
+      "Bill No.": row.manual_bill_number || "",
+      Student: row.student_name || "",
+      Class: row.class_name || "",
+      "Fee Categories Paid": getDisplayedHistoryCategories(row).join(", "),
+      Debit: row.debit_account || "",
+      Credit: row.credit_account || "",
+      Particulars: row.receipt_type === "student_fee"
+        ? [row.student_name, row.class_name].filter(Boolean).join(" • ")
+        : row.description || "",
+      Amount: getDisplayedHistoryAmount(row),
+    }));
+
+    if (rows.length === 0) {
+      setError("No receipt history available for the selected filters.");
+      return;
+    }
+
+    const headers = Object.keys(rows[0]);
+    const escapeHtml = (value: unknown) =>
+      String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+
+    // SpreadsheetML/HTML is directly readable by Microsoft Excel without
+    // requiring an additional XLSX package in the Next.js bundle.
+    const html = `\uFEFF<html><head><meta charset="utf-8" /></head><body>
+      <h2>Receipt History</h2>
+      <p>Category: ${escapeHtml(historyCategoryFilter === "all" ? "All fee categories" : historyCategoryFilter)} | Date: ${escapeHtml(historyFromDate || "All")} to ${escapeHtml(historyToDate || "All")}</p>
+      <table border="1" cellspacing="0" cellpadding="5">
+        <thead><tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("")}</tr></thead>
+        <tbody>
+          ${rows.map((row) => `<tr>${headers.map((header) => `<td>${escapeHtml(row[header as keyof typeof row])}</td>`).join("")}</tr>`).join("")}
+        </tbody>
+      </table>
+    </body></html>`;
+
+    const blob = new Blob([html], { type: "application/vnd.ms-excel;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `receipt-history-${historyFromDate || "all"}-${historyToDate || "all"}.xls`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
     URL.revokeObjectURL(url);
+  }
+
+  function exportHistoryPDF() {
+    if (filteredHistory.length === 0) {
+      setError("No receipt history available for the selected filters.");
+      return;
+    }
+
+    const pdf = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4", compress: true });
+    const pageWidth = pdf.internal.pageSize.getWidth();
+    const pageHeight = pdf.internal.pageSize.getHeight();
+    const left = 10;
+    let y = 12;
+
+    const title = historyCategoryFilter === "all"
+      ? "Receipt History"
+      : `Receipt History — ${historyCategoryFilter}`;
+
+    pdf.setFontSize(14);
+    pdf.setFont("helvetica", "bold");
+    pdf.text(title, left, y);
+    y += 6;
+    pdf.setFontSize(8);
+    pdf.setFont("helvetica", "normal");
+    pdf.text(
+      `Date: ${historyFromDate || "All"} to ${historyToDate || "All"} | Receipts: ${filteredHistory.length}`,
+      left,
+      y,
+    );
+    y += 7;
+
+    const columns = [
+      { label: "Date", x: 10, width: 23 },
+      { label: "Receipt", x: 33, width: 27 },
+      { label: "Bill", x: 60, width: 35 },
+      { label: "Student / Class", x: 95, width: 42 },
+      { label: "Category", x: 137, width: 43 },
+      { label: "Debit", x: 180, width: 27 },
+      { label: "Credit", x: 207, width: 28 },
+      { label: "Amount", x: 235, width: 42 },
+    ];
+
+    const drawHeader = () => {
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(7);
+      columns.forEach((column) => pdf.text(column.label, column.x, y));
+      y += 4;
+      pdf.setDrawColor(160);
+      pdf.line(left, y, pageWidth - left, y);
+      y += 5;
+      pdf.setFont("helvetica", "normal");
+    };
+
+    drawHeader();
+
+    const wrap = (text: string, width: number) =>
+      pdf.splitTextToSize(text || "—", width) as string[];
+
+    for (const row of filteredHistory) {
+      const categories = getDisplayedHistoryCategories(row).join(", ") || "—";
+      const studentClass = [row.student_name, row.class_name].filter(Boolean).join(" • ") || "—";
+      const cells = [
+        row.transaction_date || "—",
+        row.transaction_number || row.id.slice(0, 8),
+        row.manual_bill_number || "—",
+        studentClass,
+        categories,
+        row.debit_account || "—",
+        row.credit_account || "—",
+        money(getDisplayedHistoryAmount(row)),
+      ].map((value, index) => wrap(String(value), columns[index].width));
+
+      const rowHeight = Math.max(...cells.map((cell) => cell.length), 1) * 3.4;
+      if (y + rowHeight > pageHeight - 10) {
+        pdf.addPage();
+        y = 12;
+        pdf.setFontSize(10);
+        pdf.setFont("helvetica", "bold");
+        pdf.text(title, left, y);
+        y += 7;
+        drawHeader();
+      }
+
+      pdf.setFontSize(6.5);
+      cells.forEach((lines, index) => {
+        lines.forEach((line, lineIndex) => pdf.text(line, columns[index].x, y + lineIndex * 3.4));
+      });
+      y += rowHeight + 2;
+      pdf.setDrawColor(220);
+      pdf.line(left, y - 1, pageWidth - left, y - 1);
+    }
+
+    pdf.save(`receipt-history-${historyCategoryFilter === "all" ? "all" : historyCategoryFilter}-${historyFromDate || "all"}-${historyToDate || "all"}.pdf`);
   }
 
   async function loadPage() {
@@ -1002,11 +1234,11 @@ export default function ReceiptPage() {
         loadStudents(currentSchoolId),
         loadHistory(currentSchoolId),
       ]);
-    } catch (err: unknown) {
+    } catch (err: any) {
       console.error("RECEIPT PAGE LOAD ERROR:", err);
 
       setError(
-        err instanceof Error ? err.message : "Unable to load Receipt page."
+        err?.message || "Unable to load Receipt page."
       );
     } finally {
       setLoading(false);
@@ -1014,38 +1246,18 @@ export default function ReceiptPage() {
   }
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect, react-hooks/exhaustive-deps
     loadPage();
   }, []);
-
-  useEffect(() => {
-    if (receiptType !== "student_fee") {
-      return;
-    }
-
-    if (!selectedStudentId) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setParticulars("");
-      return;
-    }
-
-    const nextParticulars = buildStudentFeeParticulars(
-      selectedStudent,
-      selectedClass,
-      selectedFeeCategory
-    );
-    setParticulars((current) => {
-      if (current === nextParticulars) {
-        return current;
-      }
-      return nextParticulars;
-    });
-  }, [receiptType, selectedStudentId, selectedClassId, selectedFeeCategoryId, selectedStudent, selectedClass]);
 
   function resetForm() {
     setReceiptType("student_fee");
     setReceiptDate(today());
     setPaymentMethod("cash");
+    setCollectionType("single");
+    setCashCollectionAmount("");
+    setBankCollectionAmount("");
+    setCashCollectionAccountId("");
+    setBankCollectionAccountId("");
 
     const cash = accounts.find(
       (account) => account.account_type === "cash"
@@ -1065,10 +1277,8 @@ export default function ReceiptPage() {
     setSelectedSectionId("");
     setSelectedStudentId("");
     setSelectedBillId("");
-    setSelectedFeeCategoryId("");
 
     setFeeBills([]);
-    setFeeCategories([]);
     setConcessionsByBillId({});
     setFeeManagementName("");
     setFeeManagementAcademicYear("");
@@ -1076,10 +1286,16 @@ export default function ReceiptPage() {
 
     setAmount("");
     setManualBillNumber("");
+    setManualReceiptNumber("");
+    setCollectionType("single");
+    setCashCollectionAmount("");
+    setBankCollectionAmount("");
+    setCashCollectionAccountId("");
+    setBankCollectionAccountId("");
     setReceivedFrom("");
     setParticulars("");
     setReferenceNumber("");
-
+   
 
     setEditingId(null);
     setViewingId(null);
@@ -1097,9 +1313,9 @@ export default function ReceiptPage() {
     setSelectedSectionId("");
     setSelectedStudentId("");
     setSelectedBillId("");
-    setSelectedFeeCategoryId("");
     setFeeBills([]);
-    setFeeCategories([]);
+    setReceiptFeeItems([]);
+    setReceiptPaymentLines([]);
     setConcessionsByBillId({});
     setFeeManagementName("");
     setFeeManagementAcademicYear("");
@@ -1107,6 +1323,12 @@ export default function ReceiptPage() {
 
     setAmount("");
     setManualBillNumber("");
+    setManualReceiptNumber("");
+    setCollectionType("single");
+    setCashCollectionAmount("");
+    setBankCollectionAmount("");
+    setCashCollectionAccountId("");
+    setBankCollectionAccountId("");
     setReceivedFrom("");
     setParticulars("");
     setReferenceNumber("");
@@ -1130,9 +1352,9 @@ export default function ReceiptPage() {
     setSelectedSectionId("");
     setSelectedStudentId("");
     setSelectedBillId("");
-    setSelectedFeeCategoryId("");
     setFeeBills([]);
-    setFeeCategories([]);
+    setReceiptFeeItems([]);
+    setReceiptPaymentLines([]);
     setConcessionsByBillId({});
     setAmount("");
   }
@@ -1141,9 +1363,9 @@ export default function ReceiptPage() {
     setSelectedSectionId(sectionId);
     setSelectedStudentId("");
     setSelectedBillId("");
-    setSelectedFeeCategoryId("");
     setFeeBills([]);
-    setFeeCategories([]);
+    setReceiptFeeItems([]);
+    setReceiptPaymentLines([]);
     setConcessionsByBillId({});
     setAmount("");
   }
@@ -1151,7 +1373,6 @@ export default function ReceiptPage() {
   async function handleStudentChange(studentId: string) {
     setSelectedStudentId(studentId);
     setSelectedBillId("");
-    setSelectedFeeCategoryId("");
     setAmount("");
 
     await loadStudentBills(studentId);
@@ -1238,6 +1459,7 @@ export default function ReceiptPage() {
           school_id,
           student_id,
           receipt_number,
+          manual_bill_number,
           payment_date,
           amount,
           payment_method,
@@ -1326,7 +1548,16 @@ export default function ReceiptPage() {
         setReceiptType("student_fee");
         setReceiptDate(payment.payment_date);
         setAmount(Number(payment.amount || 0).toFixed(2));
+        setManualReceiptNumber(payment.receipt_number || "");
         setPaymentMethod(payment.payment_method);
+        setCollectionType("single");
+        setCashCollectionAmount("");
+        setBankCollectionAmount("");
+        setCashCollectionAccountId("");
+        setBankCollectionAccountId("");
+        if (!payment.account_id && payment.payment_method === "other") {
+          throw new Error("This is a split receipt. Split receipt editing is not enabled yet; use View or Delete and create a corrected receipt if required.");
+        }
         setReceiveIntoAccountId(payment.account_id || receiveIntoAccountId);
         setReferenceNumber(payment.reference_number || "");
         setNotes(payment.notes || "");
@@ -1388,9 +1619,26 @@ export default function ReceiptPage() {
 
           setFeeBills(linkedBill ? [linkedBill as FeeBill] : []);
           setManualBillNumber(linkedBill?.bill_number || "");
-
-          if (payment.bill_id) {
-            await loadFeeCategoriesForBills([payment.bill_id]);
+          if (linkedBill) {
+            const items = await loadReceiptFeeItems(linkedBill.id, payment.id);
+            const { data: allocations, error: allocationError } = await supabase
+              .from("fee_payment_allocations")
+              .select("fee_bill_item_id, amount")
+              .eq("school_id", schoolId)
+              .eq("payment_id", payment.id)
+              .eq("bill_id", linkedBill.id);
+            if (allocationError) throw new Error(allocationError.message);
+            setReceiptPaymentLines(
+              (allocations || [])
+                .filter((allocation) => allocation.fee_bill_item_id)
+                .map((allocation) => ({
+                  feeBillItemId: allocation.fee_bill_item_id as string,
+                  amount: Number(allocation.amount || 0).toFixed(2),
+                })),
+            );
+          } else {
+            setReceiptFeeItems([]);
+            setReceiptPaymentLines([]);
           }
         } else {
           setManualBillNumber("");
@@ -1399,8 +1647,6 @@ export default function ReceiptPage() {
            * linkage. Do not guess by loading all of the student's bills.
            */
           setFeeBills([]);
-          setFeeCategories([]);
-          setSelectedFeeCategoryId("");
         }
 
         const feeIncome = accounts.find(
@@ -1485,14 +1731,12 @@ export default function ReceiptPage() {
         top: 0,
         behavior: "smooth",
       });
-    } catch (err: unknown) {
+    } catch (err: any) {
       console.error("EDIT RECEIPT ERROR:", err);
 
       setEditingId(null);
       setError(
-        err instanceof Error
-          ? err.message
-          : "Unable to load receipt for editing."
+        err?.message || "Unable to load receipt for editing."
       );
     } finally {
       setSaving(false);
@@ -1505,37 +1749,51 @@ export default function ReceiptPage() {
       return false;
     }
 
-    if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
-      setError("Enter a valid amount greater than zero.");
+    const effectiveAmount = receiptType === "student_fee" ? receiptPaymentTotal : numericAmount;
+    if (!Number.isFinite(effectiveAmount) || effectiveAmount <= 0) {
+      setError("Enter a valid payment amount greater than zero.");
       return false;
+    }
+
+    if (receiptType === "student_fee" && collectionType === "split") {
+      if (!cashCollectionAccountId || !bankCollectionAccountId) {
+        setError("Select both Cash and Bank accounts for the split collection.");
+        return false;
+      }
+      if (cashSplit <= 0 || bankSplit <= 0) {
+        setError("Enter a positive amount for both Cash and Bank.");
+        return false;
+      }
+      if (Math.abs(splitCollectionTotal - effectiveAmount) > 0.005) {
+        setError(`Cash + Bank must equal ${money(effectiveAmount)}.`);
+        return false;
+      }
+      const cashAccount = accounts.find((account) => account.id === cashCollectionAccountId);
+      const bankAccount = accounts.find((account) => account.id === bankCollectionAccountId);
+      if (!cashAccount || cashAccount.account_type !== "cash") {
+        setError("Selected Cash account is invalid.");
+        return false;
+      }
+      if (!bankAccount || bankAccount.account_type !== "bank") {
+        setError("Selected Bank account is invalid.");
+        return false;
+      }
+      return true;
     }
 
     if (!receiveIntoAccountId) {
-      setError(
-        "Select the Cash or Bank account receiving the money."
-      );
+      setError("Select the Cash or Bank account receiving the money.");
       return false;
     }
-
-    const receiveAccount = accounts.find(
-      (account) => account.id === receiveIntoAccountId
-    );
-
+    const receiveAccount = accounts.find((account) => account.id === receiveIntoAccountId);
     if (!receiveAccount) {
       setError("Selected Cash/Bank account was not found.");
       return false;
     }
-
-    if (
-      receiveAccount.account_type !== "cash" &&
-      receiveAccount.account_type !== "bank"
-    ) {
-      setError(
-        "Receive Into must be a Cash or Bank account."
-      );
+    if (receiveAccount.account_type !== "cash" && receiveAccount.account_type !== "bank") {
+      setError("Receive Into must be a Cash or Bank account.");
       return false;
     }
-
     return true;
   }
 
@@ -1570,8 +1828,8 @@ export default function ReceiptPage() {
       return false;
     }
 
-    if (!selectedFeeCategoryId) {
-      setError("Select the fee category being collected.");
+    if (!manualReceiptNumber.trim()) {
+      setError("Enter the manual Receipt Number.");
       return false;
     }
 
@@ -1588,13 +1846,37 @@ export default function ReceiptPage() {
       return false;
     }
 
-    if (numericAmount > feeManagementOutstanding + 0.005) {
+    if (receiptPaymentTotal > feeManagementOutstanding + 0.005) {
       setError(
         `Payment cannot exceed Fee Management outstanding ${money(
           feeManagementOutstanding
         )}.`
       );
       return false;
+    }
+
+    if (receiptPaymentLines.length === 0) {
+      setError("Select at least one fee category and enter an amount.");
+      return false;
+    }
+
+    const seen = new Set<string>();
+    for (const line of receiptPaymentLines) {
+      const value = Number(line.amount);
+      if (!line.feeBillItemId || !Number.isFinite(value) || value <= 0) {
+        setError("Every selected fee category must have a valid amount.");
+        return false;
+      }
+      if (seen.has(line.feeBillItemId)) {
+        setError("Each fee category can be added only once to the same receipt.");
+        return false;
+      }
+      seen.add(line.feeBillItemId);
+      const item = receiptFeeItems.find((candidate) => candidate.id === line.feeBillItemId);
+      if (!item || value > item.balance + 0.005) {
+        setError(`Payment exceeds the selected fee category balance.`);
+        return false;
+      }
     }
 
     const feeIncome = accounts.find(
@@ -1693,260 +1975,128 @@ export default function ReceiptPage() {
         (account) => account.id === receiveIntoAccountId
       );
 
-      if (!incomeAccount || !receiveAccount) {
-        throw new Error("Receipt accounts could not be determined.");
+      if (!receiveAccount) {
+        throw new Error("Receipt receiving account could not be determined.");
+      }
+      if (receiptType === "other_income" && !incomeAccount) {
+        throw new Error("Receipt income account could not be determined.");
       }
 
       let description = "";
 
       if (receiptType === "student_fee") {
-        /*
-         * Fee Management is the source of truth. The user supplies the
-         * physical/manual Bill Number.
-         *
-         * If a current Fee Management-linked bill already exists, reuse it
-         * and update its bill number to the manual number. If no linked bill
-         * exists, create one from the current Fee Management amount.
-         */
-        let bill = feeBills[0] || null;
+        const bill = feeBills[0];
+        if (!bill) {
+          throw new Error("No outstanding fee bill is linked to this student. Assign the fees in Student Fees first.");
+        }
 
-        if (bill) {
-          const { data: updatedBill, error: billUpdateError } = await supabase
-            .from("fee_bills")
-            .update({
-              bill_number: manualBillNumber.trim(),
-              updated_at: new Date().toISOString(),
-            })
-            .eq("id", bill.id)
-            .eq("school_id", schoolId)
-            .select(
-              `
-                id,
-                school_id,
-                student_id,
-                academic_year_id,
-                bill_number,
-                bill_date,
-                due_date,
-                status,
-                subtotal,
-                discount,
-                late_fee,
-                total_amount,
-                paid_amount,
-                balance_amount,
-                notes
-              `
-            )
-            .single();
+        const total = receiptPaymentTotal;
+        const allocationPayload = receiptPaymentLines.map((line) => ({
+          fee_bill_item_id: line.feeBillItemId,
+          amount: Number(line.amount),
+        }));
 
-          if (billUpdateError) {
-            throw new Error(`Unable to update fee bill number: ${billUpdateError.message}`);
-          }
-
-          bill = updatedBill as FeeBill;
+        let data: any = null;
+        let rpcError: any = null;
+        if (collectionType === "split") {
+          const result = await supabase.rpc("record_fee_payment_collection_split", {
+            p_student_id: selectedStudentId,
+            p_bill_id: bill.id,
+            p_amount: total,
+            p_receipt_number: manualReceiptNumber.trim(),
+            p_payment_date: receiptDate,
+            p_reference_number: referenceNumber.trim() || null,
+            p_remarks: notes.trim() || null,
+            p_allocations: allocationPayload,
+            p_splits: [
+              { account_id: cashCollectionAccountId, payment_mode: "cash", amount: cashSplit },
+              { account_id: bankCollectionAccountId, payment_mode: "bank_transfer", amount: bankSplit },
+            ],
+          });
+          data = result.data;
+          rpcError = result.error;
         } else {
-          const { data: currentAcademicYear, error: academicYearError } =
-            await supabase
-              .from("academic_years")
-              .select("id")
-              .eq("school_id", schoolId)
-              .eq("is_current", true)
-              .order("start_date", { ascending: false })
-              .limit(1)
-              .maybeSingle();
+          const result = await supabase.rpc("record_fee_payment_collection", {
+            p_student_id: selectedStudentId,
+            p_bill_id: bill.id,
+            p_amount: total,
+            p_payment_mode: paymentMethod,
+            p_account_id: receiveIntoAccountId,
+            p_receipt_number: manualReceiptNumber.trim(),
+            p_payment_date: receiptDate,
+            p_reference_number: referenceNumber.trim() || null,
+            p_remarks: notes.trim() || null,
+            p_allocations: allocationPayload,
+          });
+          data = result.data;
+          rpcError = result.error;
+        }
 
-          if (academicYearError) {
-            throw new Error(`Unable to load current academic year: ${academicYearError.message}`);
-          }
+        if (rpcError) throw new Error(`Unable to record fee payment: ${rpcError.message}`);
+        if (!data || data.success === false) throw new Error(data?.message || "Unable to record fee payment.");
 
-          if (!currentAcademicYear) {
-            throw new Error("No current academic year is configured.");
-          }
+        const paymentId = String(data.payment_id || "");
+        if (!paymentId) throw new Error("Payment was recorded but no payment ID was returned.");
 
-          const feeAmount = Number(feeManagementAmount || 0);
-
-          if (feeAmount <= 0) {
-            throw new Error("Fee Management amount is zero.");
-          }
-
-          const { data: newBill, error: newBillError } = await supabase
+        if (manualBillNumber.trim()) {
+          const { error: billNumberError } = await supabase
             .from("fee_bills")
-            .insert({
-              school_id: schoolId,
-              student_id: selectedStudentId,
-              academic_year_id: currentAcademicYear.id,
-              bill_number: manualBillNumber.trim(),
-              bill_date: receiptDate,
-              due_date: null,
-              status: "unpaid",
-              subtotal: feeAmount,
-              discount: 0,
-              late_fee: 0,
-              total_amount: feeAmount,
-              paid_amount: 0,
-              balance_amount: feeAmount,
-              notes: `Created from Fee Management: ${feeManagementName}`,
-              created_by: userId,
-            })
-            .select(
-              `
-                id,
-                school_id,
-                student_id,
-                academic_year_id,
-                bill_number,
-                bill_date,
-                due_date,
-                status,
-                subtotal,
-                discount,
-                late_fee,
-                total_amount,
-                paid_amount,
-                balance_amount,
-                notes
-              `
-            )
-            .single();
-
-          if (newBillError) {
-            throw new Error(`Unable to create fee bill: ${newBillError.message}`);
-          }
-
-          bill = newBill as FeeBill;
-
-          const { error: billItemError } = await supabase
-            .from("fee_bill_items")
-            .insert({
-              school_id: schoolId,
-              bill_id: bill.id,
-              fee_structure_id: null,
-              description: `Fee Management - ${feeManagementName}`,
-              fee_type: "fee",
-              amount: feeAmount,
-              discount: 0,
-              net_amount: feeAmount,
-            });
-
-          if (billItemError) {
-            await supabase
-              .from("fee_bills")
-              .delete()
-              .eq("id", bill.id)
-              .eq("school_id", schoolId);
-
-            throw new Error(`Unable to create fee bill item: ${billItemError.message}`);
-          }
+            .update({ bill_number: manualBillNumber.trim(), updated_at: new Date().toISOString() })
+            .eq("id", bill.id)
+            .eq("school_id", schoolId);
+          if (billNumberError) throw new Error(`Unable to save bill number: ${billNumberError.message}`);
         }
 
-        setSelectedBillId(bill.id);
-
-        const systemReceiptNumber = createSystemReceiptNumber(
-          manualBillNumber
-        );
-
-        const { data: payment, error: paymentError } = await supabase
+        await supabase
           .from("fee_payments")
-          .insert({
-            school_id: schoolId,
-            student_id: selectedStudentId,
-            receipt_number: systemReceiptNumber,
-            payment_date: receiptDate,
-            amount: numericAmount,
-            payment_method: paymentMethod,
-            account_id: receiveIntoAccountId,
-            reference_number: referenceNumber.trim() || null,
-            notes: notes.trim() || null,
-            received_by: userId,
-            receipt_generated: true,
-            bill_id: bill.id,
-          })
-          .select(
-            `
-              id,
-              school_id,
-              student_id,
-              receipt_number,
-              payment_date,
-              amount,
-              payment_method,
-              account_id,
-              reference_number,
-              notes,
-              received_by,
-              receipt_generated,
-              bill_id
-            `
-          )
-          .single();
-
-        if (paymentError) {
-          throw new Error(`Unable to record fee payment: ${paymentError.message}`);
-        }
-
-        if (!payment) {
-          throw new Error("Fee payment was not created.");
-        }
-
-        createdPaymentId = payment.id;
-        paymentId = payment.id;
-
-        const { data: receipt, error: receiptError } = await supabase
-          .from("receipts")
-          .insert({
-            school_id: schoolId,
-            payment_id: payment.id,
-            receipt_number: systemReceiptNumber,
-            pdf_storage_path: null,
-          })
-          .select("id")
-          .single();
-
-        if (receiptError) {
-          throw new Error(`Unable to create fee receipt: ${receiptError.message}`);
-        }
-
-        createdReceiptId = receipt?.id || null;
-
-        const oldPaid = Number(bill.paid_amount || 0);
-        const oldBalance = Number(bill.balance_amount || 0);
-        const newPaid = oldPaid + numericAmount;
-        const newBalance = Math.max(0, oldBalance - numericAmount);
-
-        let newStatus = "partial";
-        if (newBalance <= 0.005) {
-          newStatus = "paid";
-        } else if (newPaid <= 0.005) {
-          newStatus = "unpaid";
-        }
-
-        const { error: billError } = await supabase
-          .from("fee_bills")
-          .update({
-            bill_number: manualBillNumber.trim(),
-            paid_amount: newPaid,
-            balance_amount: newBalance,
-            status: newStatus,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", bill.id)
+          .update({ receipt_generated: true })
+          .eq("id", paymentId)
           .eq("school_id", schoolId);
 
-        if (billError) {
-          throw new Error(`Unable to update fee bill: ${billError.message}`);
-        }
+        const feeItemsForReceipt = receiptPaymentLines.map((line) => {
+          const item = receiptFeeItems.find((candidate) => candidate.id === line.feeBillItemId);
+          return { description: item?.description || "Fee Payment", amount: Number(line.amount) };
+        });
 
-        description =
-          `${particulars.trim() || buildStudentFeeParticulars(selectedStudent, selectedClass, selectedFeeCategory)} - Bill ${manualBillNumber.trim()}`;
-      } else {
-        description =
-          `${particulars.trim()} - received from ${receivedFrom.trim()}`;
+        const refreshedBill = await getBill(bill.id);
+        const className = selectedClass?.name || "Class";
+        const sectionName = selectedSection?.name || "";
+
+        generateReceiptPDF({
+          schoolName: "School",
+          receiptNumber: manualReceiptNumber.trim(),
+          receiptDate,
+          studentName: getStudentName(selectedStudent!),
+          admissionNumber: selectedStudent!.admission_no,
+          className,
+          section: sectionName,
+          billNumber: manualBillNumber.trim() || refreshedBill.bill_number,
+          feeDescription: feeItemsForReceipt.map((item) => item.description).join(", "),
+          particulars: `${getStudentName(selectedStudent!)} • ${className}`,
+          feeItems: feeItemsForReceipt,
+          amount: total,
+          concessionAmount: Number(refreshedBill.discount || 0),
+          paymentMode:
+            collectionType === "split"
+              ? `Split — Cash ${money(cashSplit)} + Bank ${money(bankSplit)}`
+              : paymentMethod,
+          referenceNumber: referenceNumber.trim() || null,
+          previousOutstanding: Number(bill.balance_amount || 0),
+          remainingOutstanding: Number(refreshedBill.balance_amount || 0),
+          remarks: notes.trim() || null,
+        });
+
+        setSuccess(`Receipt ${manualReceiptNumber.trim()} saved successfully.`);
+        resetPaymentFields();
+        await loadHistory(schoolId!);
+        return;
       }
 
-      if (referenceNumber.trim()) {
-        description +=
-          ` | Reference: ${referenceNumber.trim()}`;
+      if (receiptType === "other_income") {
+        description = `${particulars.trim()} - received from ${receivedFrom.trim()}`;
+        if (referenceNumber.trim()) {
+          description += ` | Reference: ${referenceNumber.trim()}`;
+        }
       }
 
       const { data: transaction, error: transactionError } =
@@ -2003,12 +2153,12 @@ export default function ReceiptPage() {
         {
           school_id: schoolId,
           transaction_id: transaction.id,
-          account_id: incomeAccount.id,
+          account_id: incomeAccount!.id,
           debit: 0,
           credit: numericAmount,
           description:
             receiptType === "student_fee"
-              ? `Fee income - Bill ${manualBillNumber.trim()}`
+              ? `Fee income - Bill ${manualBillNumber.trim()} - Receipt ${manualReceiptNumber.trim()}`
               : `Income - ${particulars.trim()}`,
         },
       ];
@@ -2036,7 +2186,7 @@ export default function ReceiptPage() {
       resetPaymentFields();
 
       await loadHistory(schoolId!);
-    } catch (err: unknown) {
+    } catch (err: any) {
       console.error("RECEIPT RECORDING ERROR:", err);
 
       if (createdReceiptId) {
@@ -2070,7 +2220,7 @@ export default function ReceiptPage() {
       }
 
       setError(
-        err instanceof Error ? err.message : "Unable to save receipt."
+        err?.message || "Unable to save receipt."
       );
     } finally {
       setSaving(false);
@@ -2080,12 +2230,13 @@ export default function ReceiptPage() {
   function resetPaymentFields() {
     setSelectedStudentId("");
     setSelectedBillId("");
-    setSelectedFeeCategoryId("");
     setFeeBills([]);
-    setFeeCategories([]);
+    setReceiptFeeItems([]);
+    setReceiptPaymentLines([]);
     setConcessionsByBillId({});
     setAmount("");
     setManualBillNumber("");
+    setManualReceiptNumber("");
 
     setReceivedFrom("");
     setParticulars("");
@@ -2135,6 +2286,30 @@ export default function ReceiptPage() {
           throw new Error("Enter the manual Bill Number.");
         }
 
+        if (!manualReceiptNumber.trim()) {
+          throw new Error("Enter the manual Receipt Number.");
+        }
+
+        if (receiptPaymentLines.length === 0) {
+          throw new Error("Select at least one fee category and enter an amount.");
+        }
+
+        for (const line of receiptPaymentLines) {
+          const value = Number(line.amount);
+          const item = receiptFeeItems.find((candidate) => candidate.id === line.feeBillItemId);
+          if (!item || !Number.isFinite(value) || value <= 0) {
+            throw new Error("Every selected fee category must have a valid amount.");
+          }
+          if (value > item.balance + 0.005) {
+            throw new Error(`Payment for ${item.description} exceeds its available balance of ${money(item.balance)}.`);
+          }
+        }
+
+        const duplicateCategory = new Set(receiptPaymentLines.map((line) => line.feeBillItemId));
+        if (duplicateCategory.size !== receiptPaymentLines.length) {
+          throw new Error("Each fee category can be added only once to the same receipt.");
+        }
+
         const payment = await getPayment(editingRow.reference_id);
 
         if (!payment) {
@@ -2145,27 +2320,21 @@ export default function ReceiptPage() {
           throw new Error("Select the Cash or Bank account receiving the money.");
         }
 
-        const feeIncome = accounts.find(
-          (account) =>
-            account.account_type === "income" &&
-            account.name.toLowerCase() === "fee income"
-        );
-
-        if (!feeIncome) {
-          throw new Error("Fee Income account was not found.");
-        }
-
         const { data, error: rpcError } = await supabase.rpc(
-          "update_fee_payment_receipt",
+          "update_fee_payment_collection",
           {
-            p_school_id: schoolId,
             p_payment_id: payment.id,
-            p_amount: numericAmount,
+            p_amount: receiptPaymentTotal,
             p_payment_mode: paymentMethod,
             p_account_id: receiveIntoAccountId,
             p_payment_date: receiptDate,
+            p_receipt_number: manualReceiptNumber.trim(),
             p_reference_number: referenceNumber.trim() || null,
             p_remarks: notes.trim() || null,
+            p_allocations: receiptPaymentLines.map((line) => ({
+              fee_bill_item_id: line.feeBillItemId,
+              amount: Number(line.amount),
+            })),
           }
         );
 
@@ -2196,7 +2365,9 @@ export default function ReceiptPage() {
           }
         }
 
-        setSuccess("Fee receipt updated successfully.");
+        setSuccess(
+          `Receipt ${manualReceiptNumber.trim()} updated successfully.`
+        );
 
         setEditingId(null);
         await loadHistory(schoolId);
@@ -2246,11 +2417,11 @@ export default function ReceiptPage() {
 
       setEditingId(null);
       await loadHistory(schoolId);
-    } catch (err: unknown) {
+    } catch (err: any) {
       console.error("UPDATE RECEIPT ERROR:", err);
 
       setError(
-        err instanceof Error ? err.message : "Unable to update receipt."
+        err?.message || "Unable to update receipt."
       );
     } finally {
       setSaving(false);
@@ -2383,11 +2554,11 @@ export default function ReceiptPage() {
       );
 
       await loadHistory(schoolId);
-    } catch (err: unknown) {
+    } catch (err: any) {
       console.error("DELETE RECEIPT ERROR:", err);
 
       setError(
-        err instanceof Error ? err.message : "Unable to delete receipt."
+        err?.message || "Unable to delete receipt."
       );
     } finally {
       setSaving(false);
@@ -2554,7 +2725,7 @@ export default function ReceiptPage() {
                             </div>
 
                             <div className="text-xs text-slate-500">
-                              Collect against a student&apos;s fee bill
+                              Collect against a student's fee bill
                             </div>
                           </div>
                         </div>
@@ -2631,6 +2802,7 @@ export default function ReceiptPage() {
                       </select>
                     </Field>
 
+                    {(receiptType !== "student_fee" || collectionType === "single") && (
                     <Field label="Receive Into">
                       <select
                         value={receiveIntoAccountId}
@@ -2660,11 +2832,13 @@ export default function ReceiptPage() {
                         )}
                       </select>
                     </Field>
+                    )}
 
+                    {receiptType !== "student_fee" && (
                     <Field label="Amount">
                       <div className="relative">
                         <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">
-
+                    
                         </span>
 
                         <input
@@ -2682,7 +2856,46 @@ export default function ReceiptPage() {
                         />
                       </div>
                     </Field>
+                    )}
                   </div>
+
+                  {receiptType === "student_fee" && (
+                    <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <h4 className="text-sm font-bold text-slate-900">Collection Type</h4>
+                          <p className="mt-1 text-xs text-slate-500">One receipt can be paid partly in Cash and partly through Bank/Online.</p>
+                        </div>
+                        <div className="flex gap-2">
+                          <button type="button" disabled={!!editingId} onClick={() => setCollectionType("single")} className={`rounded-lg border px-4 py-2 text-sm font-semibold ${collectionType === "single" ? "border-blue-500 bg-blue-50 text-blue-700" : "border-slate-200 text-slate-600"}`}>Single Payment</button>
+                          <button type="button" disabled={!!editingId} onClick={() => setCollectionType("split")} className={`rounded-lg border px-4 py-2 text-sm font-semibold ${collectionType === "split" ? "border-blue-500 bg-blue-50 text-blue-700" : "border-slate-200 text-slate-600"}`}>Split — Cash + Bank</button>
+                        </div>
+                      </div>
+                      {collectionType === "split" && (
+                        <div className="mt-4 grid gap-4 md:grid-cols-2">
+                          <Field label="Cash Amount *">
+                            <input type="number" min="0" step="0.01" value={cashCollectionAmount} onChange={(e) => setCashCollectionAmount(e.target.value)} className="input" placeholder="0.00" />
+                            <select value={cashCollectionAccountId} onChange={(e) => setCashCollectionAccountId(e.target.value)} className="input mt-2">
+                              <option value="">Select Cash Account</option>
+                              {cashAccounts.map((account) => <option key={account.id} value={account.id}>{account.name}{account.code ? ` (${account.code})` : ""}</option>)}
+                            </select>
+                          </Field>
+                          <Field label="Bank / Online Amount *">
+                            <input type="number" min="0" step="0.01" value={bankCollectionAmount} onChange={(e) => setBankCollectionAmount(e.target.value)} className="input" placeholder="0.00" />
+                            <select value={bankCollectionAccountId} onChange={(e) => setBankCollectionAccountId(e.target.value)} className="input mt-2">
+                              <option value="">Select Bank Account</option>
+                              {bankAccounts.map((account) => <option key={account.id} value={account.id}>{account.name}{account.code ? ` (${account.code})` : ""}</option>)}
+                            </select>
+                          </Field>
+                          <div className="md:col-span-2 rounded-lg bg-blue-50 px-4 py-3 text-sm">
+                            <span className="font-semibold text-slate-700">Split Total: </span>
+                            <span className={`font-bold ${Math.abs(splitCollectionTotal - receiptPaymentTotal) <= 0.005 ? "text-emerald-700" : "text-red-600"}`}>{money(splitCollectionTotal)}</span>
+                            <span className="ml-2 text-slate-500">of {money(receiptPaymentTotal)}</span>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {receiptType === "student_fee" && (
                     <div className="rounded-xl border border-blue-100 bg-blue-50/50 p-5">
@@ -2818,34 +3031,6 @@ export default function ReceiptPage() {
                       )}
 
                       <div className="mt-4 grid gap-4 md:grid-cols-3">
-                        <Field label="Fee Category *">
-                          <select
-                            value={selectedFeeCategoryId}
-                            onChange={(e) =>
-                              setSelectedFeeCategoryId(e.target.value)
-                            }
-                            disabled={!selectedStudentId || feeCategories.length === 0 || saving}
-                            className="input disabled:bg-slate-100"
-                          >
-                            <option value="">
-                              {!selectedStudentId
-                                ? "Select Student first"
-                                : feeCategories.length === 0
-                                  ? "No fee categories available"
-                                  : "Select Fee Category"}
-                            </option>
-
-                            {feeCategories.map((category) => (
-                              <option key={category.id} value={category.id}>
-                                {category.name}
-                              </option>
-                            ))}
-                          </select>
-                          <p className="mt-1 text-xs text-slate-500">
-                            Choose the fee category being collected for this student.
-                          </p>
-                        </Field>
-
                         <Field label="Manual Bill Number *">
                           <input
                             type="text"
@@ -2860,6 +3045,23 @@ export default function ReceiptPage() {
                           />
                           <p className="mt-1 text-xs text-slate-500">
                             Enter the exact Bill Number printed on the physical/offline bill.
+                          </p>
+                        </Field>
+
+                        <Field label="Manual Receipt Number *">
+                          <input
+                            type="text"
+                            value={manualReceiptNumber}
+                            onChange={(e) =>
+                              setManualReceiptNumber(e.target.value)
+                            }
+                            disabled={saving}
+                            placeholder="Enter physical receipt number"
+                            className="input disabled:bg-slate-100"
+                            autoComplete="off"
+                          />
+                          <p className="mt-1 text-xs text-slate-500">
+                            Enter the exact Receipt Number printed on the physical/offline receipt.
                           </p>
                         </Field>
 
@@ -2879,15 +3081,94 @@ export default function ReceiptPage() {
                         </Field>
                       </div>
 
-                      <div className="mt-4">
-                        <Field label="Particulars">
-                          <input
-                            type="text"
-                            value={particulars}
-                            readOnly
-                            className="input bg-slate-100"
-                          />
-                        </Field>
+                      <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <h4 className="text-sm font-bold text-slate-900">Fee Categories & Payment Amounts</h4>
+                            <p className="mt-1 text-xs text-slate-500">Select the categories actually being paid. One receipt can contain multiple categories.</p>
+                          </div>
+                          <div className="rounded-lg bg-blue-50 px-3 py-2 text-right">
+                            <div className="text-[10px] font-semibold uppercase text-slate-500">This Collection</div>
+                            <div className="text-sm font-bold text-blue-700">{money(receiptPaymentTotal)}</div>
+                          </div>
+                        </div>
+
+                        <div className="mt-4 space-y-3">
+                          {receiptPaymentLines.map((line, index) => {
+                            const item = receiptFeeItems.find((candidate) => candidate.id === line.feeBillItemId);
+                            return (
+                              <div key={`${line.feeBillItemId}-${index}`} className="grid gap-3 md:grid-cols-[minmax(0,1fr)_180px_auto] md:items-end">
+                                <Field label="Fee Category">
+                                  <select
+                                    value={line.feeBillItemId}
+                                    onChange={(e) => setReceiptPaymentLines((current) => current.map((candidate, i) => i === index ? { ...candidate, feeBillItemId: e.target.value, amount: "" } : candidate))}
+                                    className="input"
+                                  >
+                                    <option value="">Select Fee Category</option>
+                                    {receiptFeeItems.map((feeItem) => (
+                                      <option key={feeItem.id} value={feeItem.id} disabled={receiptPaymentLines.some((candidate, i) => i !== index && candidate.feeBillItemId === feeItem.id)}>
+                                        {feeItem.description} — Due {money(feeItem.balance)}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </Field>
+                                <Field label="Amount">
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    step="0.01"
+                                    max={item?.balance ?? undefined}
+                                    value={line.amount}
+                                    onChange={(e) => setReceiptPaymentLines((current) => current.map((candidate, i) => i === index ? { ...candidate, amount: e.target.value } : candidate))}
+                                    placeholder="Enter amount"
+                                    className="input"
+                                  />
+                                  {item && item.balance > 0 && (
+                                    <div className="mt-1.5 flex gap-1.5">
+                                      {[25, 50, 100].map((percent) => (
+                                        <button
+                                          key={percent}
+                                          type="button"
+                                          onClick={() => setReceiptPaymentLines((current) => current.map((candidate, i) => i === index ? { ...candidate, amount: (item.balance * percent / 100).toFixed(2) } : candidate))}
+                                          className="rounded border border-slate-200 bg-white px-2 py-1 text-[10px] font-semibold text-slate-600 hover:bg-slate-50"
+                                        >
+                                          {percent}%
+                                        </button>
+                                      ))}
+                                      <button
+                                        type="button"
+                                        onClick={() => setReceiptPaymentLines((current) => current.map((candidate, i) => i === index ? { ...candidate, amount: item.balance.toFixed(2) } : candidate))}
+                                        className="rounded border border-blue-200 bg-blue-50 px-2 py-1 text-[10px] font-semibold text-blue-700 hover:bg-blue-100"
+                                      >
+                                        Full
+                                      </button>
+                                    </div>
+                                  )}
+                                </Field>
+                                <button
+                                  type="button"
+                                  onClick={() => setReceiptPaymentLines((current) => current.filter((_, i) => i !== index))}
+                                  disabled={receiptPaymentLines.length <= 1}
+                                  className="rounded-lg border border-red-200 px-3 py-2.5 text-xs font-semibold text-red-600 disabled:cursor-not-allowed disabled:opacity-40"
+                                >
+                                  Remove
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const available = receiptFeeItems.find((item) => item.balance > 0 && !receiptPaymentLines.some((line) => line.feeBillItemId === item.id));
+                            if (available) setReceiptPaymentLines((current) => [...current, { feeBillItemId: available.id, amount: "" }]);
+                          }}
+                          disabled={!receiptFeeItems.some((item) => item.balance > 0 && !receiptPaymentLines.some((line) => line.feeBillItemId === item.id))}
+                          className="mt-3 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700 disabled:opacity-40"
+                        >
+                          + Add Another Fee Category
+                        </button>
                       </div>
 
                       {selectedStudent && (
@@ -2920,15 +3201,6 @@ export default function ReceiptPage() {
                                 selectedSection?.name || "-"
                               }
                             />
-                          </div>
-
-                          <div className="mt-4">
-                            <Link
-                              href={`/dashboard/students/${selectedStudent.id}/fees`}
-                              className="inline-flex rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-800 hover:bg-amber-100"
-                            >
-                              Give / Manage Concession
-                            </Link>
                           </div>
 
                           <div className="mt-4 border-t pt-4">
@@ -3179,73 +3451,87 @@ export default function ReceiptPage() {
                     <p className="text-xs text-slate-500">
                       {filteredHistory.length} of {history.length} receipts
                     </p>
+                    <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+                      <span className="text-slate-500">
+                        Date range: <span className="font-semibold text-slate-700">{historyDateRangeLabel}</span>
+                      </span>
+                      <span className="font-bold text-emerald-700">
+                        Total Collected: {money(filteredHistoryTotal)}
+                      </span>
+                    </div>
                   </div>
 
-                  <div className="flex gap-2">
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={historyTypeFilter}
+                      onChange={(event) => setHistoryTypeFilter(event.target.value as ReceiptType | "all")}
+                      className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500"
+                    >
+                      <option value="all">All receipt types</option>
+                      <option value="student_fee">Student Fee</option>
+                      <option value="other_income">Other Income</option>
+                    </select>
+
+                    <select
+                      value={historyCategoryFilter}
+                      onChange={(event) => setHistoryCategoryFilter(event.target.value)}
+                      className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500"
+                    >
+                      <option value="all">All fee categories</option>
+                      {historyCategories.map((category) => (
+                        <option key={category} value={category}>{category}</option>
+                      ))}
+                    </select>
+
+                    <input
+                      type="date"
+                      value={historyFromDate}
+                      onChange={(event) => setHistoryFromDate(event.target.value)}
+                      title="From date"
+                      className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500"
+                    />
+
+                    <input
+                      type="date"
+                      value={historyToDate}
+                      onChange={(event) => setHistoryToDate(event.target.value)}
+                      title="To date"
+                      className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500"
+                    />
+
                     <button
                       type="button"
-                      onClick={downloadReceiptHistory}
-                      disabled={!filteredHistory.length}
-                      className="rounded-lg border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
+                      onClick={exportHistoryPDF}
+                      className="inline-flex items-center gap-2 rounded-lg border border-red-200 px-3 py-2 text-sm font-semibold text-red-700 hover:bg-red-50"
                     >
-                      Download CSV
+                      PDF
                     </button>
 
                     <button
                       type="button"
-                      onClick={() =>
-                        schoolId &&
-                        loadHistory(schoolId)
-                      }
-                      className="inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm"
+                      onClick={exportHistoryExcel}
+                      className="inline-flex items-center gap-2 rounded-lg border border-emerald-200 px-3 py-2 text-sm font-semibold text-emerald-700 hover:bg-emerald-50"
                     >
-                      <RefreshCw size={15} />
-                      Refresh
+                      Excel
                     </button>
-                  </div>
-                </div>
 
-                <div className="grid gap-3 border-b bg-slate-50/70 px-5 py-4 md:grid-cols-4">
-                  <input
-                    type="search"
-                    value={historySearch}
-                    onChange={(event) => setHistorySearch(event.target.value)}
-                    placeholder="Search student, class or bill number"
-                    className="input"
-                  />
-
-                  <select
-                    value={historyType}
-                    onChange={(event) =>
-                      setHistoryType(event.target.value as "all" | ReceiptType)
+                  <button
+                    type="button"
+                    onClick={() =>
+                      schoolId &&
+                      loadHistory(schoolId)
                     }
-                    className="input"
+                    className="inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm"
                   >
-                    <option value="all">All receipt types</option>
-                    <option value="student_fee">Student Fee</option>
-                    <option value="other_income">Other Income</option>
-                  </select>
-
-                  <input
-                    type="date"
-                    value={historyFromDate}
-                    onChange={(event) => setHistoryFromDate(event.target.value)}
-                    aria-label="History from date"
-                    className="input"
-                  />
-
-                  <input
-                    type="date"
-                    value={historyToDate}
-                    onChange={(event) => setHistoryToDate(event.target.value)}
-                    aria-label="History to date"
-                    className="input"
-                  />
+                    <RefreshCw size={15} />
+                    Refresh
+                  </button>
+                  </div>
                 </div>
 
                 {filteredHistory.length === 0 ? (
                   <div className="p-10 text-center text-sm text-slate-500">
-                    No receipts match these filters.
+                    No receipts found.
                   </div>
                 ) : (
                   <div className="overflow-x-auto">
@@ -3257,11 +3543,19 @@ export default function ReceiptPage() {
                           </th>
 
                           <th className="px-5 py-3 text-left text-xs text-slate-500">
-                            Type
+                            Receipt No.
                           </th>
 
                           <th className="px-5 py-3 text-left text-xs text-slate-500">
-                            Manual Bill Number
+                            Bill No.
+                          </th>
+
+                          <th className="px-5 py-3 text-left text-xs text-slate-500">
+                            Student / Class
+                          </th>
+
+                          <th className="px-5 py-3 text-left text-xs text-slate-500">
+                            Fee Categories Paid
                           </th>
 
                           <th className="px-5 py-3 text-left text-xs text-slate-500">
@@ -3287,39 +3581,32 @@ export default function ReceiptPage() {
                       </thead>
 
                       <tbody className="divide-y">
-                        {filteredHistory.map((row) => {
-                          const historyStudent = row.student_id
-                            ? students.find(
-                                (student) => student.id === row.student_id
-                              )
-                            : null;
-
-                          return (
+                        {filteredHistory.map((row) => (
                           <tr key={row.id}>
                             <td className="px-5 py-4 text-sm">
                               {row.transaction_date}
                             </td>
 
-                            <td className="px-5 py-4">
-                              <span
-                                className={`rounded-full px-2.5 py-1 text-xs font-semibold ${
-                                  row.receipt_type ===
-                                  "student_fee"
-                                    ? "bg-blue-100 text-blue-700"
-                                    : "bg-emerald-100 text-emerald-700"
-                                }`}
-                              >
-                                {row.receipt_type ===
-                                "student_fee"
-                                  ? "Student Fee"
-                                  : "Other Income"}
-                              </span>
+                            <td className="px-5 py-4 font-mono text-xs font-semibold text-slate-700">
+                              {row.transaction_number ||
+                                row.id.slice(0, 8)}
                             </td>
 
-                            <td className="px-5 py-4 font-mono text-xs">
-                              {row.receipt_type === "student_fee"
-                                ? row.manual_bill_number || "-"
-                                : "-"}
+                            <td className="px-5 py-4 text-sm font-semibold text-slate-700">
+                              {row.manual_bill_number || "—"}
+                            </td>
+
+                            <td className="px-5 py-4 text-sm">
+                              <div className="font-semibold text-slate-800">
+                                {row.student_name || "—"}
+                              </div>
+                              <div className="text-xs text-slate-500">
+                                {row.class_name || "—"}{row.section_name ? ` • ${row.section_name}` : ""}
+                              </div>
+                            </td>
+
+                            <td className="max-w-[240px] px-5 py-4 text-xs font-semibold text-blue-700">
+                              {getDisplayedHistoryCategories(row).join(", ") || "—"}
                             </td>
 
                             <td className="px-5 py-4 text-sm text-emerald-700">
@@ -3330,26 +3617,14 @@ export default function ReceiptPage() {
                               {row.credit_account}
                             </td>
 
-                            <td className="max-w-[320px] px-5 py-4 text-sm text-slate-600">
-                              {historyStudent ? (
-                                <Link
-                                  href={`/dashboard/students/${historyStudent.id}/fees`}
-                                  className="block rounded-md text-blue-700 hover:underline"
-                                >
-                                  <span className="font-medium">
-                                    {getStudentName(historyStudent)}
-                                  </span>
-                                  <span className="block text-xs text-slate-500">
-                                    {getStudentClassName(historyStudent, classes)}
-                                  </span>
-                                </Link>
-                              ) : (
-                                row.description
-                              )}
+                            <td className="max-w-[360px] px-5 py-4 text-sm font-medium text-slate-700">
+                              {row.receipt_type === "student_fee"
+                                ? [row.student_name, row.class_name].filter(Boolean).join(" • ") || "—"
+                                : row.description}
                             </td>
 
                             <td className="px-5 py-4 text-right font-semibold text-emerald-600">
-                              {money(row.amount)}
+                              {money(getDisplayedHistoryAmount(row))}
                             </td>
 
                             <td className="px-5 py-4">
@@ -3389,9 +3664,23 @@ export default function ReceiptPage() {
                               </div>
                             </td>
                           </tr>
-                          );
-                        })}
+                        ))}
                       </tbody>
+
+                      <tfoot>
+                        <tr className="border-t-2 bg-slate-50">
+                          <td
+                            colSpan={9}
+                            className="px-5 py-3 text-right text-sm font-bold text-slate-700"
+                          >
+                            Filtered Total
+                          </td>
+                          <td className="px-5 py-3 text-right text-base font-bold text-emerald-700">
+                            {money(filteredHistoryTotal)}
+                          </td>
+                          <td className="px-5 py-3"></td>
+                        </tr>
+                      </tfoot>
                     </table>
                   </div>
                 )}
@@ -3431,6 +3720,8 @@ export default function ReceiptPage() {
             getPayment={getPayment}
             getBill={getBill}
             students={students}
+            classes={classes}
+            sections={sections}
             accounts={accounts}
           />
         )}
@@ -3510,8 +3801,7 @@ export default function ReceiptPage() {
             className="hidden print:block"
           />
         )}
-              <AccountingExportActions fileName="receipts" />
-</main>
+      </main>
     </>
   );
 }
@@ -3530,6 +3820,8 @@ function ReceiptViewModal({
   getPayment,
   getBill,
   students,
+  classes,
+  sections,
   accounts,
 }: {
   transactionId: string;
@@ -3549,6 +3841,8 @@ function ReceiptViewModal({
     id: string
   ) => Promise<FeeBill>;
   students: Student[];
+  classes: ClassRow[];
+  sections: SectionRow[];
   accounts: Account[];
 }) {
   const [loading, setLoading] = useState(true);
@@ -3569,11 +3863,12 @@ function ReceiptViewModal({
   const [concession, setConcession] =
     useState<number>(0);
 
+  const [feeCategories, setFeeCategories] = useState<Array<{ description: string; amount: number }>>([]);
+
   const row = history.find(
     (item) => item.id === transactionId
   );
 
-  /* eslint-disable react-hooks/exhaustive-deps */
   useEffect(() => {
     let active = true;
 
@@ -3581,6 +3876,7 @@ function ReceiptViewModal({
       try {
         setLoading(true);
         setError("");
+        setFeeCategories([]);
 
         let transaction: TransactionRow;
         let entries: TransactionEntry[] = [];
@@ -3622,8 +3918,42 @@ function ReceiptViewModal({
             );
           }
 
+          // Load the exact categories paid by THIS payment. A bill may contain
+          // many categories, but the receipt must only show its allocations.
           const client = createClient();
-          const { data: journal, error: journalError } = await client
+          const { data: allocationRows, error: allocationError } = await client
+            .from("fee_payment_allocations")
+            .select("amount, fee_bill_item_id")
+            .eq("school_id", payment.school_id)
+            .eq("payment_id", payment.id);
+
+          if (allocationError) throw new Error(allocationError.message);
+
+          const itemIds = Array.from(new Set(
+            (allocationRows || [])
+              .map((item) => item.fee_bill_item_id)
+              .filter(Boolean) as string[]
+          ));
+
+          if (itemIds.length) {
+            const { data: itemRows, error: itemError } = await client
+              .from("fee_bill_items")
+              .select("id, description")
+              .eq("school_id", payment.school_id)
+              .in("id", itemIds);
+            if (itemError) throw new Error(itemError.message);
+
+            const itemMap = new Map((itemRows || []).map((item) => [item.id, item.description]));
+            setFeeCategories((allocationRows || []).map((allocation) => ({
+              description: itemMap.get(allocation.fee_bill_item_id) || "Fee",
+              amount: Number(allocation.amount || 0),
+            })));
+          } else {
+            setFeeCategories([]);
+          }
+
+          const client2 = createClient();
+          const { data: journal, error: journalError } = await client2
             .from("journal_entries")
             .select("id")
             .eq("school_id", payment.school_id)
@@ -3636,7 +3966,7 @@ function ReceiptViewModal({
           if (journalError) throw new Error(journalError.message);
 
           if (journal?.id) {
-            const { data: lines, error: linesError } = await client
+            const { data: lines, error: linesError } = await client2
               .from("journal_lines")
               .select("id, account_id, debit, credit, description")
               .eq("school_id", payment.school_id)
@@ -3665,11 +3995,12 @@ function ReceiptViewModal({
         setPayment(payment);
         setBill(bill);
         setConcession(concession);
-      } catch (err: unknown) {
+      } catch (err: any) {
         if (!active) return;
 
         setError(
-          err instanceof Error ? err.message : "Unable to load receipt."
+          err?.message ||
+            "Unable to load receipt."
         );
       } finally {
         if (active) setLoading(false);
@@ -3688,7 +4019,6 @@ function ReceiptViewModal({
     getPayment,
     getBill,
   ]);
-  /* eslint-enable react-hooks/exhaustive-deps */
 
   const debitEntry = entries.find(
     (entry) => Number(entry.debit || 0) > 0
@@ -3830,8 +4160,31 @@ function ReceiptViewModal({
                       />
 
                       <PrintDetail
+                        label="Class"
+                        value={
+                          student?.class_id
+                            ? classes.find((item) => item.id === student.class_id)?.name || "—"
+                            : "—"
+                        }
+                      />
+
+                      <PrintDetail
+                        label="Section"
+                        value={
+                          student?.section_id
+                            ? sections.find((item) => item.id === student.section_id)?.name || "—"
+                            : "—"
+                        }
+                      />
+
+                      <PrintDetail
                         label="Receipt Number"
                         value={payment.receipt_number}
+                      />
+
+                      <PrintDetail
+                        label="Bill Number"
+                        value={payment.manual_bill_number || bill?.bill_number || "—"}
                       />
 
                       <PrintDetail
@@ -3856,14 +4209,27 @@ function ReceiptViewModal({
                         }
                       />
 
-                      <PrintDetail
-                        label="Fee Bill"
-                        value={
-                          bill?.bill_number ||
-                          payment.bill_id ||
-                          "-"
-                        }
-                      />
+
+                    </div>
+
+                    <div className="mt-5 rounded-xl border bg-slate-50 p-4">
+                      <h4 className="font-semibold">Particulars</h4>
+                      <div className="mt-2 text-sm font-semibold text-slate-700">
+                        {student ? getStudentName(student) : "Student"}
+                        {student?.class_id ? ` • ${classes.find((item) => item.id === student.class_id)?.name || "Class"}` : ""}
+                      </div>
+                    </div>
+
+                    <div className="mt-4 rounded-xl border bg-slate-50 p-4">
+                      <h4 className="font-semibold">Fee Categories Paid</h4>
+                      <div className="mt-3 space-y-2">
+                        {feeCategories.length ? feeCategories.map((item) => (
+                          <div key={`${item.description}-${item.amount}`} className="flex items-center justify-between rounded-lg bg-white px-3 py-2 text-sm font-semibold text-slate-700">
+                            <span>{item.description}</span>
+                            <span>{money(item.amount)}</span>
+                          </div>
+                        )) : <div className="text-sm text-slate-500">—</div>}
+                      </div>
                     </div>
 
                     {bill && (

@@ -18,6 +18,10 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import {
+  ensureSchoolAccountingSetup,
+  postPayrollAccrualJournal,
+} from "@/lib/accounting/canonical-accounting";
 
 type Staff = {
   id: string;
@@ -55,6 +59,7 @@ type Row = {
   unpaid: number;
   payable: number;
   gross: number;
+  lopAmount: number;
   deductions: number;
   net: number;
   expanded: boolean;
@@ -146,17 +151,18 @@ function normalizeSalary(raw: Record<string, unknown>, staffId: string): Salary 
   const allowances = house + transport + medical + other;
   const componentGross = basic + allowances;
 
-  const storedGross = firstNumber(raw, [
-    "gross_salary",
-    "monthly_gross",
-    "gross_pay",
-    "gross_amount",
-  ]);
-
-  // If the stored gross is stale (for example only equal to basic salary),
-  // use the component total. If it is higher, preserve the higher configured
-  // gross because it may include an additional allowance column.
-  const gross = Math.max(storedGross, componentGross);
+  /*
+   * Gross must be the actual salary components:
+   * Basic + House + Transport + Medical + Other Allowance.
+   *
+   * Do NOT use Math.max(storedGross, componentGross) here. A stale or
+   * duplicated stored gross can otherwise make payroll show a higher gross
+   * than the salary structure actually contains.
+   *
+   * gross_salary is retained in `raw` for reference, but the payroll
+   * calculation uses the component total as the source of truth.
+   */
+  const gross = componentGross;
 
   const storedTotalDeductions = firstNumber(raw, [
     "total_deductions",
@@ -212,11 +218,18 @@ function calculate(
   const payable = Math.min(wd, w + p);
   const unpaid = Math.max(wd - payable, 0);
 
-  const gross = wd > 0 ? salary.gross_salary * (payable / wd) : salary.gross_salary;
+  // Gross is the full monthly salary from the Salary Structure.
+  // LOP is shown separately and reduces Net Pay. Do not replace Gross with
+  // the attendance-prorated amount; otherwise Gross incorrectly becomes Net
+  // before deductions.
+  const gross = salary.gross_salary;
+  const lop = wd > 0
+    ? salary.gross_salary * (unpaid / wd)
+    : 0;
   const deductions = salary.deductions;
-  const net = Math.max(gross - deductions, 0);
+  const net = Math.max(gross - lop - deductions, 0);
 
-  return { payable, unpaid, gross, deductions, net };
+  return { payable, unpaid, gross, lop, deductions, net };
 }
 
 export default function PayrollPage() {
@@ -244,9 +257,7 @@ export default function PayrollPage() {
           staff: a.staff + 1,
           gross: a.gross + r.gross,
           deductions: a.deductions + r.deductions,
-          lop: a.lop + (r.salary && workingDays > 0
-            ? r.salary.gross_salary * (r.unpaid / workingDays)
-            : 0),
+          lop: a.lop + r.lopAmount,
           net: a.net + r.net,
         }),
         { staff: 0, gross: 0, deductions: 0, lop: 0, net: 0 },
@@ -442,6 +453,7 @@ export default function PayrollPage() {
           unpaid: result.unpaid,
           payable: result.payable,
           gross: result.gross,
+          lopAmount: result.lop,
           deductions: result.deductions,
           net: result.net,
           expanded: false,
@@ -759,10 +771,7 @@ export default function PayrollPage() {
         payable_days: Number(r.payable),
         gross_salary: Number(r.gross.toFixed(2)),
         lop_amount: Number(
-          (workingDays > 0 && r.salary
-            ? r.salary.gross_salary * (r.unpaid / workingDays)
-            : 0
-          ).toFixed(2),
+          r.lopAmount.toFixed(2),
         ),
         pf_deduction: 0,
         tax_deduction: 0,
@@ -1097,6 +1106,20 @@ export default function PayrollPage() {
 
       const payrollAmount = Number(totals.net.toFixed(2));
 
+      const setup = await ensureSchoolAccountingSetup(supabase, schoolId);
+      await postPayrollAccrualJournal(supabase, {
+        schoolId,
+        fiscalYearId: setup.fiscalYearId,
+        entryDate: `${runToPrepare.year}-${String(runToPrepare.month).padStart(2, "0")}-01`,
+        sourceRecordId: runToPrepare.id,
+        salaryExpenseAccountId:
+          data.expense_account_id || setup.accountMap.SALARY_EXPENSE,
+        salaryPayableAccountId:
+          data.payable_account_id || setup.accountMap.SALARY_PAYABLE,
+        amount: payrollAmount,
+        createdBy: (await supabase.auth.getUser()).data.user?.id || null,
+      });
+
       const staffItems = rows
         .map((r) => ({
           employee_id: employeeForStaffRef.current.get(r.staff.id)?.id,
@@ -1269,7 +1292,7 @@ export default function PayrollPage() {
                   setRows((current) =>
                     current.map((r) => {
                       const result = calculate(r.salary, value, r.worked, r.paidLeave, r.holiday);
-                      return { ...r, worked: Math.min(r.worked, value), unpaid: result.unpaid, payable: result.payable, gross: result.gross, deductions: result.deductions, net: result.net };
+                      return { ...r, worked: Math.min(r.worked, value), unpaid: result.unpaid, payable: result.payable, gross: result.gross, lopAmount: result.lop, deductions: result.deductions, net: result.net };
                     }),
                   );
                 }}

@@ -18,6 +18,11 @@ import {
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { ensureBuiltInExpenseCategories } from "@/lib/accounting/expense-categories";
+import {
+  ensureSchoolAccountingSetup,
+  postExpenseJournal,
+  postSalaryPaymentJournal,
+} from "@/lib/accounting/canonical-accounting";
 
 type Account = {
   id: string;
@@ -1490,6 +1495,31 @@ export default function PaymentPage() {
           throw new Error(
             `Expense record could not be created: ${expenseRowError.message}`,
           );
+        }
+
+        const setup = await ensureSchoolAccountingSetup(supabase, schoolId);
+        if (payrollMode) {
+          await postSalaryPaymentJournal(supabase, {
+            schoolId,
+            fiscalYearId: setup.fiscalYearId,
+            entryDate: paymentDate,
+            sourceRecordId: transaction.id,
+            salaryPayableAccountId: debitAccountId,
+            paymentAccountId: paidFromAccountId,
+            amount: numericAmount,
+            createdBy: userData.user?.id || null,
+          });
+        } else {
+          await postExpenseJournal(supabase, {
+            schoolId,
+            fiscalYearId: setup.fiscalYearId,
+            entryDate: paymentDate,
+            sourceRecordId: transaction.id,
+            expenseAccountId: debitAccountId,
+            paymentAccountId: paidFromAccountId,
+            amount: numericAmount,
+            createdBy: userData.user?.id || null,
+          });
         }
       }
 

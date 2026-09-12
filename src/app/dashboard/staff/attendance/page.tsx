@@ -25,6 +25,7 @@ type Staff = {
   middle_name: string | null;
   last_name: string | null;
   designation: string | null;
+  email: string | null;
 };
 
 type Attendance = {
@@ -158,6 +159,9 @@ export default function StaffAttendancePage() {
     []
   );
 
+  const [schoolId, setSchoolId] =
+    useState<string | null>(null);
+
   const [staff, setStaff] =
     useState<Staff | null>(null);
 
@@ -212,36 +216,77 @@ export default function StaffAttendancePage() {
           return;
         }
 
+        const activeSchoolId =
+         (await supabase.rpc("get_my_school_id")).data ||
+         (
+           await supabase
+             .from("school_users")
+             .select("school_id")
+             .eq("user_id", user.id)
+             .eq("is_active", true)
+             .order("created_at", { ascending: true })
+             .limit(1)
+             .maybeSingle()
+         ).data?.school_id;
+
+        if (!activeSchoolId) {
+         throw new Error(
+           "No active school found for this user."
+         );
+        }
+
+        setSchoolId(activeSchoolId as string);
+
+        const staffSelect = `
+          id,
+          school_id,
+          employee_no,
+          first_name,
+          middle_name,
+          last_name,
+          designation,
+          email
+        `;
+
         const {
-          data: staffRow,
-          error: staffError,
-        } =
-          await supabase
+         data: linkedStaff,
+         error: linkedStaffError,
+        } = await supabase
+         .from("staff")
+         .select(staffSelect)
+         .eq("school_id", activeSchoolId)
+         .eq("user_id", user.id)
+         .maybeSingle();
+
+        if (linkedStaffError) {
+          throw linkedStaffError;
+        }
+
+        let staffRow = linkedStaff;
+
+        if (!staffRow && user.email) {
+          const {
+            data: emailStaff,
+            error: emailStaffError,
+          } = await supabase
             .from("staff")
-            .select(
-              `
-                id,
-                school_id,
-                employee_no,
-                first_name,
-                middle_name,
-                last_name,
-                designation
-              `
-            )
-            .eq(
-              "user_id",
-              user.id
-            )
+            .select(staffSelect)
+            .eq("school_id", activeSchoolId)
+            .eq("email", user.email)
+            .is("user_id", null)
+            .limit(1)
             .maybeSingle();
 
-        if (staffError) {
-          throw staffError;
+          if (emailStaffError) {
+            throw emailStaffError;
+          }
+
+          staffRow = emailStaff;
         }
 
         if (!staffRow) {
           throw new Error(
-            "Your login is not linked to a staff member."
+            "No staff profile matches this login in your active school. Ask an administrator to assign your login account to the correct staff profile."
           );
         }
 

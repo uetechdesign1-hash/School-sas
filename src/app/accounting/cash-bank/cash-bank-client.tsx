@@ -2,10 +2,19 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { getCurrentSchoolId } from "@/lib/supabase/current-school";
 
 const supabase = createClient();
 
 type BookType = "cash" | "bank";
+
+type AccountOption = {
+id: string;
+name: string;
+code: string | null;
+account_type: BookType;
+is_active: boolean;
+};
 
 type BookRow = {
 journal_entry_id: string;
@@ -72,6 +81,9 @@ return d.toISOString().split("T")[0];
 export default function CashBankClient() {
 const [book, setBook] = useState<BookType>("cash");
 
+const [accountOptions, setAccountOptions] = useState<AccountOption[]>([]);
+const [selectedAccountId, setSelectedAccountId] = useState("");
+
 const [fromDate, setFromDate] = useState(getMonthStart());
 
 const [toDate, setToDate] = useState(getToday());
@@ -90,6 +102,28 @@ async function loadBook() {
 try {
 setLoading(true);
 setError("");
+
+const schoolId = await getCurrentSchoolId();
+
+    const { data: accountData, error: accountError } = await supabase
+      .from("accounts")
+      .select("id, name, code, account_type, is_active")
+      .eq("school_id", schoolId)
+      .eq("account_type", book)
+      .eq("is_active", true)
+      .order("name", { ascending: true });
+
+    if (accountError) throw accountError;
+
+    const loadedAccounts = (accountData || []) as AccountOption[];
+    setAccountOptions(loadedAccounts);
+
+    if (
+      selectedAccountId &&
+      !loadedAccounts.some((account) => account.id === selectedAccountId)
+    ) {
+      setSelectedAccountId("");
+    }
 
   if (!fromDate || !toDate) {
     setError("Please select both From Date and To Date.");
@@ -115,6 +149,7 @@ setError("");
   const { data, error: viewError } = await supabase
     .from(view)
     .select("*")
+    .eq("school_id", schoolId)
     .gte("entry_date", fromDate)
     .lte("entry_date", toDate)
     .order("entry_date", {
@@ -140,15 +175,160 @@ setError("");
     throw rpcError;
   }
 
-  setRows((data || []) as BookRow[]);
+  let loadedRows = (data || []) as BookRow[];
+
+    const referenceIds = Array.from(
+      new Set(
+        loadedRows
+          .map((row) => row.reference_id)
+          .filter(Boolean) as string[],
+      ),
+    );
+
+    if (referenceIds.length > 0) {
+      const { data: paymentData, error: paymentError } = await supabase
+        .from("fee_payments")
+        .select("id, receipt_number, student_id")
+        .eq("school_id", schoolId)
+        .in("id", referenceIds);
+
+      if (paymentError) throw paymentError;
+
+      const paymentMap = new Map(
+        (paymentData || []).map((payment: any) => [
+          payment.id as string,
+          {
+            receiptNumber: payment.receipt_number as string | null,
+            studentId: payment.student_id as string | null,
+          },
+        ]),
+      );
+
+      const studentIds = Array.from(
+        new Set(
+          (paymentData || [])
+            .map((payment: any) => payment.student_id)
+            .filter(Boolean) as string[],
+        ),
+      );
+
+      const studentMap = new Map<
+        string,
+        { name: string; classId: string | null }
+      >();
+
+      if (studentIds.length > 0) {
+        const { data: studentData, error: studentError } = await supabase
+          .from("students")
+          .select("id, first_name, middle_name, last_name, class_id")
+          .eq("school_id", schoolId)
+          .in("id", studentIds);
+
+        if (studentError) throw studentError;
+
+        for (const student of studentData || []) {
+          const name = [
+            student.first_name,
+            student.middle_name,
+            student.last_name,
+          ]
+            .filter(Boolean)
+            .join(" ")
+            .trim();
+
+          studentMap.set(student.id, {
+            name: name || "Student",
+            classId: student.class_id || null,
+          });
+        }
+      }
+
+      const classIds = Array.from(
+        new Set(
+          Array.from(studentMap.values())
+            .map((student) => student.classId)
+            .filter(Boolean) as string[],
+        ),
+      );
+
+      const classMap = new Map<string, string>();
+
+      if (classIds.length > 0) {
+        const { data: classData, error: classError } = await supabase
+          .from("classes")
+          .select("id, name")
+          .eq("school_id", schoolId)
+          .in("id", classIds);
+
+        if (classError) throw classError;
+
+        for (const item of classData || []) {
+          classMap.set(item.id, item.name);
+        }
+      }
+
+      loadedRows = loadedRows.map((row) => {
+        const payment = row.reference_id
+          ? paymentMap.get(row.reference_id)
+          : undefined;
+
+        const student = payment?.studentId
+          ? studentMap.get(payment.studentId)
+          : undefined;
+
+        const className = student?.classId
+          ? classMap.get(student.classId) || ""
+          : "";
+
+        return {
+          ...row,
+          receipt_number: payment?.receiptNumber || null,
+          student_name: student?.name || null,
+          class_name: className || null,
+          particulars_display:
+            student?.name && className
+              ? `${student.name} • ${className}`
+              : student?.name || null,
+        };
+      });
+    }
+
+    setRows(loadedRows);
 
   const rawSummary = Array.isArray(summaryResult)
     ? summaryResult[0]
     : summaryResult;
 
-  const openingBalance = Number(
+  let openingBalance = Number(
     rawSummary?.opening_balance ?? 0
   );
+
+  // When a specific Cash/Bank account is selected, calculate that
+  // account's opening balance independently so switching accounts
+  // also switches the balance figures correctly.
+  if (selectedAccountId) {
+    const { data: openingRows, error: openingError } = await supabase
+      .from(view)
+      .select("cash_in, cash_out, bank_in, bank_out, debit, credit")
+      .eq("school_id", schoolId)
+      .eq("account_id", selectedAccountId)
+      .lt("entry_date", fromDate);
+
+    if (openingError) throw openingError;
+
+    openingBalance = (openingRows || []).reduce((sum: number, row: any) => {
+      const incoming =
+        book === "cash"
+          ? Number(row.cash_in ?? row.debit ?? 0)
+          : Number(row.bank_in ?? row.debit ?? 0);
+      const outgoing =
+        book === "cash"
+          ? Number(row.cash_out ?? row.credit ?? 0)
+          : Number(row.bank_out ?? row.credit ?? 0);
+
+      return sum + incoming - outgoing;
+    }, 0);
+  }
 
   const cashIn = Number(
     rawSummary?.cash_in ?? 0
@@ -198,8 +378,23 @@ setError("");
 }
 
 useEffect(() => {
+const requestedBook = new URLSearchParams(
+  window.location.search,
+).get("book");
+
+if (requestedBook === "cash" || requestedBook === "bank") {
+  const timer = window.setTimeout(
+    () => setBook(requestedBook),
+    0,
+  );
+
+  return () => window.clearTimeout(timer);
+}
+}, []);
+
+useEffect(() => {
 loadBook();
-}, [book, fromDate, toDate]);
+}, [book, fromDate, toDate, selectedAccountId]);
 
 const filteredRows = useMemo(() => {
 const q = search.trim().toLowerCase();
@@ -209,6 +404,10 @@ if (!q) {
 }
 
 return rows.filter((row) => {
+  if (selectedAccountId && row.account_id !== selectedAccountId) {
+    return false;
+  }
+
   return (
     row.entry_id
       ?.toLowerCase()
@@ -224,10 +423,19 @@ return rows.filter((row) => {
       .includes(q) ||
     row.reference_type
       ?.toLowerCase()
+      .includes(q) ||
+    row.receipt_number
+      ?.toLowerCase()
+      .includes(q) ||
+    row.student_name
+      ?.toLowerCase()
+      .includes(q) ||
+    row.class_name
+      ?.toLowerCase()
       .includes(q)
   );
 });
-}, [rows, search]);
+}, [rows, search, selectedAccountId]);
 
 /*
 
@@ -236,7 +444,7 @@ return rows.filter((row) => {
 * Search only filters what is displayed.
   */
 
-const totalIn = rows.reduce((sum, row) => {
+const totalIn = filteredRows.reduce((sum, row) => {
 const amount =
 book === "cash"
 ? Number(row.cash_in ?? row.debit ?? 0)
@@ -246,7 +454,7 @@ return sum + amount;
 
 }, 0);
 
-const totalOut = rows.reduce((sum, row) => {
+const totalOut = filteredRows.reduce((sum, row) => {
 const amount =
 book === "cash"
 ? Number(row.cash_out ?? row.credit ?? 0)
@@ -289,6 +497,7 @@ const data = filteredRows.map((row) => {
   return [
     row.entry_date,
     row.entry_id,
+    row.receipt_number || "",
     row.line_description ||
       row.entry_description ||
       "",
@@ -435,7 +644,7 @@ return ( <main className="min-h-screen bg-slate-50">
 
     <section className="mb-6 rounded-2xl border bg-white p-5">
 
-      <div className="grid gap-4 md:grid-cols-3">
+      <div className="grid gap-4 md:grid-cols-4">
 
         <div>
 
@@ -469,6 +678,26 @@ return ( <main className="min-h-screen bg-slate-50">
             className="w-full rounded-lg border border-slate-300 px-3 py-2.5 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
           />
 
+        </div>
+
+        <div>
+          <label className="mb-1 block text-sm font-medium text-slate-700">
+            {book === "cash" ? "Cash Account" : "Bank Account"}
+          </label>
+          <select
+            value={selectedAccountId}
+            onChange={(e) => setSelectedAccountId(e.target.value)}
+            className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+          >
+            <option value="">
+              All {book === "cash" ? "Cash" : "Bank"} Accounts
+            </option>
+            {accountOptions.map((account) => (
+              <option key={account.id} value={account.id}>
+                {account.name}{account.code ? ` (${account.code})` : ""}
+              </option>
+            ))}
+          </select>
         </div>
 
         <div>
@@ -662,6 +891,10 @@ return ( <main className="min-h-screen bg-slate-50">
                 </th>
 
                 <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500">
+                  Receipt No.
+                </th>
+
+                <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500">
                   Particulars
                 </th>
 
@@ -725,6 +958,7 @@ return ( <main className="min-h-screen bg-slate-50">
                         0
                     ) +
                     rows
+                      .filter((r) => !selectedAccountId || r.account_id === selectedAccountId)
                       .slice(
                         0,
                         Math.max(rowIndex, 0)
@@ -800,10 +1034,17 @@ return ( <main className="min-h-screen bg-slate-50">
                       </td>
 
                       <td className="px-5 py-4">
+                        <span className="font-mono text-xs font-semibold text-blue-700">
+                          {row.receipt_number || "-"}
+                        </span>
+                      </td>
+
+                      <td className="px-5 py-4">
 
                         <div className="font-medium text-slate-900">
 
-                          {row.line_description ||
+                          {row.particulars_display ||
+                            row.line_description ||
                             row.entry_description ||
                             "Accounting Entry"}
 
@@ -811,9 +1052,11 @@ return ( <main className="min-h-screen bg-slate-50">
 
                         <div className="mt-1 text-xs text-slate-500">
 
-                          {row.reference_type ||
-                            row.entry_type ||
-                            "-"}
+                          {row.receipt_number
+                            ? `Receipt No. ${row.receipt_number}`
+                            : row.reference_type ||
+                              row.entry_type ||
+                              "-"}
 
                         </div>
 

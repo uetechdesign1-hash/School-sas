@@ -45,6 +45,7 @@ export default function NewStudentPage() {
   const [dateOfBirth, setDateOfBirth] = useState("");
   const [gender, setGender] = useState<Gender | "">("");
   const [admissionDate, setAdmissionDate] = useState("");
+  const [admissionFee, setAdmissionFee] = useState("");
   const [status, setStatus] = useState<StudentStatus>("active");
   const [bloodGroup, setBloodGroup] = useState("");
 
@@ -276,15 +277,52 @@ export default function NewStudentPage() {
         notes: notes.trim() || null,
       };
 
-      const { error: insertError } = await supabase
+      const admissionFeeAmount = Number(admissionFee || 0);
+      if (!Number.isFinite(admissionFeeAmount) || admissionFeeAmount < 0) {
+        setError("Admission fee must be zero or a valid positive amount.");
+        return;
+      }
+
+      const { data: createdStudent, error: insertError } = await supabase
         .from("students")
-        .insert(student);
+        .insert(student)
+        .select("id, first_name, last_name")
+        .single();
 
       if (insertError) {
         throw insertError;
       }
 
-      router.replace("/dashboard/students");
+      if (!createdStudent?.id) {
+        throw new Error("Student was created but no student ID was returned.");
+      }
+
+      if (admissionFeeAmount > 0) {
+        const { error: admissionBillError } = await supabase.rpc(
+          "create_student_fee_bill",
+          {
+            p_student_id: createdStudent.id,
+            p_description: "Admission Fee",
+            p_amount: admissionFeeAmount,
+            p_discount: 0,
+            p_bill_date: admissionDate || new Date().toISOString().slice(0, 10),
+            p_due_date: null,
+            p_fee_structure_id: null,
+          },
+        );
+
+        if (admissionBillError) {
+          throw new Error(
+            `Student was created, but the admission fee bill could not be created: ${admissionBillError.message}`,
+          );
+        }
+      }
+
+      router.replace(
+        admissionFeeAmount > 0
+          ? `/dashboard/students/${createdStudent.id}/fees`
+          : "/dashboard/students",
+      );
       router.refresh();
     } catch (createError) {
       console.error("CREATE STUDENT ERROR:", createError);
@@ -408,6 +446,21 @@ export default function NewStudentPage() {
                   onChange={(event) => setAdmissionDate(event.target.value)}
                   className={inputClass}
                 />
+              </Field>
+
+              <Field label="Admission Fee">
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={admissionFee}
+                  onChange={(event) => setAdmissionFee(event.target.value)}
+                  placeholder="0.00"
+                  className={inputClass}
+                />
+                <p className="mt-1 text-xs text-slate-500">
+                  Leave blank or enter 0 if no admission fee is due.
+                </p>
               </Field>
 
               <Field label="Status">

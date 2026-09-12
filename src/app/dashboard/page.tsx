@@ -69,7 +69,8 @@ type QuickActionProps = {
 const ACCOUNTING_ROUTES = {
   accounts: "/accounting/accounts",
   openingBalance: "/accounting/opening-balance",
-  cashBank: "/accounting/cash-bank",
+  cashBook: "/accounting/cash-bank?book=cash",
+  bankBook: "/accounting/cash-bank?book=bank",
   receipt: "/accounting/receipt",
   payment: "/accounting/payment",
   contra: "/accounting/contra",
@@ -700,14 +701,14 @@ export default function DashboardPage() {
               />
 
               <AccountingShortcut
-                href={ACCOUNTING_ROUTES.cashBank}
+                href={ACCOUNTING_ROUTES.cashBook}
                 icon={<Wallet size={19} />}
                 title="Cash Book"
                 description="View cash receipts and payments"
               />
 
               <AccountingShortcut
-                href={ACCOUNTING_ROUTES.cashBank}
+                href={ACCOUNTING_ROUTES.bankBook}
                 icon={<Landmark size={19} />}
                 title="Bank Book"
                 description="View bank and UPI transactions"

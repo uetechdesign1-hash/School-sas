@@ -68,13 +68,13 @@ const reportGroups: {
       {
         title: "Cash Book",
         description: "View cash receipts, payments and running balance.",
-        href: "/accounting/cash-book",
+        href: "/accounting/cash-bank?book=cash",
         icon: <Banknote size={21} />,
       },
       {
         title: "Bank Book",
         description: "View bank transactions and running balance.",
-        href: "/accounting/bank-book",
+        href: "/accounting/cash-bank?book=bank",
         icon: <Landmark size={21} />,
       },
       {
