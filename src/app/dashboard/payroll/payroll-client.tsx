@@ -205,7 +205,7 @@ function calculate(
   holiday: number,
 ) {
   if (!salary) {
-    return { payable: 0, unpaid: workingDays, gross: 0, deductions: 0, net: 0 };
+    return { payable: 0, unpaid: workingDays, gross: 0, lop: 0, deductions: 0, net: 0 };
   }
 
   const wd = Math.max(0, n(workingDays));

@@ -299,6 +299,7 @@ export default function StudentsPage() {
         academic_year_id: string | null;
         total_amount: number;
         paid_amount: number;
+        balance_amount: number;
       }>;
 
       const concessions = (feeConcessionsResult.data || []) as Array<{

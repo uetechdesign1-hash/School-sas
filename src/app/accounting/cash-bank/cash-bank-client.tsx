@@ -36,6 +36,10 @@ cash_out?: number;
 bank_in?: number;
 bank_out?: number;
 line_description: string | null;
+receipt_number?: string | null;
+student_name?: string | null;
+class_name?: string | null;
+particulars_display?: string | null;
 created_at: string;
 };
 

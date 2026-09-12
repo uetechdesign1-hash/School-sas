@@ -28,6 +28,7 @@ import {
 
 import { createClient } from "@/lib/supabase/client";
 import { getCurrentSchoolId } from "@/lib/supabase/current-school";
+import { generateReceiptPDF } from "@/lib/fees/generateReceipt";
 
 type ReceiptType = "student_fee" | "other_income";
 
@@ -1004,7 +1005,7 @@ export default function ReceiptPage() {
         ? sectionMap.get(student.section_id) || ""
         : "";
 
-      const categoryAmounts = paymentCategoryAmountMap.get(payment.id);
+      const categoryAmounts = payment ? paymentCategoryAmountMap.get(payment.id) : undefined;
       const feeCategoryAmounts = categories.map((description) => ({
         description,
         amount: Number(categoryAmounts?.get(description) || 0),
@@ -2107,14 +2108,8 @@ export default function ReceiptPage() {
             transaction_date: receiptDate,
             transaction_type: "income",
             description,
-            reference_type:
-              receiptType === "student_fee"
-                ? "fee_payment"
-                : "accounting_receipt",
-            reference_id:
-              receiptType === "student_fee"
-                ? paymentId
-                : null,
+            reference_type: "accounting_receipt",
+            reference_id: null,
             created_by: userId,
           })
           .select(
@@ -2156,10 +2151,7 @@ export default function ReceiptPage() {
           account_id: incomeAccount!.id,
           debit: 0,
           credit: numericAmount,
-          description:
-            receiptType === "student_fee"
-              ? `Fee income - Bill ${manualBillNumber.trim()} - Receipt ${manualReceiptNumber.trim()}`
-              : `Income - ${particulars.trim()}`,
+          description: `Income - ${particulars.trim()}`,
         },
       ];
 

@@ -21,6 +21,10 @@ export type ReceiptData = {
 
   billNumber: string;
   feeDescription: string;
+
+  // Student + class + fee categories line, printed below student details.
+  particulars?: string | null;
+
   feeItems?: ReceiptFeeItem[];
 
   amount: number;
@@ -206,6 +210,23 @@ export function generateReceiptPDF(data: ReceiptData) {
   pdf.text(safeText(data.admissionNumber), admissionX, y);
   pdf.text(safeText(data.className), classX, y);
   pdf.text(safeText(data.section), sectionX, y);
+
+  if (data.particulars) {
+    const particularsText = pdf
+      .splitTextToSize(safeText(data.particulars), 150)
+      .slice(0, 1);
+
+    if (particularsText.length > 0) {
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(4.8);
+      pdf.text("PARTICULARS", left, y + 3.6);
+      pdf.setFont("helvetica", "normal");
+      pdf.setFontSize(5.8);
+      pdf.text(particularsText, left + 23, y + 3.6);
+    }
+
+    y += 3.4;
+  }
 
   y += 7;
 
