@@ -40,6 +40,11 @@ receipt_number?: string | null;
 student_name?: string | null;
 class_name?: string | null;
 particulars_display?: string | null;
+vendor_payment_id?: string | null;
+vendor_bill_number?: string | null;
+vendor_payment_ref?: string | null;
+vendor_name?: string | null;
+vendor_id?: string | null;
 created_at: string;
 };
 
@@ -189,6 +194,16 @@ const schoolId = await getCurrentSchoolId();
       ),
     );
 
+    // Collect vendor payment IDs for vendor enrichment
+    const vendorPaymentIds = Array.from(
+      new Set(
+        loadedRows
+          .filter((row) => row.reference_type === "vendor_payment")
+          .map((row) => row.reference_id)
+          .filter(Boolean) as string[],
+      ),
+    );
+
     if (referenceIds.length > 0) {
       const { data: paymentData, error: paymentError } = await supabase
         .from("fee_payments")
@@ -284,6 +299,12 @@ const schoolId = await getCurrentSchoolId();
           ? classMap.get(student.classId) || ""
           : "";
 
+        // Vendor payment enrichment
+        const isVendorPayment = row.reference_type === "vendor_payment";
+        const vendorName = isVendorPayment && row.vendor_name ? row.vendor_name : null;
+        const billNumber = isVendorPayment && row.vendor_bill_number ? row.vendor_bill_number : null;
+        const paymentRef = isVendorPayment && row.vendor_payment_ref ? row.vendor_payment_ref : null;
+
         return {
           ...row,
           receipt_number: payment?.receiptNumber || null,
@@ -293,6 +314,9 @@ const schoolId = await getCurrentSchoolId();
             student?.name && className
               ? `${student.name} • ${className}`
               : student?.name || null,
+          vendor_name: vendorName,
+          vendor_bill_number: billNumber,
+          vendor_payment_ref: paymentRef,
         };
       });
     }

@@ -52,10 +52,17 @@ select
   a.id as account_id, a.code as account_code, a.name as account_name,
   jl.debit::numeric, jl.credit::numeric, jl.debit::numeric as cash_in, jl.credit::numeric as cash_out,
   null::numeric as bank_in, null::numeric as bank_out,
-  jl.description as line_description, jl.created_at
+  jl.description as line_description, jl.created_at,
+  vp.id as vendor_payment_id,
+  vp.bill_number as vendor_bill_number,
+  vp.reference_number as vendor_payment_ref,
+  v.name as vendor_name,
+  v.id as vendor_id
 from public.journal_entries je
 join public.journal_lines jl on jl.journal_entry_id = je.id and jl.school_id = je.school_id
 join public.accounts a on a.id = jl.account_id and a.school_id = je.school_id
+left join public.vendor_payments vp on vp.id = je.reference_id and vp.school_id = je.school_id and je.reference_type = 'vendor_payment'
+left join public.vendors v on v.id = vp.vendor_id and v.school_id = je.school_id
 where a.account_type = 'cash' and a.is_active = true
 union all
 select
@@ -63,7 +70,12 @@ select
   t.transaction_date, t.transaction_type::text, t.reference_type, t.reference_id,
   t.description, te.id, a.id, a.code, a.name,
   te.debit::numeric, te.credit::numeric, te.debit::numeric, te.credit::numeric,
-  null::numeric, null::numeric, te.description, te.created_at
+  null::numeric, null::numeric, te.description, te.created_at,
+  null as vendor_payment_id,
+  null as vendor_bill_number,
+  null as vendor_payment_ref,
+  null as vendor_name,
+  null as vendor_id
 from public.transactions t
 join public.transaction_entries te on te.transaction_id = t.id and te.school_id = t.school_id
 join public.accounts a on a.id = te.account_id and a.school_id = t.school_id
@@ -77,10 +89,17 @@ select
   a.id as account_id, a.code as account_code, a.name as account_name,
   jl.debit::numeric, jl.credit::numeric, null::numeric as cash_in, null::numeric as cash_out,
   jl.debit::numeric as bank_in, jl.credit::numeric as bank_out,
-  jl.description as line_description, jl.created_at
+  jl.description as line_description, jl.created_at,
+  vp.id as vendor_payment_id,
+  vp.bill_number as vendor_bill_number,
+  vp.reference_number as vendor_payment_ref,
+  v.name as vendor_name,
+  v.id as vendor_id
 from public.journal_entries je
 join public.journal_lines jl on jl.journal_entry_id = je.id and jl.school_id = je.school_id
 join public.accounts a on a.id = jl.account_id and a.school_id = je.school_id
+left join public.vendor_payments vp on vp.id = je.reference_id and vp.school_id = je.school_id and je.reference_type = 'vendor_payment'
+left join public.vendors v on v.id = vp.vendor_id and v.school_id = je.school_id
 where a.account_type = 'bank' and a.is_active = true
 union all
 select
@@ -88,7 +107,12 @@ select
   t.transaction_date, t.transaction_type::text, t.reference_type, t.reference_id,
   t.description, te.id, a.id, a.code, a.name,
   te.debit::numeric, te.credit::numeric, null::numeric, null::numeric,
-  te.debit::numeric, te.credit::numeric, te.description, te.created_at
+  te.debit::numeric, te.credit::numeric, te.description, te.created_at,
+  null as vendor_payment_id,
+  null as vendor_bill_number,
+  null as vendor_payment_ref,
+  null as vendor_name,
+  null as vendor_id
 from public.transactions t
 join public.transaction_entries te on te.transaction_id = t.id and te.school_id = t.school_id
 join public.accounts a on a.id = te.account_id and a.school_id = t.school_id
