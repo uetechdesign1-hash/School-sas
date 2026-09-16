@@ -313,7 +313,14 @@ const schoolId = await getCurrentSchoolId();
           particulars_display:
             student?.name && className
               ? `${student.name} • ${className}`
-              : student?.name || null,
+              : student?.name ||
+                (isVendorPayment && vendorName && billNumber
+                  ? `${vendorName} • ${billNumber}`
+                  : isVendorPayment && vendorName
+                    ? vendorName
+                    : isVendorPayment && billNumber
+                      ? billNumber
+                      : null),
           vendor_name: vendorName,
           vendor_bill_number: billNumber,
           vendor_payment_ref: paymentRef,
