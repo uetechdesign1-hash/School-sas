@@ -437,7 +437,7 @@ export async function postSalaryPaymentJournal(
         accountId: input.paymentAccountId,
         debit: 0,
         credit: Number(input.amount || 0),
-        description: "Cash / bank disbursement",
+        description: "Salary paid from cash or bank",
       },
     ],
   });
@@ -584,4 +584,107 @@ export function buildLegacyCompatibilitySummary() {
     canonicalTables: ["journal_entries", "journal_lines", "accounts", "opening_balances", "accounting_events"],
     rule: "Reports must read canonical accounting data only; legacy tables are retained for historical compatibility and reconciliation only.",
   };
+}
+
+export async function postPurchaseBillJournal(
+  supabase: SupabaseClient,
+  input: {
+    schoolId: string;
+    fiscalYearId: string;
+    entryDate: string;
+    sourceRecordId: string;
+    expenseLines: {
+      accountId: string;
+      amount: number;
+      description?: string;
+    }[];
+    vendorPayablesAccountId: string;
+    totalAmount: number;
+    createdBy?: string | null;
+  },
+) {
+  return postCanonicalJournalEntry(supabase, {
+    schoolId: input.schoolId,
+    fiscalYearId: input.fiscalYearId,
+    entryDate: input.entryDate,
+    description: "Purchase bill",
+    entryType: "GENERAL",
+    sourceModule: "vendor_purchases",
+    sourceTable: "purchase_bills",
+    sourceRecordId: input.sourceRecordId,
+    referenceType: "purchase_bill",
+    referenceId: input.sourceRecordId,
+    createdBy: input.createdBy ?? null,
+    lines: [
+      ...input.expenseLines
+        .filter(
+          (line) =>
+            line.accountId && Number(line.amount || 0) > 0,
+        )
+        .map((line) => ({
+          accountId: line.accountId,
+          debit: Number(line.amount || 0),
+          credit: 0,
+          description: line.description || "Purchase expense",
+        })),
+      {
+        accountId: input.vendorPayablesAccountId,
+        debit: 0,
+        credit: Number(input.totalAmount || 0),
+        description: "Vendor payables",
+      },
+    ],
+  });
+}
+
+export async function postVendorPaymentJournal(
+  supabase: SupabaseClient,
+  input: {
+    schoolId: string;
+    fiscalYearId: string;
+    entryDate: string;
+    sourceRecordId: string;
+    vendorPayablesAccountId: string;
+    paymentAccountId: string;
+    amount: number;
+    createdBy?: string | null;
+    vendorName?: string | null;
+    paymentReference?: string | null;
+    paymentNotes?: string | null;
+  },
+) {
+  const vendorLabel = input.vendorName || "Vendor";
+  const reference =
+    input.paymentReference || input.paymentNotes || "";
+  const paymentDescription = reference
+    ? `Payment to ${vendorLabel} - ${reference}`
+    : `Payment to ${vendorLabel}`;
+
+  return postCanonicalJournalEntry(supabase, {
+    schoolId: input.schoolId,
+    fiscalYearId: input.fiscalYearId,
+    entryDate: input.entryDate,
+    description: paymentDescription,
+    entryType: "PAYMENT",
+    sourceModule: "vendor_purchases",
+    sourceTable: "vendor_payments",
+    sourceRecordId: input.sourceRecordId,
+    referenceType: "vendor_payment",
+    referenceId: input.sourceRecordId,
+    createdBy: input.createdBy ?? null,
+    lines: [
+      {
+        accountId: input.vendorPayablesAccountId,
+        debit: Number(input.amount || 0),
+        credit: 0,
+        description: `Vendor payable settled - ${vendorLabel}`,
+      },
+      {
+        accountId: input.paymentAccountId,
+        debit: 0,
+        credit: Number(input.amount || 0),
+        description: paymentDescription,
+      },
+    ],
+  });
 }
