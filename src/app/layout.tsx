@@ -1,6 +1,7 @@
 ﻿import type { Metadata } from "next";
 import "./globals.css";
 import SchoolAccessGuard from "@/components/auth/SchoolAccessGuard";
+import EduNexaChat from "@/components/chat/EduNexaChat";
 
 export const metadata: Metadata = {
   title: "EduNexa | Complete School Management Platform",
@@ -17,6 +18,7 @@ export default function RootLayout({
     <html lang="en">
       <body>
         <SchoolAccessGuard>{children}</SchoolAccessGuard>
+        <EduNexaChat />
       </body>
     </html>
   );

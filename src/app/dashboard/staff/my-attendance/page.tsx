@@ -7,6 +7,7 @@ import { createClient } from "@/lib/supabase/client";
 
 type Staff = {
   id: string;
+  school_id: string;
   first_name: string | null;
   middle_name: string | null;
   last_name: string | null;
@@ -24,6 +25,49 @@ type Attendance = {
   is_late: boolean | null;
   is_early_checkout: boolean | null;
 };
+
+type AttendanceOverride = {
+  id: string;
+  staff_id: string;
+  attendance_date: string;
+  status: "present" | "absent" | "holiday" | "week_off" | "half_day" | "paid_leave";
+  notes: string | null;
+};
+
+type SchoolCalendarEntry = {
+  attendance_date: string;
+  type: "holiday" | "week_off" | "working_day";
+  title: string | null;
+};
+
+function dateKey(value: Date) {
+  return value.toISOString().slice(0, 10);
+}
+
+function addDays(value: Date, amount: number) {
+  const next = new Date(value);
+  next.setDate(next.getDate() + amount);
+  return next;
+}
+
+function formatEffectiveStatus(status: string) {
+  switch (status) {
+    case "present":
+      return "Present";
+    case "absent":
+      return "Absent";
+    case "half_day":
+      return "Half Day";
+    case "paid_leave":
+      return "Casual Leave";
+    case "holiday":
+      return "Holiday";
+    case "week_off":
+      return "Week Off";
+    default:
+      return "Absent";
+  }
+}
 
 function formatName(staff: Staff) {
   return [
@@ -92,6 +136,21 @@ export default function StaffAttendanceHistoryPage() {
   const [attendance, setAttendance] =
     useState<Attendance[]>([]);
 
+  const [overrides, setOverrides] =
+    useState<AttendanceOverride[]>([]);
+
+  const [calendarEntries, setCalendarEntries] =
+    useState<SchoolCalendarEntry[]>([]);
+
+  const [weeklyOffDay, setWeeklyOffDay] =
+    useState(0);
+
+  const [selectedMonth, setSelectedMonth] =
+    useState(() => {
+      const now = new Date();
+      return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    });
+
   const [loading, setLoading] =
     useState(true);
 
@@ -125,6 +184,7 @@ export default function StaffAttendanceHistoryPage() {
             .select(
               `
                 id,
+                school_id,
                 first_name,
                 middle_name,
                 last_name
@@ -147,6 +207,12 @@ export default function StaffAttendanceHistoryPage() {
         }
 
         setStaff(staffRow);
+
+        const [selectedYear, selectedMonthNumber] =
+          selectedMonth.split("-").map(Number);
+        const firstDate = `${selectedMonth}-01`;
+        const lastDay = new Date(selectedYear, selectedMonthNumber, 0).getDate();
+        const lastDate = `${selectedMonth}-${String(lastDay).padStart(2, "0")}`;
 
         const {
           data: rows,
@@ -172,6 +238,8 @@ export default function StaffAttendanceHistoryPage() {
               "staff_id",
               staffRow.id
             )
+            .gte("attendance_date", firstDate)
+            .lte("attendance_date", lastDate)
             .order(
               "attendance_date",
               {
@@ -184,9 +252,75 @@ export default function StaffAttendanceHistoryPage() {
           throw attendanceError;
         }
 
-        setAttendance(
-          rows || []
-        );
+        const {
+          data: overrideRows,
+          error: overrideError,
+        } =
+          await supabase
+            .from("staff_attendance_overrides")
+            .select(
+              "id, staff_id, attendance_date, status, notes"
+            )
+            .eq(
+              "staff_id",
+              staffRow.id
+            )
+            .gte("attendance_date", firstDate)
+            .lte("attendance_date", lastDate)
+            .order(
+              "attendance_date",
+              {
+                ascending: false,
+              }
+            );
+
+        if (overrideError) {
+          throw overrideError;
+        }
+
+        const {
+          data: calendarRows,
+          error: calendarError,
+        } =
+          await supabase
+            .from("school_attendance_calendar")
+            .select(
+              "attendance_date, type, title"
+            )
+            .gte("attendance_date", firstDate)
+            .lte("attendance_date", lastDate)
+            .order(
+              "attendance_date",
+              {
+                ascending: true,
+              }
+            );
+
+        if (calendarError) {
+          throw calendarError;
+        }
+
+        const {
+          data: settingsRow,
+          error: settingsError,
+        } =
+          await supabase
+            .from("school_attendance_settings")
+            .select("weekly_off_day")
+            .eq(
+              "school_id",
+              staffRow.school_id
+            )
+            .maybeSingle();
+
+        if (settingsError) {
+          throw settingsError;
+        }
+
+        setAttendance(rows || []);
+        setOverrides((overrideRows || []) as AttendanceOverride[]);
+        setCalendarEntries((calendarRows || []) as SchoolCalendarEntry[]);
+        setWeeklyOffDay(Number(settingsRow?.weekly_off_day ?? 0));
       } catch (err: any) {
         console.error(
           "ATTENDANCE HISTORY ERROR:",
@@ -203,7 +337,82 @@ export default function StaffAttendanceHistoryPage() {
     }
 
     load();
-  }, [supabase]);
+  }, [selectedMonth, supabase]);
+
+  const effectiveRows = useMemo(() => {
+    const attendanceMap = new Map(
+      attendance.map((row) => [row.attendance_date, row]),
+    );
+
+    const overrideMap = new Map(
+      overrides.map((row) => [row.attendance_date, row]),
+    );
+
+    const calendarMap = new Map(
+      calendarEntries.map((row) => [row.attendance_date, row]),
+    );
+
+    const [selectedYear, selectedMonthNumber] =
+      selectedMonth.split("-").map(Number);
+    const from = new Date(selectedYear, selectedMonthNumber - 1, 1);
+    const to = new Date(selectedYear, selectedMonthNumber, 0);
+    const rows: Array<Attendance & { effectiveStatus: string; source: string; synthetic: boolean }> = [];
+
+    for (let cursor = from; cursor <= to; cursor = addDays(cursor, 1)) {
+      const date = dateKey(cursor);
+      const actual = attendanceMap.get(date);
+      const override = overrideMap.get(date);
+      const calendar = calendarMap.get(date);
+
+      let effectiveStatus: string;
+      let source: string;
+
+      if (override) {
+        effectiveStatus = override.status;
+        source = "Admin override";
+      } else if (actual) {
+        effectiveStatus =
+          actual.status === "half_day" ||
+          actual.status === "late" ||
+          actual.is_late
+            ? "half_day"
+            : actual.status === "absent"
+              ? "absent"
+              : "present";
+        source = "GPS attendance";
+      } else if (calendar?.type === "holiday") {
+        effectiveStatus = "holiday";
+        source = "School calendar";
+      } else if (calendar?.type === "week_off") {
+        effectiveStatus = "week_off";
+        source = "School calendar";
+      } else if (cursor.getDay() === weeklyOffDay) {
+        effectiveStatus = "week_off";
+        source = "Weekly off";
+      } else {
+        effectiveStatus = "absent";
+        source = "No check-in";
+      }
+
+      rows.push({
+        id: actual?.id || `missing-${date}`,
+        attendance_date: date,
+        status: actual?.status || effectiveStatus,
+        check_in_at: actual?.check_in_at || null,
+        check_out_at: actual?.check_out_at || null,
+        working_minutes: actual?.working_minutes || null,
+        check_in_distance_meters: actual?.check_in_distance_meters || null,
+        check_out_distance_meters: actual?.check_out_distance_meters || null,
+        is_late: actual?.is_late || false,
+        is_early_checkout: actual?.is_early_checkout || false,
+        effectiveStatus,
+        source,
+        synthetic: !actual,
+      });
+    }
+
+    return rows.reverse();
+  }, [attendance, overrides, calendarEntries, weeklyOffDay, selectedMonth]);
 
   if (loading) {
     return (
@@ -237,16 +446,30 @@ export default function StaffAttendanceHistoryPage() {
             Attendance History
           </h1>
 
-          <p className="mt-1 text-sm text-slate-500">
-            {staff
-              ? formatName(staff)
-              : "Staff Member"}
-          </p>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+            <p className="mt-1 text-sm text-slate-500">
+              {staff
+                ? formatName(staff)
+                : "Staff Member"}
+            </p>
+
+            <div>
+              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Month & Year
+              </label>
+              <input
+                type="month"
+                value={selectedMonth}
+                onChange={(event) => setSelectedMonth(event.target.value)}
+                className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 outline-none focus:border-blue-500"
+              />
+            </div>
+          </div>
         </div>
 
         <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
 
-          {attendance.length === 0 ? (
+          {effectiveRows.length === 0 ? (
             <div className="p-12 text-center">
 
               <CalendarDays className="mx-auto h-10 w-10 text-slate-300" />
@@ -296,7 +519,7 @@ export default function StaffAttendanceHistoryPage() {
 
                   <tbody className="divide-y divide-slate-100">
 
-                    {attendance.map(
+                    {effectiveRows.map(
                       (row) => (
                         <tr key={row.id}>
 
@@ -326,16 +549,32 @@ export default function StaffAttendanceHistoryPage() {
 
                           <td className="px-5 py-4">
 
-                            <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold capitalize text-emerald-700">
-                              {String(
-                                row.status || "present"
-                              ).replaceAll(
-                                "_",
-                                " "
-                              )}
+                            <span
+                              className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                                row.effectiveStatus === "present"
+                                  ? "bg-emerald-50 text-emerald-700"
+                                  : row.effectiveStatus === "absent"
+                                    ? "bg-red-50 text-red-700"
+                                    : row.effectiveStatus === "half_day"
+                                      ? "bg-violet-50 text-violet-700"
+                                      : row.effectiveStatus === "holiday"
+                                        ? "bg-amber-50 text-amber-700"
+                                        : row.effectiveStatus === "week_off"
+                                          ? "bg-slate-100 text-slate-700"
+                                          : "bg-sky-50 text-sky-700"
+                              }`}
+                              title={row.source}
+                            >
+                              {formatEffectiveStatus(row.effectiveStatus)}
                             </span>
 
-                            {row.is_late && (
+                            {row.source !== "GPS attendance" && (
+                              <span className="ml-2 rounded-full bg-slate-100 px-2 py-1 text-[10px] font-semibold text-slate-500">
+                                {row.source}
+                              </span>
+                            )}
+
+                            {row.is_late && row.effectiveStatus === "half_day" && (
                               <span className="ml-2 rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700">
                                 Late
                               </span>
@@ -357,7 +596,7 @@ export default function StaffAttendanceHistoryPage() {
 
               <div className="divide-y divide-slate-100 md:hidden">
 
-                {attendance.map(
+                {effectiveRows.map(
                   (row) => (
                     <div
                       key={row.id}
@@ -373,13 +612,13 @@ export default function StaffAttendanceHistoryPage() {
                             )}
                           </p>
 
-                          <p className="mt-1 text-xs capitalize text-slate-500">
-                            {String(
-                              row.status || "present"
-                            ).replaceAll(
-                              "_",
-                              " "
-                            )}
+                          <p className="mt-1 text-xs text-slate-500">
+                            <span className="font-semibold">
+                              {formatEffectiveStatus(row.effectiveStatus)}
+                            </span>
+                            <span className="ml-2">
+                              • {row.source}
+                            </span>
                           </p>
                         </div>
 
@@ -430,6 +669,12 @@ export default function StaffAttendanceHistoryPage() {
                         </div>
 
                       </div>
+
+                      {row.synthetic && row.effectiveStatus === "absent" && (
+                        <div className="mt-3 text-xs font-semibold text-red-600">
+                          No check-in recorded for this working day.
+                        </div>
+                      )}
 
                       {(row.check_in_distance_meters !== null ||
                         row.check_out_distance_meters !== null) && (

@@ -1,511 +1,474 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import {
-  CheckCircle2,
-  Clock3,
-  Loader2,
-  LogIn,
-  LogOut,
-  MapPin,
-  ShieldCheck,
-} from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { CalendarDays, Clock3, MapPin } from "lucide-react";
 
 import { createClient } from "@/lib/supabase/client";
+
+type Staff = {
+  id: string;
+  first_name: string | null;
+  middle_name: string | null;
+  last_name: string | null;
+};
 
 type Attendance = {
   id: string;
   attendance_date: string;
-  status: "present" | "absent" | "late" | "half_day";
+  status: string;
   check_in_at: string | null;
   check_out_at: string | null;
   working_minutes: number | null;
-  is_late: boolean;
-  is_early_checkout: boolean;
   check_in_distance_meters: number | null;
   check_out_distance_meters: number | null;
+  is_late: boolean | null;
+  is_early_checkout: boolean | null;
 };
+
+type AttendanceOverride = {
+  id: string; attendance_date: string;
+  status: "present" | "absent" | "holiday" | "week_off" | "half_day" | "paid_leave";
+  notes: string | null;
+};
+
+function formatName(staff: Staff) {
+  return [
+    staff.first_name,
+    staff.middle_name,
+    staff.last_name,
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
 
 function formatTime(value: string | null) {
   if (!value) return "—";
 
-  return new Intl.DateTimeFormat("en-IN", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: true,
-  }).format(new Date(value));
+  return new Date(value).toLocaleTimeString(
+    "en-IN",
+    {
+      hour: "2-digit",
+      minute: "2-digit",
+    }
+  );
+}
+
+function formatDate(value: string) {
+  return new Date(
+    `${value}T00:00:00`
+  ).toLocaleDateString(
+    "en-IN",
+    {
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+    }
+  );
 }
 
 function formatMinutes(minutes: number | null) {
-  if (minutes == null) return "—";
+  if (
+    minutes === null ||
+    minutes === undefined
+  ) {
+    return "—";
+  }
 
-  const hours = Math.floor(minutes / 60);
+  const hours = Math.floor(
+    minutes / 60
+  );
+
   const mins = minutes % 60;
 
-  return `${hours}h ${mins}m`;
+  return `${hours}h ${String(mins).padStart(
+    2,
+    "0"
+  )}m`;
 }
 
-export default function StaffAttendancePage() {
-  const supabase = createClient();
+export default function StaffAttendanceHistoryPage() {
+  const supabase = useMemo(
+    () => createClient(),
+    []
+  );
+
+  const [staff, setStaff] =
+    useState<Staff | null>(null);
 
   const [attendance, setAttendance] =
-    useState<Attendance | null>(null);
+    useState<Attendance[]>([]);
 
-  const [loading, setLoading] = useState(true);
-  const [processing, setProcessing] = useState(false);
-  const [locationLoading, setLocationLoading] = useState(false);
+  const [overrides, setOverrides] = useState<AttendanceOverride[]>([]);
 
-  const [error, setError] = useState("");
-  const [success, setSuccess] = useState("");
+  const [loading, setLoading] =
+    useState(true);
+
+  const [error, setError] =
+    useState("");
 
   useEffect(() => {
-    void loadToday();
-  }, []);
+    async function load() {
+      try {
+        setLoading(true);
+        setError("");
 
-  async function getSchoolId() {
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
+        const {
+          data: {
+            user,
+          },
+        } =
+          await supabase.auth.getUser();
 
-    if (!user) {
-      window.location.assign("/login");
-      return null;
-    }
+        if (!user) {
+          window.location.href = "/login";
+          return;
+        }
 
-    const { data, error } = await supabase
-      .from("school_users")
-      .select("school_id")
-      .eq("user_id", user.id)
-      .eq("is_active", true)
-      .limit(1)
-      .maybeSingle();
+        const {
+          data: staffRow,
+          error: staffError,
+        } =
+          await supabase
+            .from("staff")
+            .select(
+              `
+                id,
+                first_name,
+                middle_name,
+                last_name
+              `
+            )
+            .eq(
+              "user_id",
+              user.id
+            )
+            .maybeSingle();
 
-    if (error) throw error;
+        if (staffError) {
+          throw staffError;
+        }
 
-    if (!data?.school_id) {
-      throw new Error(
-        "Your account is not assigned to an active school.",
-      );
-    }
+        if (!staffRow) {
+          throw new Error(
+            "Your login is not linked to a staff member."
+          );
+        }
 
-    return data.school_id;
-  }
+        setStaff(staffRow);
 
-  async function loadToday() {
-    try {
-      setLoading(true);
-      setError("");
+        const {
+          data: rows,
+          error: attendanceError,
+        } =
+          await supabase
+            .from("staff_attendance")
+            .select(
+              `
+                id,
+                attendance_date,
+                status,
+                check_in_at,
+                check_out_at,
+                working_minutes,
+                check_in_distance_meters,
+                check_out_distance_meters,
+                is_late,
+                is_early_checkout
+              `
+            )
+            .eq(
+              "staff_id",
+              staffRow.id
+            )
+            .order(
+              "attendance_date",
+              {
+                ascending: false,
+              }
+            )
+            .limit(100);
 
-      const schoolId = await getSchoolId();
+        if (attendanceError) {
+          throw attendanceError;
+        }
 
-      if (!schoolId) return;
+        setAttendance(rows || []);
 
-      /*
-       * We intentionally do not query by staff_id here.
-       * RLS determines whether this authenticated staff member
-       * can see the record.
-       */
-      const today = new Date().toISOString().slice(0, 10);
-
-      const { data, error } = await supabase
-        .from("staff_attendance")
-        .select(
-          `
-            id,
-            attendance_date,
-            status,
-            check_in_at,
-            check_out_at,
-            working_minutes,
-            is_late,
-            is_early_checkout,
-            check_in_distance_meters,
-            check_out_distance_meters
-          `,
-        )
-        .eq("school_id", schoolId)
-        .eq("attendance_date", today)
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-
-      if (error) throw error;
-
-      setAttendance((data as Attendance | null) ?? null);
-    } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Unable to load today's attendance.",
-      );
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  function getLocation(): Promise<{
-    latitude: number;
-    longitude: number;
-    accuracy: number;
-  }> {
-    return new Promise((resolve, reject) => {
-      if (!navigator.geolocation) {
-        reject(
-          new Error(
-            "GPS is not supported by this browser.",
-          ),
+        const { data: overrideRows, error: overrideError } = await supabase
+          .from("staff_attendance_overrides")
+          .select("id, attendance_date, status, notes")
+          .eq("staff_id", staffRow.id)
+          .order("attendance_date", { ascending: false })
+          .limit(100);
+        if (overrideError) throw overrideError;
+        setOverrides(overrideRows || []);
+      } catch (err: any) {
+        console.error(
+          "ATTENDANCE HISTORY ERROR:",
+          err
         );
-        return;
+
+        setError(
+          err?.message ||
+            "Unable to load attendance history."
+        );
+      } finally {
+        setLoading(false);
       }
-
-      navigator.geolocation.getCurrentPosition(
-        (position) => {
-          resolve({
-            latitude: position.coords.latitude,
-            longitude: position.coords.longitude,
-            accuracy: position.coords.accuracy,
-          });
-        },
-        (err) => {
-          if (err.code === err.PERMISSION_DENIED) {
-            reject(
-              new Error(
-                "Location permission was denied. Please allow GPS access.",
-              ),
-            );
-          } else if (err.code === err.POSITION_UNAVAILABLE) {
-            reject(
-              new Error(
-                "Your location could not be determined.",
-              ),
-            );
-          } else {
-            reject(
-              new Error(
-                "GPS request timed out. Please try again.",
-              ),
-            );
-          }
-        },
-        {
-          enableHighAccuracy: true,
-          timeout: 15000,
-          maximumAge: 0,
-        },
-      );
-    });
-  }
-
-  async function checkIn() {
-    try {
-      setProcessing(true);
-      setLocationLoading(true);
-      setError("");
-      setSuccess("");
-
-      const location = await getLocation();
-
-      setLocationLoading(false);
-
-      const { data, error } = await supabase.rpc(
-        "staff_check_in",
-        {
-          p_latitude: location.latitude,
-          p_longitude: location.longitude,
-          p_accuracy_meters: location.accuracy,
-        },
-      );
-
-      if (error) throw error;
-
-      const result = data as {
-        success: boolean;
-        status: string;
-        is_late: boolean;
-        distance_meters: number | null;
-      };
-
-      setSuccess(
-        result.is_late
-          ? "Check-in successful. You are marked Late."
-          : "Check-in successful. You are marked Present.",
-      );
-
-      await loadToday();
-    } catch (err) {
-      setLocationLoading(false);
-
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Unable to check in.",
-      );
-    } finally {
-      setProcessing(false);
     }
-  }
 
-  async function checkOut() {
-    try {
-      setProcessing(true);
-      setLocationLoading(true);
-      setError("");
-      setSuccess("");
-
-      const location = await getLocation();
-
-      setLocationLoading(false);
-
-      const { data, error } = await supabase.rpc(
-        "staff_check_out",
-        {
-          p_latitude: location.latitude,
-          p_longitude: location.longitude,
-          p_accuracy_meters: location.accuracy,
-        },
-      );
-
-      if (error) throw error;
-
-      const result = data as {
-        success: boolean;
-        status: string;
-        working_minutes: number;
-        is_early_checkout: boolean;
-      };
-
-      setSuccess(
-        result.status === "half_day"
-          ? "Checkout successful. Your working time results in a Half Day."
-          : result.is_early_checkout
-            ? "Checkout successful. You checked out before the scheduled end time."
-            : "Checkout successful.",
-      );
-
-      await loadToday();
-    } catch (err) {
-      setLocationLoading(false);
-
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Unable to check out.",
-      );
-    } finally {
-      setProcessing(false);
-    }
-  }
-
-  const checkedIn =
-    Boolean(attendance?.check_in_at) &&
-    !attendance?.check_out_at;
-
-  const checkedOut =
-    Boolean(attendance?.check_in_at) &&
-    Boolean(attendance?.check_out_at);
+    load();
+  }, [supabase]);
 
   if (loading) {
     return (
-      <main className="min-h-screen bg-slate-50 p-4 md:p-8">
-        <div className="mx-auto max-w-3xl rounded-2xl border bg-white p-12 text-center shadow-sm">
-          <Loader2 className="mx-auto h-8 w-8 animate-spin text-blue-600" />
-
-          <p className="mt-3 text-sm font-semibold text-slate-600">
-            Loading attendance...
-          </p>
-        </div>
-      </main>
+      <div className="p-6">
+        Loading attendance history...
+      </div>
     );
   }
 
+  if (error) {
+    return (
+      <div className="p-6">
+        <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+          {error}
+        </div>
+      </div>
+    );
+  }
+
+  const overrideMap = new Map(overrides.map((item) => [item.attendance_date, item]));
+  const attendanceMap = new Map(attendance.map((item) => [item.attendance_date, item]));
+  const effectiveStatus = (date: string) => {
+    const override = overrideMap.get(date);
+    const actual = attendanceMap.get(date);
+    if (override) return override.status;
+    if (!actual) return "absent";
+    if (actual.status === "absent") return "absent";
+    if (actual.status === "half_day" || actual.status === "late" || actual.is_late) return "half_day";
+    return "present";
+  };
+
   return (
-    <main className="min-h-screen bg-slate-50 p-4 md:p-8">
-      <div className="mx-auto max-w-3xl">
+    <div className="p-4 sm:p-6 lg:p-8">
+
+      <div className="mx-auto max-w-6xl">
 
         <div className="mb-6">
-          <p className="text-sm font-semibold text-blue-600">
-            Staff Attendance
+          <p className="text-sm text-slate-500">
+            Staff Portal
           </p>
 
-          <h1 className="mt-1 text-3xl font-bold text-slate-900">
-            Today's Attendance
+          <h1 className="mt-1 text-2xl font-bold text-slate-900">
+            Attendance History
           </h1>
 
-          <p className="mt-2 text-sm text-slate-500">
-            Check in and check out from inside the school premises.
+          <p className="mt-1 text-sm text-slate-500">
+            {staff
+              ? formatName(staff)
+              : "Staff Member"}
           </p>
         </div>
 
-        {error && (
-          <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm font-medium text-red-700">
-            {error}
-          </div>
-        )}
+        <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
 
-        {success && (
-          <div className="mb-4 flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-medium text-emerald-700">
-            <CheckCircle2 size={17} />
-            {success}
-          </div>
-        )}
+          {attendance.length === 0 ? (
+            <div className="p-12 text-center">
 
-        <section className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
+              <CalendarDays className="mx-auto h-10 w-10 text-slate-300" />
 
-          <div className="border-b border-slate-200 bg-slate-50 p-6 text-center">
-            <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-blue-50 text-blue-600">
-              <Clock3 size={30} />
+              <h2 className="mt-4 font-semibold text-slate-900">
+                No attendance records
+              </h2>
+
+              <p className="mt-1 text-sm text-slate-500">
+                Your attendance records will appear here.
+              </p>
+
             </div>
+          ) : (
+            <>
+              {/* DESKTOP */}
 
-            <h2 className="mt-4 text-xl font-bold text-slate-900">
-              {attendance
-                ? attendance.status.replace("_", " ").toUpperCase()
-                : "NOT MARKED"}
-            </h2>
+              <div className="hidden overflow-x-auto md:block">
 
-            <p className="mt-1 text-sm text-slate-500">
-              GPS location is verified by the school attendance system.
-            </p>
-          </div>
+                <table className="min-w-full">
 
-          <div className="grid gap-4 p-6 sm:grid-cols-3">
+                  <thead className="border-b border-slate-200 bg-slate-50">
 
-            <div className="rounded-2xl border border-slate-200 p-4">
-              <p className="text-xs font-bold uppercase text-slate-400">
-                Check In
-              </p>
+                    <tr>
+                      <th className="px-5 py-4 text-left text-xs font-semibold uppercase text-slate-500">
+                        Date
+                      </th>
 
-              <p className="mt-2 text-xl font-bold text-slate-900">
-                {formatTime(attendance?.check_in_at ?? null)}
-              </p>
+                      <th className="px-5 py-4 text-left text-xs font-semibold uppercase text-slate-500">
+                        Check In
+                      </th>
 
-              {attendance?.check_in_distance_meters != null && (
-                <p className="mt-1 text-xs text-slate-500">
-                  {Math.round(
-                    attendance.check_in_distance_meters,
-                  )}
-                  m from school
-                </p>
-              )}
-            </div>
+                      <th className="px-5 py-4 text-left text-xs font-semibold uppercase text-slate-500">
+                        Check Out
+                      </th>
 
-            <div className="rounded-2xl border border-slate-200 p-4">
-              <p className="text-xs font-bold uppercase text-slate-400">
-                Check Out
-              </p>
+                      <th className="px-5 py-4 text-left text-xs font-semibold uppercase text-slate-500">
+                        Working
+                      </th>
 
-              <p className="mt-2 text-xl font-bold text-slate-900">
-                {formatTime(attendance?.check_out_at ?? null)}
-              </p>
+                      <th className="px-5 py-4 text-left text-xs font-semibold uppercase text-slate-500">
+                        Status
+                      </th>
+                    </tr>
 
-              {attendance?.check_out_distance_meters != null && (
-                <p className="mt-1 text-xs text-slate-500">
-                  {Math.round(
-                    attendance.check_out_distance_meters,
-                  )}
-                  m from school
-                </p>
-              )}
-            </div>
+                  </thead>
 
-            <div className="rounded-2xl border border-slate-200 p-4">
-              <p className="text-xs font-bold uppercase text-slate-400">
-                Working Time
-              </p>
+                  <tbody className="divide-y divide-slate-100">
 
-              <p className="mt-2 text-xl font-bold text-slate-900">
-                {formatMinutes(
-                  attendance?.working_minutes ?? null,
-                )}
-              </p>
-            </div>
+                    {attendance.map(
+                      (row) => (
+                        <tr key={row.id}>
 
-          </div>
+                          <td className="px-5 py-4 text-sm font-medium text-slate-900">
+                            {formatDate(
+                              row.attendance_date
+                            )}
+                          </td>
 
-          <div className="border-t border-slate-200 p-6">
+                          <td className="px-5 py-4 text-sm text-slate-600">
+                            {formatTime(
+                              row.check_in_at
+                            )}
+                          </td>
 
-            {!attendance && (
-              <button
-                type="button"
-                onClick={() => void checkIn()}
-                disabled={processing}
-                className="flex w-full items-center justify-center gap-3 rounded-2xl bg-emerald-600 px-6 py-5 text-lg font-bold text-white shadow-sm hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {processing ? (
-                  <Loader2
-                    size={24}
-                    className="animate-spin"
-                  />
-                ) : (
-                  <LogIn size={24} />
-                )}
+                          <td className="px-5 py-4 text-sm text-slate-600">
+                            {formatTime(
+                              row.check_out_at
+                            )}
+                          </td>
 
-                {locationLoading
-                  ? "Getting GPS Location..."
-                  : "CHECK IN"}
-              </button>
-            )}
+                          <td className="px-5 py-4 text-sm text-slate-600">
+                            {formatMinutes(
+                              row.working_minutes
+                            )}
+                          </td>
 
-            {checkedIn && (
-              <button
-                type="button"
-                onClick={() => void checkOut()}
-                disabled={processing}
-                className="flex w-full items-center justify-center gap-3 rounded-2xl bg-red-600 px-6 py-5 text-lg font-bold text-white shadow-sm hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {processing ? (
-                  <Loader2
-                    size={24}
-                    className="animate-spin"
-                  />
-                ) : (
-                  <LogOut size={24} />
-                )}
+                          <td className="px-5 py-4">
 
-                {locationLoading
-                  ? "Getting GPS Location..."
-                  : "CHECK OUT"}
-              </button>
-            )}
+                            <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold capitalize text-emerald-700">
+                              {String(effectiveStatus(row.attendance_date)).replaceAll("_", " ")}
+                            </span>
 
-            {checkedOut && (
-              <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-5 text-center">
-                <CheckCircle2 className="mx-auto text-emerald-600" size={30} />
+                            {row.is_late && (
+                              <span className="ml-2 rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700">
+                                Late
+                              </span>
+                            )}
 
-                <p className="mt-2 font-bold text-emerald-800">
-                  Attendance Completed
-                </p>
+                          </td>
 
-                <p className="mt-1 text-sm text-emerald-700">
-                  Your check-in and check-out have been recorded.
-                </p>
+                        </tr>
+                      )
+                    )}
+
+                  </tbody>
+
+                </table>
+
               </div>
-            )}
 
-          </div>
+              {/* MOBILE */}
 
-          <div className="border-t border-slate-200 p-5">
-            <div className="flex items-start gap-3 rounded-xl bg-slate-50 p-4">
-              <ShieldCheck
-                size={20}
-                className="mt-0.5 shrink-0 text-blue-600"
-              />
+              <div className="divide-y divide-slate-100 md:hidden">
 
-              <div>
-                <p className="text-sm font-bold text-slate-800">
-                  GPS Attendance Protection
-                </p>
+                {attendance.map(
+                  (row) => (
+                    <div
+                      key={row.id}
+                      className="p-5"
+                    >
 
-                <p className="mt-1 text-xs leading-5 text-slate-500">
-                  Your location is checked against the school's
-                  configured attendance area. The attendance time is
-                  generated by the server, not by your device.
-                </p>
+                      <div className="flex items-center justify-between">
+
+                        <div>
+                          <p className="font-semibold text-slate-900">
+                            {formatDate(
+                              row.attendance_date
+                            )}
+                          </p>
+
+                          <p className="mt-1 text-xs capitalize text-slate-500">
+                            {String(effectiveStatus(row.attendance_date)).replaceAll("_", " ")}
+                          </p>
+                        </div>
+
+                        {row.is_late && (
+                          <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700">
+                            Late
+                          </span>
+                        )}
+
+                      </div>
+
+                      <div className="mt-4 grid grid-cols-3 gap-3">
+
+                        <div className="rounded-xl bg-slate-50 p-3">
+                          <p className="text-xs text-slate-400">
+                            In
+                          </p>
+
+                          <p className="mt-1 text-sm font-semibold">
+                            {formatTime(
+                              row.check_in_at
+                            )}
+                          </p>
+                        </div>
+
+                        <div className="rounded-xl bg-slate-50 p-3">
+                          <p className="text-xs text-slate-400">
+                            Out
+                          </p>
+
+                          <p className="mt-1 text-sm font-semibold">
+                            {formatTime(
+                              row.check_out_at
+                            )}
+                          </p>
+                        </div>
+
+                        <div className="rounded-xl bg-slate-50 p-3">
+                          <p className="text-xs text-slate-400">
+                            Working
+                          </p>
+
+                          <p className="mt-1 text-sm font-semibold">
+                            {formatMinutes(
+                              row.working_minutes
+                            )}
+                          </p>
+                        </div>
+
+                      </div>
+
+                      {(row.check_in_distance_meters !== null ||
+                        row.check_out_distance_meters !== null) && (
+                        <div className="mt-3 flex items-center gap-2 text-xs text-slate-500">
+                          <MapPin className="h-3.5 w-3.5" />
+
+                          GPS verified
+                        </div>
+                      )}
+
+                    </div>
+                  )
+                )}
+
               </div>
-            </div>
-          </div>
+            </>
+          )}
 
-        </section>
+        </div>
+
       </div>
-    </main>
+
+    </div>
   );
 }

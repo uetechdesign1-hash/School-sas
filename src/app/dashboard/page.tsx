@@ -20,6 +20,7 @@ import {
   ReceiptText,
   School,
   Settings2,
+  ShoppingCart,
   ShieldCheck,
   Users,
   Wallet,
@@ -75,6 +76,7 @@ const ACCOUNTING_ROUTES = {
   payment: "/accounting/payment",
   contra: "/accounting/contra",
   journal: "/accounting/journal",
+  vendorPurchases: "/dashboard/accounting/vendor-purchases",
   ledger: "/accounting/ledger",
   bankReconciliation: "/accounting/bank-reconciliation",
   trialBalance: "/accounting/trial-balance",
@@ -740,6 +742,13 @@ export default function DashboardPage() {
                 icon={<BookOpen size={19} />}
                 title="Journal"
                 description="Create manual journal entries"
+              />
+
+              <AccountingShortcut
+                href={ACCOUNTING_ROUTES.vendorPurchases}
+                icon={<ShoppingCart size={19} />}
+                title="Vendor Purchases"
+                description="Manage vendor bills and payments"
               />
             </AccountingGroup>
 

@@ -59,11 +59,52 @@ function labelForType(type: string) {
   );
 }
 
+/*
+ * Canonical balance helpers. Live balances are read from the journal
+ * (journal_lines) plus canonical opening balances, following the same
+ * convention as the Ledger and Bank Reconciliation pages:
+ *   Debit-normal account  = debit - credit
+ *   Credit-normal account = credit - debit
+ */
+const DEBIT_NORMAL_TYPES = [
+  "cash",
+  "bank",
+  "asset",
+  "expense",
+  "receivable",
+];
+
+function isDebitNormal(accountType: string) {
+  return DEBIT_NORMAL_TYPES.includes(
+    String(accountType || "").toLowerCase()
+  );
+}
+
+type PostedTotals = {
+  debit: number;
+  credit: number;
+};
+
+type BalanceView = {
+  opening: number;
+  debit: number;
+  credit: number;
+  balance: number;
+  side: "Dr" | "Cr";
+  linked: boolean;
+};
+
 export default function AccountsPage() {
   const supabase = useMemo(() => createClient(), []);
 
   const [schoolId, setSchoolId] = useState<string | null>(null);
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [posted, setPosted] = useState<Map<string, PostedTotals>>(
+    new Map()
+  );
+  const [openings, setOpenings] = useState<Map<string, number>>(
+    new Map()
+  );
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
@@ -83,6 +124,104 @@ export default function AccountsPage() {
   const [accountType, setAccountType] = useState("");
   const [isActive, setIsActive] = useState(true);
 
+  function buildPostedTotals(
+    lines: { account_id: string; debit: number | null; credit: number | null }[]
+  ) {
+    const totals = new Map<string, PostedTotals>();
+
+    for (const line of lines || []) {
+      const key = line.account_id;
+      if (!key) continue;
+
+      const current =
+        totals.get(key) || { debit: 0, credit: 0 };
+
+      current.debit += Number(line.debit || 0);
+      current.credit += Number(line.credit || 0);
+
+      totals.set(key, current);
+    }
+
+    return totals;
+  }
+
+  /*
+   * Canonical opening balances: one row per account with the latest
+   * as_of_date wins, mirroring how the Trial Balance reads them.
+   */
+  function buildOpenings(
+    rows: { account_id: string; balance: number | null; as_of_date: string | null }[]
+  ) {
+    const latest = new Map<
+      string,
+      { balance: number; date: string }
+    >();
+
+    for (const row of rows || []) {
+      if (!row.account_id) continue;
+
+      const date = row.as_of_date || "";
+      const existing = latest.get(row.account_id);
+
+      if (!existing || date >= existing.date) {
+        latest.set(row.account_id, {
+          balance: Number(row.balance || 0),
+          date,
+        });
+      }
+    }
+
+    const result = new Map<string, number>();
+    latest.forEach((value, key) => result.set(key, value.balance));
+
+    return result;
+  }
+
+  function balanceFor(account: Account): BalanceView {
+    const debitNormal = isDebitNormal(account.account_type);
+    const totals = posted.get(account.id) || {
+      debit: 0,
+      credit: 0,
+    };
+
+    const opening =
+      openings.has(account.id)
+        ? openings.get(account.id) || 0
+        : Number(account.opening_balance || 0);
+
+    const net = debitNormal
+      ? totals.debit - totals.credit
+      : totals.credit - totals.debit;
+
+    const raw = opening + net;
+    const positive = debitNormal
+      ? raw >= 0
+      : raw > 0;
+
+    return {
+      opening,
+      debit: totals.debit,
+      credit: totals.credit,
+      balance: Math.abs(roundTo2(raw)),
+      side: positive
+        ? debitNormal
+          ? "Dr"
+          : "Cr"
+        : debitNormal
+          ? "Cr"
+          : "Dr",
+      linked: totals.debit !== 0 || totals.credit !== 0,
+    };
+  }
+
+  function roundTo2(value: number) {
+    return Math.round(Number(value || 0) * 100) / 100;
+  }
+
+  function balanceText(view: BalanceView) {
+    return `${money(view.balance)} ${view.side}`;
+  }
+
   async function loadAccounts(currentSchoolId?: string) {
     try {
       const id = currentSchoolId || schoolId;
@@ -92,26 +231,92 @@ export default function AccountsPage() {
       setLoading(true);
       setError("");
 
-      const { data, error } = await supabase
-        .from("accounts")
-        .select(`
-          id,
-          school_id,
-          code,
-          name,
-          account_type,
-          opening_balance,
-          is_system,
-          is_active,
-          created_at
-        `)
-        .eq("school_id", id)
-        .order("account_type")
-        .order("name");
+      const [
+        accountResult,
+        journalLinesResult,
+        openingResult,
+      ] = await Promise.all([
+        supabase
+          .from("accounts")
+          .select(
+            `
+            id,
+            school_id,
+            code,
+            name,
+            account_type,
+            opening_balance,
+            is_system,
+            is_active,
+            created_at
+          `
+          )
+          .eq("school_id", id)
+          .order("account_type")
+          .order("name"),
 
-      if (error) throw new Error(error.message);
+        supabase
+          .from("journal_lines")
+          .select(
+            "id, school_id, account_id, debit, credit"
+          )
+          .eq("school_id", id),
 
-      setAccounts((data || []) as Account[]);
+        supabase
+          .from("opening_balances")
+          .select(
+            "id, school_id, account_id, balance, as_of_date"
+          )
+          .eq("school_id", id),
+      ]);
+
+      if (accountResult.error) {
+        throw new Error(accountResult.error.message);
+      }
+
+      setAccounts((accountResult.data || []) as Account[]);
+
+      /*
+       * The account list itself must still render if the balance
+       * sources are temporarily unavailable, so aux failures are
+       * logged instead of thrown — balances then fall back to the
+       * legacy opening_balance column.
+       */
+      if (journalLinesResult.error) {
+        console.error(
+          "ACCOUNTS journal_lines ERROR:",
+          journalLinesResult.error
+        );
+        setPosted(new Map());
+      } else {
+        setPosted(
+          buildPostedTotals(
+            (journalLinesResult.data || []) as {
+              account_id: string;
+              debit: number | null;
+              credit: number | null;
+            }[]
+          )
+        );
+      }
+
+      if (openingResult.error) {
+        console.error(
+          "ACCOUNTS opening_balances ERROR:",
+          openingResult.error
+        );
+        setOpenings(new Map());
+      } else {
+        setOpenings(
+          buildOpenings(
+            (openingResult.data || []) as {
+              account_id: string;
+              balance: number | null;
+              as_of_date: string | null;
+            }[]
+          )
+        );
+      }
     } catch (err: any) {
       console.error("ACCOUNTS LOAD ERROR:", err);
       setError(err?.message || "Unable to load Chart of Accounts.");
@@ -693,7 +898,7 @@ export default function AccountsPage() {
             </div>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[1050px]">
+              <table className="w-full min-w-[1320px]">
                 <thead className="bg-slate-50">
                   <tr>
                     <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500">
@@ -706,7 +911,16 @@ export default function AccountsPage() {
                       Type
                     </th>
                     <th className="px-5 py-3 text-right text-xs font-semibold text-slate-500">
-                      Legacy Opening
+                      Opening
+                    </th>
+                    <th className="px-5 py-3 text-right text-xs font-semibold text-slate-500">
+                      Debits
+                    </th>
+                    <th className="px-5 py-3 text-right text-xs font-semibold text-slate-500">
+                      Credits
+                    </th>
+                    <th className="px-5 py-3 text-right text-xs font-semibold text-slate-500">
+                      Current Balance
                     </th>
                     <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500">
                       Status
@@ -739,8 +953,28 @@ export default function AccountsPage() {
                         </span>
                       </td>
 
-                      <td className="px-5 py-4 text-right font-semibold">
+                      <td className="px-5 py-4 text-right font-semibold text-slate-600">
                         {money(Number(account.opening_balance || 0))}
+                      </td>
+
+                      <td className="px-5 py-4 text-right text-slate-600">
+                        {money(balanceFor(account).debit)}
+                      </td>
+
+                      <td className="px-5 py-4 text-right text-slate-600">
+                        {money(balanceFor(account).credit)}
+                      </td>
+
+                      <td className="px-5 py-4 text-right">
+                        <div className="font-bold text-slate-900">
+                          {balanceText(balanceFor(account))}
+                        </div>
+
+                        {!balanceFor(account).linked && (
+                          <div className="mt-0.5 text-[11px] font-medium text-slate-400">
+                            No journal postings yet
+                          </div>
+                        )}
                       </td>
 
                       <td className="px-5 py-4">
@@ -820,8 +1054,20 @@ export default function AccountsPage() {
               value={labelForType(viewing.account_type)}
             />
             <Detail
-              label="Legacy Opening Balance"
-              value={money(Number(viewing.opening_balance || 0))}
+              label="Opening Balance"
+              value={money(balanceFor(viewing).opening)}
+            />
+            <Detail
+              label="Journal Debits"
+              value={money(balanceFor(viewing).debit)}
+            />
+            <Detail
+              label="Journal Credits"
+              value={money(balanceFor(viewing).credit)}
+            />
+            <Detail
+              label="Current Balance"
+              value={balanceText(balanceFor(viewing))}
             />
             <Detail
               label="Status"

@@ -115,8 +115,10 @@ function formatMinutes(value: number | null) {
 
 function actualToStatus(record: AttendanceRecord | undefined): CellStatus {
   if (!record) return "auto";
-  if (record.status === "half_day") return "half_day";
   if (record.status === "absent") return "absent";
+  if (record.status === "half_day" || record.status === "late" || record.is_late) {
+    return "half_day";
+  }
   return "present";
 }
 
@@ -271,12 +273,35 @@ export default function AdminAttendancePage() {
 
       if (settingsError) throw settingsError;
 
+      const loadedStaff = (staffData || []) as Staff[];
+      const loadedCalendar = (calendarData || []) as SchoolCalendarEntry[];
+      const loadedAttendance = (attendanceData || []) as AttendanceRecord[];
+      const loadedOverrides = (overrideData || []) as OverrideRecord[];
+      const loadedWeeklyOffDay = Number(settingsData?.weekly_off_day ?? 0);
+
+      // Rebuild the monthly attendance snapshot from the same effective-status
+      // rules used by this page. This keeps Payroll in sync even when nobody
+      // created a GPS row for a completed working day. A summary-sync failure
+      // must not prevent the attendance screen itself from loading.
+      try {
+        await syncAllMonthlySummaries(
+          schoolId,
+          loadedCalendar,
+          loadedWeeklyOffDay,
+          loadedStaff,
+          loadedAttendance,
+          loadedOverrides,
+        );
+      } catch (summaryError) {
+        console.error("Unable to sync monthly attendance summary", summaryError);
+      }
+
       setSchoolId(schoolId);
-      setWeeklyOffDay(Number(settingsData?.weekly_off_day ?? 0));
-      setStaff((staffData || []) as Staff[]);
-      setCalendarEntries((calendarData || []) as SchoolCalendarEntry[]);
-      setAttendance((attendanceData || []) as AttendanceRecord[]);
-      setOverrides((overrideData || []) as OverrideRecord[]);
+      setWeeklyOffDay(loadedWeeklyOffDay);
+      setStaff(loadedStaff);
+      setCalendarEntries(loadedCalendar);
+      setAttendance(loadedAttendance);
+      setOverrides(loadedOverrides);
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Unable to load attendance.",
@@ -340,14 +365,19 @@ export default function AdminAttendancePage() {
   }
 
   function getCellStatus(staffId: string, date: string): CellStatus {
-    // Priority: explicit staff override -> real GPS attendance -> school calendar -> weekly off -> automatic/unmarked.
+    // Priority: Admin override -> GPS attendance -> school calendar -> weekly off.
+    // A completed working day with no attendance record is Absent.
+    // Future working days remain Automatic so they are not counted as absent early.
     const override = overrideMap.get(`${staffId}|${date}`);
     if (override) return override.status;
 
     const actual = attendanceMap.get(`${staffId}|${date}`);
     if (actual) return actualToStatus(actual);
 
-    return defaultCalendarStatus(date);
+    const calendarStatus = defaultCalendarStatus(date);
+    if (calendarStatus === "auto" && date <= today) return "absent";
+
+    return calendarStatus;
   }
 
   function getSummary(staffId: string) {
@@ -545,10 +575,10 @@ export default function AdminAttendancePage() {
               : new Date(`${date}T00:00:00`).getDay() === weeklyOffDay
                 ? "week_off"
                 : "auto";
-      const status =
+      const status: CellStatus =
         localOverrideMap.get(date) ||
         actualMap.get(date) ||
-        calendarStatus;
+        (calendarStatus === "auto" && date <= today ? "absent" : calendarStatus);
 
       if (status === "present") present++;
       if (status === "absent") absent++;
@@ -745,13 +775,26 @@ export default function AdminAttendancePage() {
     activeSchoolId: string,
     calendarForSummary: SchoolCalendarEntry[],
     weeklyOffForSummary: number,
+    staffForSummary: Staff[] = staff,
+    attendanceForSummary: AttendanceRecord[] = attendance,
+    overridesForSummary: OverrideRecord[] = overrides,
   ) {
     const localCalendarMap = new Map<string, SchoolCalendarEntry>();
     for (const item of calendarForSummary) {
       localCalendarMap.set(item.attendance_date, item);
     }
 
-    for (const item of staff) {
+    const localAttendanceMap = new Map<string, AttendanceRecord>();
+    for (const item of attendanceForSummary) {
+      localAttendanceMap.set(`${item.staff_id}|${item.attendance_date}`, item);
+    }
+
+    const localOverrideMap = new Map<string, OverrideRecord>();
+    for (const item of overridesForSummary) {
+      localOverrideMap.set(`${item.staff_id}|${item.attendance_date}`, item);
+    }
+
+    for (const item of staffForSummary) {
       let present = 0;
       let absent = 0;
       let holiday = 0;
@@ -762,10 +805,10 @@ export default function AdminAttendancePage() {
       for (const day of days) {
         const date = dateFor(month, day);
         const key = `${item.id}|${date}`;
-        const override = overrideMap.get(key);
-        const actual = attendanceMap.get(key);
+        const override = localOverrideMap.get(key);
+        const actual = localAttendanceMap.get(key);
         const calendarEntry = localCalendarMap.get(date);
-        const calendarStatus =
+        const calendarStatus: CellStatus =
           calendarEntry?.type === "holiday"
             ? "holiday"
             : calendarEntry?.type === "week_off"
@@ -775,7 +818,9 @@ export default function AdminAttendancePage() {
                 : new Date(`${date}T00:00:00`).getDay() === weeklyOffForSummary
                   ? "week_off"
                   : "auto";
-        const status = override?.status || (actual ? actualToStatus(actual) : calendarStatus);
+        const status: CellStatus =
+          override?.status ||
+          (actual ? actualToStatus(actual) : calendarStatus === "auto" && date <= today ? "absent" : calendarStatus);
 
         if (status === "present") present++;
         if (status === "absent") absent++;
@@ -863,11 +908,7 @@ export default function AdminAttendancePage() {
         ...days.map((day) => {
           const date = dateFor(month, day);
           const status = getCellStatus(item.id, date);
-          if (status === "auto") {
-            const actual = attendanceMap.get(`${item.id}|${date}`);
-            return actual ? STATUS_LABEL[actualToStatus(actual)] : "";
-          }
-          return STATUS_LABEL[status];
+          return status === "auto" ? "" : STATUS_LABEL[status];
         }),
         String(summary.present),
         String(summary.halfDay),
@@ -1452,6 +1493,11 @@ export default function AdminAttendancePage() {
                 })()}
               </div>
 
+              <div className="border-t bg-blue-50 px-6 py-3 text-xs font-semibold text-blue-800">
+                You can directly change this staff member's daily status here.
+                P = Present, A = Absent, ½ = Half Day, C/L = Paid Leave, H = Holiday, W/O = Week Off.
+              </div>
+
               <div className="divide-y border-t">
                 {days.map((day) => {
                   const date = dateFor(month, day);
@@ -1512,9 +1558,51 @@ export default function AdminAttendancePage() {
                           </>
                         )}
 
-                        <span className="rounded-lg bg-slate-100 px-3 py-1.5 font-black">
-                          {STATUS_LABEL[status]}
-                        </span>
+                        <select
+                          value={status}
+                          disabled={savingKey === key}
+                          onChange={(event) =>
+                            void saveCell(
+                              selectedStaff.id,
+                              date,
+                              event.target.value as CellStatus,
+                            )
+                          }
+                          title={
+                            override
+                              ? `Admin override: ${STATUS_FULL[status]}`
+                              : actual
+                                ? `GPS: ${STATUS_FULL[status]}`
+                                : status === "auto"
+                                  ? "Automatic / future date"
+                                  : `Effective status: ${STATUS_FULL[status]}`
+                          }
+                          className={`rounded-lg border px-3 py-1.5 text-xs font-black outline-none ${
+                            status === "present"
+                              ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                              : status === "absent"
+                                ? "border-red-200 bg-red-50 text-red-700"
+                                : status === "half_day"
+                                  ? "border-violet-200 bg-violet-50 text-violet-700"
+                                  : status === "holiday"
+                                    ? "border-amber-200 bg-amber-50 text-amber-700"
+                                    : status === "week_off"
+                                      ? "border-slate-200 bg-slate-100 text-slate-700"
+                                      : status === "paid_leave"
+                                        ? "border-sky-200 bg-sky-50 text-sky-700"
+                                        : "border-slate-200 bg-white text-slate-400"
+                          }`}
+                        >
+                          <option value="auto">
+                            {savingKey === key ? "…" : "-"}
+                          </option>
+                          <option value="present">P</option>
+                          <option value="absent">A</option>
+                          <option value="half_day">½</option>
+                          <option value="paid_leave">C/L</option>
+                          <option value="holiday">H</option>
+                          <option value="week_off">W/O</option>
+                        </select>
                       </div>
                     </div>
                   );
