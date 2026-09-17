@@ -314,13 +314,17 @@ const schoolId = await getCurrentSchoolId();
             student?.name && className
               ? `${student.name} • ${className}`
               : student?.name ||
-                (isVendorPayment && vendorName && billNumber
-                  ? `${vendorName} • ${billNumber}`
-                  : isVendorPayment && vendorName
-                    ? vendorName
-                    : isVendorPayment && billNumber
-                      ? billNumber
-                      : null),
+                (isVendorPayment
+                  ? [
+                      vendorName,
+                      billNumber,
+                      row.line_description ||
+                        row.entry_description ||
+                        null,
+                    ]
+                        .filter(Boolean)
+                        .join(" — ")
+                  : null),
           vendor_name: vendorName,
           vendor_bill_number: billNumber,
           vendor_payment_ref: paymentRef,
@@ -1089,9 +1093,15 @@ return ( <main className="min-h-screen bg-slate-50">
 
                           {row.receipt_number
                             ? `Receipt No. ${row.receipt_number}`
-                            : row.reference_type ||
-                              row.entry_type ||
-                              "-"}
+                            : row.reference_type === "vendor_payment"
+                              ? row.vendor_name ||
+                                row.vendor_bill_number ||
+                                row.line_description ||
+                                row.entry_description ||
+                                "Vendor payment"
+                              : row.reference_type ||
+                                row.entry_type ||
+                                "-"}
 
                         </div>
 

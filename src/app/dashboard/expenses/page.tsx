@@ -937,6 +937,12 @@ export default function ExpensesPage() {
               await supabase.auth.getUser()
             ).data.user?.id ||
             null,
+          vendorName:
+            addVendor.trim() || null,
+          expenseDescription:
+            addDescription.trim() || null,
+          invoiceNumber:
+            addInvoice.trim() || null,
         },
       );
 

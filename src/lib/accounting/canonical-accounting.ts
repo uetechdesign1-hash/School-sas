@@ -6,6 +6,41 @@ export type AccountingLine = {
   credit: number;
   description?: string;
 };
+export type PurchaseDebitLine = {
+  accountId: string;
+  amount: number;
+  description?: string;
+};
+
+export type PurchaseReturnJournalInput = {
+  schoolId: string;
+  fiscalYearId: string;
+  entryDate: string;
+  sourceRecordId: string;
+  vendorPayablesAccountId: string;
+  debitAccountId: string;
+  amount: number;
+  description?: string | null;
+  createdBy?: string | null;
+};
+
+export type VendorRefundJournalInput = {
+  schoolId: string;
+  fiscalYearId: string;
+  entryDate: string;
+  sourceRecordId: string;
+  refundAccountId: string;
+  vendorPayablesAccountId: string;
+  amount: number;
+  description?: string | null;
+  createdBy?: string | null;
+};
+
+export type BookSaleRevenueLine = {
+  accountId: string;
+  amount: number;
+  description?: string;
+};
 
 export type JournalEntryPostInput = {
   schoolId: string;
@@ -59,7 +94,44 @@ export const DEFAULT_ACCOUNT_TEMPLATES: DefaultAccountTemplate[] = [
   { code: "BUILDING_MAINTENANCE", name: "Building Maintenance", account_type: "expense" },
   { code: "OFFICE_EXPENSE", name: "Office Expenses", account_type: "expense" },
   { code: "ACADEMIC_EXPENSE", name: "Academic Expenses", account_type: "expense" },
+  // Resale inventory (assets), sales revenue and cost of goods sold.
+  // Inventory purchases post to these asset accounts instead of expenses;
+  // the cost only reaches the P&L when the goods are sold (COGS).
+  { code: "BOOKS_INVENTORY", name: "Books Inventory", account_type: "asset" },
+  { code: "UNIFORM_INVENTORY", name: "Uniform Inventory", account_type: "asset" },
+  { code: "OTHER_RESALE_INVENTORY", name: "Other Resale Inventory", account_type: "asset" },
+  { code: "BOOK_SALES", name: "Book Sales", account_type: "income" },
+  { code: "UNIFORM_SALES", name: "Uniform Sales", account_type: "income" },
+  { code: "OTHER_SALES", name: "Other Sales", account_type: "income" },
+  { code: "BOOKS_COGS", name: "Books COGS", account_type: "expense" },
+  { code: "UNIFORM_COGS", name: "Uniform COGS", account_type: "expense" },
+  { code: "OTHER_COGS", name: "Other COGS", account_type: "expense" },
 ];
+
+/*
+ * Category -> canonical account codes used by the inventory flows.
+ * The keys match inventory_items.category.
+ */
+export const INVENTORY_CATEGORY_ACCOUNTS: Record<
+  "books" | "uniform" | "other",
+  { inventory: string; sales: string; cogs: string }
+> = {
+  books: {
+    inventory: "BOOKS_INVENTORY",
+    sales: "BOOK_SALES",
+    cogs: "BOOKS_COGS",
+  },
+  uniform: {
+    inventory: "UNIFORM_INVENTORY",
+    sales: "UNIFORM_SALES",
+    cogs: "UNIFORM_COGS",
+  },
+  other: {
+    inventory: "OTHER_RESALE_INVENTORY",
+    sales: "OTHER_SALES",
+    cogs: "OTHER_COGS",
+  },
+};
 
 /*
  * The canonical fiscal year runs April 1 - March 31, matching the SQL
@@ -454,13 +526,22 @@ export async function postExpenseJournal(
     paymentAccountId: string;
     amount: number;
     createdBy?: string | null;
+    vendorName?: string | null;
+    expenseDescription?: string | null;
+    invoiceNumber?: string | null;
   },
 ) {
+  const detailBits = [
+    input.vendorName || "",
+    input.expenseDescription || "",
+    input.invoiceNumber ? `Invoice ${input.invoiceNumber}` : "",
+  ].filter(Boolean);
+  const detailSuffix = detailBits.length > 0 ? ` - ${detailBits.join(" | ")}` : "";
   return postCanonicalJournalEntry(supabase, {
     schoolId: input.schoolId,
     fiscalYearId: input.fiscalYearId,
     entryDate: input.entryDate,
-    description: "Expense booking",
+    description: `Expense booking${detailSuffix}`,
     entryType: "GENERAL",
     sourceModule: "expenses",
     sourceTable: "expenses",
@@ -473,13 +554,13 @@ export async function postExpenseJournal(
         accountId: input.expenseAccountId,
         debit: Number(input.amount || 0),
         credit: 0,
-        description: "Expense recognized",
+        description: `Expense recognized${detailSuffix}`,
       },
       {
         accountId: input.paymentAccountId,
         debit: 0,
         credit: Number(input.amount || 0),
-        description: "Expense settled from cash or bank",
+        description: `Expense settled from cash or bank${detailSuffix}`,
       },
     ],
   });
@@ -593,11 +674,8 @@ export async function postPurchaseBillJournal(
     fiscalYearId: string;
     entryDate: string;
     sourceRecordId: string;
-    expenseLines: {
-      accountId: string;
-      amount: number;
-      description?: string;
-    }[];
+    expenseLines: PurchaseDebitLine[];
+    debitLines?: PurchaseDebitLine[];
     vendorPayablesAccountId: string;
     totalAmount: number;
     createdBy?: string | null;
@@ -616,12 +694,12 @@ export async function postPurchaseBillJournal(
     referenceId: input.sourceRecordId,
     createdBy: input.createdBy ?? null,
     lines: [
-      ...input.expenseLines
+      ...((input.debitLines ?? input.expenseLines) as PurchaseDebitLine[])
         .filter(
-          (line) =>
+          (line: PurchaseDebitLine) =>
             line.accountId && Number(line.amount || 0) > 0,
         )
-        .map((line) => ({
+        .map((line: PurchaseDebitLine) => ({
           accountId: line.accountId,
           debit: Number(line.amount || 0),
           credit: 0,
@@ -636,6 +714,206 @@ export async function postPurchaseBillJournal(
     ],
   });
 }
+
+export async function postBookSaleJournal(
+  supabase: SupabaseClient,
+  input: {
+    schoolId: string;
+    fiscalYearId: string;
+    entryDate: string;
+    sourceRecordId: string;
+    debitAccountId: string;
+    salesLines: BookSaleRevenueLine[];
+    totalAmount: number;
+    saleReference?: string | null;
+    createdBy?: string | null;
+  },
+) {
+  return postCanonicalJournalEntry(supabase, {
+    schoolId: input.schoolId,
+    fiscalYearId: input.fiscalYearId,
+    entryDate: input.entryDate,
+    description: input.saleReference
+      ? `Book sale - ${input.saleReference}`
+      : "Book sale",
+    entryType: "RECEIPT",
+    sourceModule: "book_sales",
+    sourceTable: "student_book_sales",
+    sourceRecordId: input.sourceRecordId,
+    referenceType: "book_sale",
+    referenceId: input.sourceRecordId,
+    createdBy: input.createdBy ?? null,
+    lines: [
+      {
+        accountId: input.debitAccountId,
+        debit: Number(input.totalAmount || 0),
+        credit: 0,
+        description: input.saleReference
+          ? `Book sale receipt - ${input.saleReference}`
+          : "Book sale receipt",
+      },
+      ...input.salesLines
+        .filter(
+          (line) => line.accountId && Number(line.amount || 0) > 0,
+        )
+        .map((line) => ({
+          accountId: line.accountId,
+          debit: 0,
+          credit: Number(line.amount || 0),
+          description: line.description || "Book sale revenue",
+        })),
+    ],
+  });
+}
+export async function postCogsJournal(
+  supabase: SupabaseClient,
+  input: {
+    schoolId: string;
+    fiscalYearId: string;
+    entryDate: string;
+    sourceRecordId: string;
+    saleReference?: string | null;
+    totalCost: number;
+    createdBy?: string | null;
+    cogsLines: {
+      cogsAccountId: string;
+      inventoryAccountId: string;
+      amount: number;
+      description?: string;
+    }[];
+  },
+) {
+  const lines = input.cogsLines
+    .filter(
+      (line) =>
+        line.cogsAccountId &&
+        line.inventoryAccountId &&
+        Number(line.amount || 0) > 0,
+    )
+    .map((line) => ({
+      cogsAccountId: line.cogsAccountId,
+      inventoryAccountId: line.inventoryAccountId,
+      amount: Number(line.amount || 0),
+      description: line.description,
+    }));
+
+  const debitTotal = lines.reduce((sum, line) => sum + line.amount, 0);
+
+  if (Math.abs(debitTotal - Number(input.totalCost || 0)) > 0.009) {
+    throw new Error(
+      `COGS entry is inconsistent. Lines total ${debitTotal.toFixed(2)} but totalCost is ${Number(
+        input.totalCost || 0,
+      ).toFixed(2)}.`,
+    );
+  }
+
+  for (const line of lines) {
+    if (line.cogsAccountId === line.inventoryAccountId) {
+      throw new Error(
+        "COGS and inventory accounts must differ, otherwise the entry is a no-op.",
+      );
+    }
+  }
+
+  return postCanonicalJournalEntry(supabase, {
+    schoolId: input.schoolId,
+    fiscalYearId: input.fiscalYearId,
+    entryDate: input.entryDate,
+    description: input.saleReference
+      ? `Cost of goods sold - ${input.saleReference}`
+      : "Cost of goods sold",
+    entryType: "GENERAL",
+    sourceModule: "book_sales",
+    sourceTable: "book_sale_cogs",
+    sourceRecordId: input.sourceRecordId,
+    referenceType: "book_sale_cogs",
+    referenceId: input.sourceRecordId,
+    createdBy: input.createdBy ?? null,
+    lines: [
+      ...lines.map((line) => ({
+        accountId: line.cogsAccountId,
+        debit: line.amount,
+        credit: 0,
+        description: line.description || "Cost of goods sold",
+      })),
+      ...lines.map((line) => ({
+        accountId: line.inventoryAccountId,
+        debit: 0,
+        credit: line.amount,
+        description: line.description || "Inventory reduced at cost",
+      })),
+    ],
+  });
+}
+
+
+
+export async function postPurchaseReturnJournal(
+  supabase: SupabaseClient,
+  input: PurchaseReturnJournalInput,
+) {
+  return postCanonicalJournalEntry(supabase, {
+    schoolId: input.schoolId,
+    fiscalYearId: input.fiscalYearId,
+    entryDate: input.entryDate,
+    description: input.description || "Purchase return",
+    entryType: "GENERAL",
+    sourceModule: "vendor_purchases",
+    sourceTable: "purchase_returns",
+    sourceRecordId: input.sourceRecordId,
+    referenceType: "purchase_return",
+    referenceId: input.sourceRecordId,
+    createdBy: input.createdBy ?? null,
+    lines: [
+      {
+        accountId: input.vendorPayablesAccountId,
+        debit: Number(input.amount || 0),
+        credit: 0,
+        description: input.description || "Purchase return",
+      },
+      {
+        accountId: input.debitAccountId,
+        debit: 0,
+        credit: Number(input.amount || 0),
+        description: input.description || "Purchase return reversal",
+      },
+    ],
+  });
+}
+
+export async function postVendorRefundJournal(
+  supabase: SupabaseClient,
+  input: VendorRefundJournalInput,
+) {
+  return postCanonicalJournalEntry(supabase, {
+    schoolId: input.schoolId,
+    fiscalYearId: input.fiscalYearId,
+    entryDate: input.entryDate,
+    description: input.description || "Vendor refund",
+    entryType: "RECEIPT",
+    sourceModule: "vendor_purchases",
+    sourceTable: "purchase_return_refunds",
+    sourceRecordId: input.sourceRecordId,
+    referenceType: "vendor_refund",
+    referenceId: input.sourceRecordId,
+    createdBy: input.createdBy ?? null,
+    lines: [
+      {
+        accountId: input.refundAccountId,
+        debit: Number(input.amount || 0),
+        credit: 0,
+        description: input.description || "Vendor refund",
+      },
+      {
+        accountId: input.vendorPayablesAccountId,
+        debit: 0,
+        credit: Number(input.amount || 0),
+        description: input.description || "Vendor refund",
+      },
+    ],
+  });
+}
+
 
 export async function postVendorPaymentJournal(
   supabase: SupabaseClient,

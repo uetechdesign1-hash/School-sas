@@ -1054,20 +1054,8 @@ export default function AccountsPage() {
               value={labelForType(viewing.account_type)}
             />
             <Detail
-              label="Opening Balance"
-              value={money(balanceFor(viewing).opening)}
-            />
-            <Detail
-              label="Journal Debits"
-              value={money(balanceFor(viewing).debit)}
-            />
-            <Detail
-              label="Journal Credits"
-              value={money(balanceFor(viewing).credit)}
-            />
-            <Detail
-              label="Current Balance"
-              value={balanceText(balanceFor(viewing))}
+              label="Legacy Opening Balance"
+              value={money(Number(viewing.opening_balance || 0))}
             />
             <Detail
               label="Status"

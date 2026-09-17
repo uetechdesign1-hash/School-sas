@@ -14,6 +14,7 @@ import {
   FileText,
   Landmark,
   Loader2,
+  Link as LinkIcon,
   Pencil,
   Plus,
   Receipt,
@@ -27,11 +28,30 @@ import {
 import jsPDF from "jspdf";
 import * as XLSX from "xlsx";
 import { createClient } from "@/lib/supabase/client";
+import Link from "next/link";
 import {
   ensureSchoolAccountingSetup,
   postPurchaseBillJournal,
+  postPurchaseReturnJournal,
+  postVendorRefundJournal,
   postVendorPaymentJournal,
+  INVENTORY_CATEGORY_ACCOUNTS,
 } from "@/lib/accounting/canonical-accounting";
+import {
+  deletePurchaseReturn,
+  recordPurchaseReturn,
+  returnLineAmount,
+  returnSettlementEffect,
+  updatePurchaseReturn,
+} from "@/lib/accounting/purchase-returns";
+import {
+  applyStockMovements,
+  InventoryError,
+} from "@/lib/inventory/valuation";
+import {
+  errorText,
+  missingColumn,
+} from "@/lib/supabase/postgrest-errors";
 
 type Vendor = {
   id: string;
@@ -55,6 +75,7 @@ type Bill = {
   total_amount: number;
   notes: string | null;
   journal_entry_id: string | null;
+  purchase_type?: string | null;
 };
 
 type BillItem = {
@@ -64,6 +85,45 @@ type BillItem = {
   expense_account_id: string | null;
   quantity: number;
   unit_price: number;
+  amount: number;
+  inventory_item_id?: string | null;
+};
+
+type InventoryItem = {
+  id: string;
+  school_id: string;
+  name: string;
+  category: "books" | "uniform" | "other";
+  unit: string;
+  opening_quantity: number;
+  opening_unit_cost: number;
+  is_active: boolean;
+};
+
+type PurchaseReturn = {
+  id: string;
+  school_id: string;
+  bill_id: string;
+  vendor_id: string;
+  return_number: string | null;
+  return_date: string;
+  total_amount: number;
+  reason: string | null;
+  reference: string | null;
+  settlement_type: "credit" | "refund";
+  refund_account_id: string | null;
+  journal_entry_id: string | null;
+  refund_journal_entry_id: string | null;
+};
+
+type PurchaseReturnItem = {
+  id: string;
+  return_id: string;
+  bill_item_id: string | null;
+  inventory_item_id: string | null;
+  description: string | null;
+  quantity: number;
+  unit_cost: number;
   amount: number;
 };
 
@@ -115,19 +175,39 @@ type JournalLineView = {
 type LedgerRow = {
   date: string;
   particulars: string;
-  kind: "purchase" | "payment" | "opening";
+  kind: "purchase" | "payment" | "return" | "opening";
   purchase: number;
   payment: number;
+  returnAmount: number;
   balance: number;
 };
 
-type Tab = "vendors" | "bills" | "payments" | "outstanding" | "ledger";
+type Tab =
+  | "vendors"
+  | "bills"
+  | "payments"
+  | "returns"
+  | "outstanding"
+  | "ledger";
 
 type LineDraft = {
   description: string;
   accountId: string;
   qty: string;
   price: string;
+  inventoryItemId: string;
+};
+
+type ReturnLineDraft = {
+  billItemId: string;
+  inventoryItemId: string;
+  description: string;
+  purchasedQty: number;
+  alreadyReturnedQty: number;
+  qty: string;
+  originalAmount: number;
+  alreadyReturnedAmount: number;
+  unitCost: number;
 };
 
 const round2 = (n: number) =>
@@ -409,6 +489,13 @@ export default function VendorPurchasesPage() {
   const [payments, setPayments] = useState<Payment[]>([]);
   const [allocations, setAllocations] = useState<Allocation[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [inventoryItems, setInventoryItems] = useState<InventoryItem[]>([]);
+  const [purchaseReturns, setPurchaseReturns] = useState<PurchaseReturn[]>(
+    [],
+  );
+  const [purchaseReturnItems, setPurchaseReturnItems] = useState<
+    PurchaseReturnItem[]
+  >([]);
 
   const [vendorPayablesAccountId, setVendorPayablesAccountId] = useState("");
 
@@ -467,6 +554,49 @@ export default function VendorPurchasesPage() {
     useState<Payment | null>(null);
   const [deletingPayment, setDeletingPayment] = useState(false);
 
+  const [billPurchaseType, setBillPurchaseType] = useState<
+    "inventory" | "expense" | "service"
+  >("expense");
+  const [inventoryCategory, setInventoryCategory] = useState<
+    "books" | "uniform" | "other"
+  >("books");
+
+  const [showReturnModal, setShowReturnModal] = useState(false);
+  const [returnBill, setReturnBill] = useState<BillView | null>(null);
+  const [returnNumber, setReturnNumber] = useState("");
+  const [returnDate, setReturnDate] = useState(today());
+  const [returnReason, setReturnReason] = useState("");
+  const [returnReference, setReturnReference] = useState("");
+  const [returnSettlement, setReturnSettlement] = useState<
+    "credit" | "refund"
+  >("credit");
+  const [returnRefundAccountId, setReturnRefundAccountId] = useState("");
+  const [returnLines, setReturnLines] = useState<ReturnLineDraft[]>([]);
+  const [returnRequestId, setReturnRequestId] = useState("");
+  const [returnError, setReturnError] = useState("");
+  const [savingReturn, setSavingReturn] = useState(false);
+
+  /*
+   * A return is recorded in two ways:
+   *   - from a bill row (the bill is already known), or
+   *   - manually from the Returns tab (vendor -> bill -> lines).
+   * Editing reconnects to the original bill and re-uses the same return id, so
+   * the accounting entry is replaced instead of duplicated.
+   */
+  const [manualReturnMode, setManualReturnMode] = useState(false);
+  const [returnVendorId, setReturnVendorId] = useState("");
+  const [editingReturn, setEditingReturn] = useState<PurchaseReturn | null>(
+    null,
+  );
+
+  const [returnsViewBillId, setReturnsViewBillId] = useState("");
+  const [showReturnsModal, setShowReturnsModal] = useState(false);
+  const [viewReturn, setViewReturn] = useState<PurchaseReturn | null>(null);
+  const [deleteReturnTarget, setDeleteReturnTarget] =
+    useState<PurchaseReturn | null>(null);
+  const [deletingReturn, setDeletingReturn] = useState(false);
+  const [returnsTabVendorId, setReturnsTabVendorId] = useState("");
+
   async function getSchool() {
     const { data: auth, error: authError } =
       await supabase.auth.getUser();
@@ -512,6 +642,9 @@ export default function VendorPurchasesPage() {
       paymentRes,
       allocRes,
       accountRes,
+      inventoryRes,
+      returnsRes,
+      returnItemsRes,
     ] = await Promise.all([
       supabase
         .from("schools")
@@ -555,6 +688,23 @@ export default function VendorPurchasesPage() {
         .eq("school_id", id)
         .eq("is_active", true)
         .order("name"),
+
+      supabase
+        .from("inventory_items")
+        .select("*")
+        .eq("school_id", id)
+        .order("name"),
+
+      supabase
+        .from("purchase_returns")
+        .select("*")
+        .eq("school_id", id)
+        .order("return_date", { ascending: false }),
+
+      supabase
+        .from("purchase_return_items")
+        .select("*")
+        .eq("school_id", id),
     ]);
 
     if (schoolRes.error) throw schoolRes.error;
@@ -564,6 +714,9 @@ export default function VendorPurchasesPage() {
     if (paymentRes.error) throw paymentRes.error;
     if (allocRes.error) throw allocRes.error;
     if (accountRes.error) throw accountRes.error;
+    if (inventoryRes.error) throw inventoryRes.error;
+    if (returnsRes.error) throw returnsRes.error;
+    if (returnItemsRes.error) throw returnItemsRes.error;
 
     setSchoolName(schoolRes.data?.name || "School");
     setVendors((vendorRes.data || []) as Vendor[]);
@@ -572,6 +725,11 @@ export default function VendorPurchasesPage() {
     setPayments((paymentRes.data || []) as Payment[]);
     setAllocations((allocRes.data || []) as Allocation[]);
     setAccounts((accountRes.data || []) as Account[]);
+    setInventoryItems((inventoryRes.data || []) as InventoryItem[]);
+    setPurchaseReturns((returnsRes.data || []) as PurchaseReturn[]);
+    setPurchaseReturnItems(
+      (returnItemsRes.data || []) as PurchaseReturnItem[],
+    );
 
     const setup = await ensureSchoolAccountingSetup(supabase, id);
 
@@ -662,12 +820,62 @@ export default function VendorPurchasesPage() {
     return map;
   }, [allocations]);
 
+  // Resale inventory accounts seeded by ensureSchoolAccountingSetup.
+  const inventoryAccountMap = useMemo(() => {
+    const byCode = new Map(
+      accounts.map((account) => [account.code, account.id]),
+    );
+
+    const resolve = (code: string) =>
+      byCode.get(code) ||
+      accounts.find((a) => a.name === code.replace(/_/g, " "))?.id ||
+      "";
+
+    return {
+      books: resolve("BOOKS_INVENTORY"),
+      uniform: resolve("UNIFORM_INVENTORY"),
+      other: resolve("OTHER_RESALE_INVENTORY"),
+    };
+  }, [accounts]);
+
+  // Returned quantity per bill item (sum over all return lines).
+  const returnedQtyByBillItem = useMemo(() => {
+    const map: Record<string, number> = {};
+    const returnsWithItems = new Set(
+      purchaseReturnItems.map((i) => i.return_id),
+    );
+
+    for (const line of purchaseReturnItems) {
+      if (!line.bill_item_id) continue;
+      if (!returnsWithItems.has(line.return_id)) continue;
+
+      map[line.bill_item_id] = round2(
+        (map[line.bill_item_id] || 0) + Number(line.quantity || 0),
+      );
+    }
+
+    return map;
+  }, [purchaseReturnItems]);
+
+  const returnedAmountByBill = useMemo(() => {
+    const map: Record<string, number> = {};
+
+    for (const ret of purchaseReturns) {
+      map[ret.bill_id] = round2(
+        (map[ret.bill_id] || 0) + Number(ret.total_amount || 0),
+      );
+    }
+
+    return map;
+  }, [purchaseReturns]);
+
   const billViews = useMemo<BillView[]>(
     () =>
       bills.map((b) => {
         const total = round2(Number(b.total_amount || 0));
         const paid = round2(paidByBill[b.id] || 0);
-        const outstanding = round2(total - paid);
+        const returned = round2(returnedAmountByBill[b.id] || 0);
+        const outstanding = round2(total - paid - returned);
 
         return {
           ...b,
@@ -688,8 +896,18 @@ export default function VendorPurchasesPage() {
           items: itemsByBill.get(b.id) || [],
         };
       }),
-    [bills, paidByBill, itemsByBill, vendorMap],
+    [
+      bills,
+      paidByBill,
+      itemsByBill,
+      vendorMap,
+      returnedAmountByBill,
+    ],
   );
+
+  // Bill lines whose items came from the item picker (resale inventory).
+  const billIsInventory = (bill: BillView) =>
+    bill.items.some((item) => item.inventory_item_id);
 
   const statsByVendor = useMemo(() => {
     const map: Record<
@@ -697,9 +915,12 @@ export default function VendorPurchasesPage() {
       {
         purchases: number;
         paid: number;
+        returns: number;
+        netPurchases: number;
         outstanding: number;
         billCount: number;
         unpaidCount: number;
+        returnCount: number;
       }
     > = {};
 
@@ -707,9 +928,12 @@ export default function VendorPurchasesPage() {
       map[vendor.id] = {
         purchases: 0,
         paid: 0,
+        returns: 0,
+        netPurchases: 0,
         outstanding: 0,
         billCount: 0,
         unpaidCount: 0,
+        returnCount: 0,
       };
     }
 
@@ -732,8 +956,21 @@ export default function VendorPurchasesPage() {
       }
     }
 
+    for (const ret of purchaseReturns) {
+      const stat = map[ret.vendor_id];
+
+      if (!stat) continue;
+
+      stat.returns = round2(stat.returns + Number(ret.total_amount || 0));
+      stat.returnCount += 1;
+    }
+
+    for (const stat of Object.values(map)) {
+      stat.netPurchases = round2(stat.purchases - stat.returns);
+    }
+
     return map;
-  }, [vendors, billViews]);
+  }, [vendors, billViews, purchaseReturns]);
 
   const periodYears = useMemo(() => {
     const years = new Set<string>();
@@ -796,6 +1033,88 @@ export default function VendorPurchasesPage() {
     [filteredBills],
   );
 
+  // Returns respect the same year/month filter as bills and payments.
+  const filteredReturns = useMemo(
+    () =>
+      (filterActive
+        ? purchaseReturns.filter((ret) =>
+            matchesPeriod(ret.return_date, filterYear, filterMonth),
+          )
+        : purchaseReturns
+      )
+        .filter((ret) => !returnsTabVendorId || ret.vendor_id === returnsTabVendorId)
+        .sort((a, b) => b.return_date.localeCompare(a.return_date)),
+    [
+      purchaseReturns,
+      returnsTabVendorId,
+      filterActive,
+      filterYear,
+      filterMonth,
+    ],
+  );
+
+  const filteredReturnsTotal = useMemo(
+    () =>
+      round2(
+        filteredReturns.reduce(
+          (sum, ret) => sum + Number(ret.total_amount || 0),
+          0,
+        ),
+      ),
+    [filteredReturns],
+  );
+
+  // Manual entry only allows bills of the selected vendor.
+  const returnVendorBills = useMemo(
+    () =>
+      !returnVendorId
+        ? []
+        : billViews
+            .filter((bill) => bill.vendor_id === returnVendorId)
+            .sort((a, b) => b.bill_date.localeCompare(a.bill_date)),
+    [billViews, returnVendorId],
+  );
+
+  const returnsViewBill = useMemo(
+    () => billViews.find((bill) => bill.id === returnsViewBillId) || null,
+    [billViews, returnsViewBillId],
+  );
+
+  const returnsViewRows = useMemo(
+    () =>
+      purchaseReturns
+        .filter((ret) => ret.bill_id === returnsViewBillId)
+        .sort((a, b) => b.return_date.localeCompare(a.return_date)),
+    [purchaseReturns, returnsViewBillId],
+  );
+
+  const returnItemsFor = (returnId: string) =>
+    purchaseReturnItems.filter((line) => line.return_id === returnId);
+
+  const returnTotalPreview = useMemo(
+    () => round2(returnLines.reduce((sum, line) => sum + returnLineAmount(line), 0)),
+    [returnLines],
+  );
+
+  const returnSettlementPreview = useMemo(
+    () => returnSettlementEffect(returnTotalPreview, returnSettlement),
+    [returnTotalPreview, returnSettlement],
+  );
+
+  const returnRunningOutstanding = useMemo(() => {
+    if (!returnBill) return 0;
+
+    // While editing, the return being replaced is still counted in
+    // bill.outstanding, so add it back before previewing the new effect.
+    const restore = editingReturn
+      ? Number(editingReturn.total_amount || 0)
+      : 0;
+
+    return round2(
+      returnBill.outstanding + restore - returnSettlementPreview.reduction,
+    );
+  }, [returnBill, editingReturn, returnSettlementPreview]);
+
   const filteredOutstandingTotal = useMemo(
     () =>
       round2(
@@ -840,6 +1159,10 @@ export default function VendorPurchasesPage() {
       (payment) => payment.vendor_id === ledgerVendorId,
     );
 
+    const vendorReturns = purchaseReturns.filter(
+      (ret) => ret.vendor_id === ledgerVendorId,
+    );
+
     const scopeKey = filterActive
       ? periodStartKey(filterYear, filterMonth)
       : "";
@@ -864,6 +1187,14 @@ export default function VendorPurchasesPage() {
 
         opening = round2(opening - Number(payment.amount || 0));
       }
+
+      // A purchase return reduces the payable automatically, so it must also
+      // reduce the balance carried into the selected period.
+      for (const ret of vendorReturns) {
+        if (!isBeforeScope(ret.return_date)) continue;
+
+        opening = round2(opening - Number(ret.total_amount || 0));
+      }
     }
 
     const rows: Omit<LedgerRow, "balance">[] = [];
@@ -875,6 +1206,7 @@ export default function VendorPurchasesPage() {
         kind: "opening",
         purchase: 0,
         payment: 0,
+        returnAmount: 0,
       });
     }
 
@@ -889,6 +1221,7 @@ export default function VendorPurchasesPage() {
         kind: "purchase",
         purchase: Number(bill.total_amount || 0),
         payment: 0,
+        returnAmount: 0,
       });
     }
 
@@ -907,6 +1240,29 @@ export default function VendorPurchasesPage() {
         kind: "payment",
         purchase: 0,
         payment: Number(payment.amount || 0),
+        returnAmount: 0,
+      });
+    }
+
+    for (const ret of vendorReturns) {
+      if (!matchesPeriod(ret.return_date, filterYear, filterMonth)) continue;
+
+      const billNumber = vendorBills.find((bill) => bill.id === ret.bill_id)
+        ?.bill_number;
+
+      rows.push({
+        date: ret.return_date,
+        particulars: [
+          ret.return_number ? `Purchase return ${ret.return_number}` : "Purchase return",
+          billNumber ? `bill ${billNumber}` : null,
+          ret.settlement_type === "refund" ? "refund received" : "credit note",
+        ]
+          .filter(Boolean)
+          .join(" — "),
+        kind: "return",
+        purchase: 0,
+        payment: 0,
+        returnAmount: Number(ret.total_amount || 0),
       });
     }
 
@@ -925,7 +1281,9 @@ export default function VendorPurchasesPage() {
 
     return rows.map((row) => {
       if (row.kind !== "opening") {
-        balance = round2(balance + row.purchase - row.payment);
+        balance = round2(
+          balance + row.purchase - row.payment - row.returnAmount,
+        );
       }
 
       return { ...row, balance };
@@ -934,6 +1292,7 @@ export default function VendorPurchasesPage() {
     ledgerVendorId,
     billViews,
     payments,
+    purchaseReturns,
     filterActive,
     filterYear,
     filterMonth,
@@ -951,6 +1310,8 @@ export default function VendorPurchasesPage() {
       ),
     [lines],
   );
+
+  const isInventoryBillType = billPurchaseType === "inventory";
 
   // When a payment is being edited its old allocations are released back to
   // the bills first, so the modal preview and the FIFO run use the same
@@ -1030,6 +1391,8 @@ export default function VendorPurchasesPage() {
 
   function openAddVendor() {
     resetVendorForm();
+    setError("");
+    setSuccess("");
     setShowVendorModal(true);
   }
 
@@ -1041,6 +1404,8 @@ export default function VendorPurchasesPage() {
     setVendorGstin(vendor.gstin || "");
     setVendorAddress(vendor.address || "");
     setVendorNotes(vendor.notes || "");
+    setError("");
+    setSuccess("");
     setShowVendorModal(true);
   }
 
@@ -1056,7 +1421,10 @@ export default function VendorPurchasesPage() {
       setSavingVendor(true);
       setError("");
 
-      const payload = {
+      const vendor = editingVendor;
+      const notesRequested = Boolean(vendorNotes.trim());
+
+      const payload: Record<string, unknown> = {
         school_id: schoolId,
         name: vendorName.trim(),
         phone: vendorPhone.trim() || null,
@@ -1066,44 +1434,58 @@ export default function VendorPurchasesPage() {
         notes: vendorNotes.trim() || null,
       };
 
-      if (editingVendor) {
-        const { error: updateError } = await supabase
-          .from("vendors")
-          .update(payload)
-          .eq("id", editingVendor.id)
-          .eq("school_id", schoolId);
+      const write = (row: Record<string, unknown>) =>
+        vendor
+          ? supabase
+              .from("vendors")
+              .update(row)
+              .eq("id", vendor.id)
+              .eq("school_id", schoolId)
+          : supabase.from("vendors").insert(row);
 
-        if (updateError) throw updateError;
+      const firstAttempt = await write(payload);
 
-        setSuccess("Vendor updated.");
-      } else {
-        const { error: insertError } = await supabase
-          .from("vendors")
-          .insert(payload);
+      let writeError = firstAttempt.error;
+      let notesSaved = true;
 
-        if (insertError) {
-          if (
-            String(insertError.message || "").includes(
-              "duplicate key",
-            )
-          ) {
-            throw new Error(
-              "A vendor with this name already exists.",
-            );
-          }
+      /*
+       * Databases created by the older expenses module have no vendors.notes
+       * column (see 20260919120000_vendor_purchase_legacy_alignment.sql).
+       * PostgREST then rejects the whole write with "Could not find the 'notes'
+       * column of 'vendors' in the schema cache", so keep the vendor saved
+       * without the note and tell the admin what to apply.
+       */
+      if (writeError && missingColumn(writeError) === "notes") {
+        notesSaved = false;
 
-          throw insertError;
+        const rowWithoutNotes: Record<string, unknown> = { ...payload };
+        delete rowWithoutNotes.notes;
+
+        writeError = (await write(rowWithoutNotes)).error;
+      }
+
+      if (writeError) {
+        if (String(writeError.message || "").includes("duplicate key")) {
+          throw new Error("A vendor with this name already exists.");
         }
 
-        setSuccess("Vendor added.");
+        throw new Error(errorText(writeError, "Unable to save vendor."));
       }
+
+      setSuccess(
+        `${vendor ? "Vendor updated." : "Vendor added."}${
+          !notesSaved && notesRequested
+            ? " The note was not stored because this database has no vendors.notes column yet. Apply supabase/migrations/20260919120000_vendor_purchase_legacy_alignment.sql to enable vendor notes."
+            : ""
+        }`,
+      );
 
       setShowVendorModal(false);
       resetVendorForm();
       await loadData(schoolId);
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error(e);
-      setError(e?.message || "Unable to save vendor.");
+      setError(errorText(e, "Unable to save vendor."));
     } finally {
       setSavingVendor(false);
     }
@@ -1116,6 +1498,7 @@ export default function VendorPurchasesPage() {
     setBillDate(today());
     setDueDate("");
     setBillNotes("");
+    setBillPurchaseType("expense");
     setLines([]);
   }
 
@@ -1126,6 +1509,7 @@ export default function VendorPurchasesPage() {
     setBillDate(bill.bill_date);
     setDueDate(bill.due_date || "");
     setBillNotes(bill.notes || "");
+    setBillPurchaseType((bill as any).purchase_type || "expense");
 
     setLines(
       bill.items.length > 0
@@ -1134,6 +1518,8 @@ export default function VendorPurchasesPage() {
             accountId: item.expense_account_id || "",
             qty: String(Number(item.quantity || 1)),
             price: String(Number(item.unit_price || 0)),
+            inventoryItemId:
+              (item as any).inventory_item_id || "",
           }))
         : [
             {
@@ -1141,6 +1527,7 @@ export default function VendorPurchasesPage() {
               accountId: expenseAccounts[0]?.id || "",
               qty: "1",
               price: "",
+              inventoryItemId: "",
             },
           ],
     );
@@ -1160,6 +1547,7 @@ export default function VendorPurchasesPage() {
           accountId: expenseAccounts[0].id,
           qty: "1",
           price: "",
+          inventoryItemId: "",
         },
       ]);
     }
@@ -1175,6 +1563,7 @@ export default function VendorPurchasesPage() {
         accountId: expenseAccounts[0]?.id || "",
         qty: "1",
         price: "",
+        inventoryItemId: "",
       },
     ]);
   }
@@ -1206,10 +1595,13 @@ export default function VendorPurchasesPage() {
         throw new Error("Select the bill date.");
       }
 
+      const isInventoryBill = billPurchaseType === "inventory";
+
       const cleanLines = lines
         .map((line) => ({
           description: line.description.trim(),
           accountId: line.accountId,
+          inventoryItemId: line.inventoryItemId,
           qty: Number(line.qty || 0),
           price: Number(line.price || 0),
         }))
@@ -1237,7 +1629,13 @@ export default function VendorPurchasesPage() {
           );
         }
 
-        if (!line.accountId) {
+        if (isInventoryBill && !line.inventoryItemId) {
+          throw new Error(
+            "Select an inventory item for every line on an inventory (resale) purchase.",
+          );
+        }
+
+        if (!line.accountId && !isInventoryBill) {
           throw new Error(
             "Select an expense account for every line item.",
           );
@@ -1251,6 +1649,9 @@ export default function VendorPurchasesPage() {
           0,
         ),
       );
+
+      const vendorNameText =
+        vendorMap.get(billVendorId)?.name || "Vendor";
 
       if (!(total > 0)) {
         throw new Error("Bill total must be greater than zero.");
@@ -1293,6 +1694,7 @@ export default function VendorPurchasesPage() {
             bill_date: billDate,
             due_date: dueDate || null,
             total_amount: total,
+            purchase_type: billPurchaseType,
             notes: billNotes.trim() || null,
           })
           .eq("id", editingBill.id)
@@ -1328,6 +1730,7 @@ export default function VendorPurchasesPage() {
             bill_date: billDate,
             due_date: dueDate || null,
             total_amount: total,
+            purchase_type: billPurchaseType,
             notes: billNotes.trim() || null,
             created_by: user,
           })
@@ -1366,7 +1769,8 @@ export default function VendorPurchasesPage() {
             school_id: schoolId,
             bill_id: billId,
             description: line.description || null,
-            expense_account_id: line.accountId,
+            expense_account_id: line.accountId || null,
+            inventory_item_id: line.inventoryItemId || null,
             quantity: line.qty,
             unit_price: line.price,
             amount: round2(line.qty * line.price),
@@ -1375,6 +1779,27 @@ export default function VendorPurchasesPage() {
         );
 
       if (itemsError) throw itemsError;
+
+      // Inventory (resale) purchases move stock in at cost; the stock ledger
+      // entry is recorded before posting so a failed insert blocks the journal.
+      if (isInventoryBill) {
+        await applyStockMovements(
+          supabase,
+          schoolId,
+          cleanLines
+            .filter((line) => line.inventoryItemId)
+            .map((line) => ({
+              inventoryItemId: line.inventoryItemId,
+              movementDate: billDate,
+              movementType: "purchase" as const,
+              quantity: line.qty,
+              unitCost: line.price,
+              refTable: "purchase_bills",
+              refId: billId,
+              notes: `Purchase from ${vendorNameText}`,
+            })),
+        );
+      }
 
       // Re-post the accounting entry so corrected amounts are reflected.
       if (editingBill?.journal_entry_id) {
@@ -1404,8 +1829,82 @@ export default function VendorPurchasesPage() {
         );
       }
 
-      const vendorNameText =
-        vendorMap.get(billVendorId)?.name || "Vendor";
+      // Inventory purchases debit the category inventory asset accounts;
+      // expense/service purchases keep the legacy expense debit behaviour.
+      const inventoryItemIds = [
+        ...new Set(
+          cleanLines
+            .map((line) => line.inventoryItemId)
+            .filter(Boolean),
+        ),
+      ];
+
+      let inventoryCategoryAccountIds = new Map<string, string>();
+      let debitLinesForJournal: {
+        accountId: string;
+        amount: number;
+        description?: string;
+      }[] = [];
+
+      if (isInventoryBill && inventoryItemIds.length > 0) {
+        const { data: invItems, error: invItemsError } = await supabase
+          .from("inventory_items")
+          .select("id, category, name")
+          .eq("school_id", schoolId)
+          .in("id", inventoryItemIds);
+
+        if (invItemsError) throw invItemsError;
+
+        const categoryMap = new Map(
+          (invItems || []).map((item) => [item.id, item.category]),
+        );
+
+        const accountCodes = [
+          ...new Set(
+            inventoryItemIds.map(
+              (id) =>
+                INVENTORY_CATEGORY_ACCOUNTS[
+                  (categoryMap.get(id) ||
+                    "other") as keyof typeof INVENTORY_CATEGORY_ACCOUNTS
+                ].inventory,
+            ),
+          ),
+        ];
+
+        const { data: invAccounts, error: invAccountsError } = await supabase
+          .from("accounts")
+          .select("id, code")
+          .eq("school_id", schoolId)
+          .in("code", accountCodes);
+
+        if (invAccountsError) throw invAccountsError;
+
+        inventoryCategoryAccountIds = new Map(
+          (invAccounts || []).map((account) => [account.code, account.id]),
+        );
+
+        // One debit line per bill line, mapped to its category account.
+        debitLinesForJournal = cleanLines
+          .filter((line) => line.inventoryItemId)
+          .map((line) => {
+            const category = (categoryMap.get(line.inventoryItemId) ||
+              "other") as keyof typeof INVENTORY_CATEGORY_ACCOUNTS;
+            const code = INVENTORY_CATEGORY_ACCOUNTS[category].inventory;
+            const accountId = inventoryCategoryAccountIds.get(code);
+
+            if (!accountId) {
+              throw new Error(
+                `The ${code} account is missing. Please run accounting setup first.`,
+              );
+            }
+
+            return {
+              accountId,
+              amount: round2(line.qty * line.price),
+              description: line.description || "Inventory purchase",
+            };
+          });
+      }
 
       const posted = await postPurchaseBillJournal(supabase, {
         schoolId,
@@ -1421,6 +1920,9 @@ export default function VendorPurchasesPage() {
             description: `Purchase - ${vendorNameText}`,
           }),
         ),
+        ...(isInventoryBill
+          ? { debitLines: debitLinesForJournal }
+          : {}),
         createdBy: user,
       });
 
@@ -1438,8 +1940,12 @@ export default function VendorPurchasesPage() {
       resetBillForm();
       setSuccess(
         wasEditing
-          ? "Purchase bill updated. The linked Dr Expense / Cr Vendor Payables entry was re-posted."
-          : "Purchase bill recorded. Dr Expense / Cr Vendor Payables posted.",
+          ? isInventoryBill
+            ? "Purchase bill updated. The linked Dr Inventory / Cr Vendor Payables entry was re-posted."
+            : "Purchase bill updated. The linked Dr Expense / Cr Vendor Payables entry was re-posted."
+          : isInventoryBill
+            ? "Purchase bill recorded. Dr Inventory / Cr Vendor Payables posted."
+            : "Purchase bill recorded. Dr Expense / Cr Vendor Payables posted.",
       );
       await loadData(schoolId);
     } catch (e: any) {
@@ -1449,6 +1955,221 @@ export default function VendorPurchasesPage() {
       setSavingBill(false);
     }
   }
+  /*
+   * Return draft lines are always rebuilt from the bill items, so a quantity
+   * that was already returned elsewhere is never offered twice. When an
+   * existing return is edited its own lines are excluded from the
+   * "already returned" figures and pre-filled in the quantity column.
+   */
+  function buildReturnLines(
+    bill: BillView,
+    excludeReturnId?: string,
+  ): ReturnLineDraft[] {
+    return bill.items.map((item) => {
+      const allLines = purchaseReturnItems.filter(
+        (line) => line.bill_item_id === item.id,
+      );
+      const ownLines = excludeReturnId
+        ? allLines.filter((line) => line.return_id === excludeReturnId)
+        : [];
+
+      const ownQty = round2(
+        ownLines.reduce((sum, line) => sum + Number(line.quantity || 0), 0),
+      );
+
+      const alreadyReturnedQty = round2(
+        (returnedQtyByBillItem[item.id] || 0) - ownQty,
+      );
+      const alreadyReturnedAmount = round2(
+        allLines.reduce((sum, line) => sum + Number(line.amount || 0), 0) -
+          ownLines.reduce((sum, line) => sum + Number(line.amount || 0), 0),
+      );
+
+      return {
+        billItemId: item.id,
+        inventoryItemId: item.inventory_item_id || "",
+        description:
+          item.description ||
+          inventoryItems.find((inv) => inv.id === item.inventory_item_id)
+            ?.name ||
+          "Bill item",
+        purchasedQty: Number(item.quantity),
+        alreadyReturnedQty,
+        originalAmount: Number(item.amount),
+        alreadyReturnedAmount,
+        qty: ownQty > 0 ? String(ownQty) : "",
+        unitCost: Number(item.unit_price),
+      };
+    });
+  }
+
+  function resetReturnForm() {
+    setEditingReturn(null);
+    setManualReturnMode(false);
+    setReturnVendorId("");
+    setReturnBill(null);
+    setReturnRequestId(crypto.randomUUID());
+    setReturnNumber("");
+    setReturnDate(today());
+    setReturnReason("");
+    setReturnReference("");
+    setReturnSettlement("credit");
+    setReturnRefundAccountId("");
+    setReturnLines([]);
+    setReturnError("");
+  }
+
+  function openPurchaseReturn(bill: BillView) {
+    resetReturnForm();
+    setReturnVendorId(bill.vendor_id);
+    setReturnBill(bill);
+    setReturnSettlement(bill.outstanding > 0.009 ? "credit" : "refund");
+    setReturnLines(buildReturnLines(bill));
+    setShowReturnModal(true);
+  }
+
+  // Manual entry from the Returns tab: vendor first, then the bill.
+  function openManualReturn() {
+    resetReturnForm();
+    setManualReturnMode(true);
+    setShowReturnModal(true);
+  }
+
+  function openEditReturn(ret: PurchaseReturn) {
+    const bill = billViews.find((b) => b.id === ret.bill_id);
+
+    if (!bill) {
+      setError(
+        "The purchase bill behind this return is missing. Refresh the page.",
+      );
+      return;
+    }
+
+    resetReturnForm();
+    setEditingReturn(ret);
+    setReturnVendorId(bill.vendor_id);
+    setReturnBill(bill);
+    setReturnRequestId(ret.id);
+    setReturnNumber(ret.return_number || "");
+    setReturnDate(ret.return_date);
+    setReturnReason(ret.reason || "");
+    setReturnReference(ret.reference || "");
+    setReturnSettlement(ret.settlement_type);
+    setReturnRefundAccountId(ret.refund_account_id || "");
+    setReturnLines(buildReturnLines(bill, ret.id));
+    setShowReturnsModal(false);
+    setViewReturn(null);
+    setShowReturnModal(true);
+  }
+
+  function selectManualReturnBill(billId: string) {
+    const bill = billViews.find((b) => b.id === billId) || null;
+
+    setReturnRequestId(crypto.randomUUID());
+    setReturnBill(bill);
+    setReturnLines(bill ? buildReturnLines(bill) : []);
+
+    if (bill) {
+      setReturnSettlement(bill.outstanding > 0.009 ? "credit" : "refund");
+    }
+  }
+
+  async function savePurchaseReturn() {
+    if (!schoolId || !returnBill || savingReturn) return;
+
+    const editing = editingReturn;
+    const bill = returnBill;
+    const settlement = returnSettlement;
+
+    setSavingReturn(true);
+    setReturnError("");
+
+    try {
+      const payload = {
+        schoolId,
+        returnDate,
+        returnNumber,
+        reason: returnReason,
+        reference: returnReference,
+        settlement,
+        refundAccountId: returnRefundAccountId,
+        lines: returnLines,
+      };
+
+      const result = editing
+        ? await updatePurchaseReturn(supabase, {
+            ...payload,
+            returnId: editing.id,
+          })
+        : await recordPurchaseReturn(supabase, {
+            ...payload,
+            billId: bill.id,
+            requestId: returnRequestId,
+          });
+
+      const refundNote =
+        settlement === "refund" ? " and the Cash/Bank refund" : " credit";
+
+      setShowReturnModal(false);
+      setViewBill(null);
+      setSuccess(
+        editing
+          ? `Purchase return of ${money(Number(result.total_amount))} updated. The previous entry was reversed and re-posted with the vendor particulars${refundNote}.`
+          : `Purchase return of ${money(Number(result.total_amount))} posted with accounting${refundNote}.`,
+      );
+      resetReturnForm();
+
+      try {
+        await loadData(schoolId);
+      } catch {
+        setError(
+          "Return was saved, but refreshing failed. Refresh the page before recording another return.",
+        );
+      }
+    } catch (e: unknown) {
+      setReturnError(
+        e instanceof Error
+          ? e.message
+          : "Unable to post purchase return. Retry the same request.",
+      );
+    } finally {
+      setSavingReturn(false);
+    }
+  }
+
+  async function deleteReturn() {
+    if (!schoolId || !deleteReturnTarget) return;
+
+    const target = deleteReturnTarget;
+
+    try {
+      setDeletingReturn(true);
+      setError("");
+
+      await deletePurchaseReturn(supabase, {
+        schoolId,
+        returnId: target.id,
+      });
+
+      setSuccess(
+        `Purchase return ${target.return_number || ""} deleted. Its accounting entry was reversed and the returned stock restored for ${
+          vendorMap.get(target.vendor_id)?.name || "the vendor"
+        }.`,
+      );
+      setDeleteReturnTarget(null);
+      setShowReturnsModal(false);
+      setViewReturn(null);
+      await loadData(schoolId);
+    } catch (e: unknown) {
+      console.error(e);
+      setError(
+        e instanceof Error ? e.message : "Unable to delete purchase return.",
+      );
+    } finally {
+      setDeletingReturn(false);
+    }
+  }
+
   function resetPaymentForm() {
     setEditingPayment(null);
     setPayVendorId("");
@@ -1765,7 +2486,7 @@ export default function VendorPurchasesPage() {
       const { data, error } = await supabase
         .from("journal_lines")
         .select(
-          "id,debit,credit,description,account_name:accounts(name)",
+          "id,debit,credit,description,account:accounts(name)",
         )
         .eq("journal_entry_id", bill.journal_entry_id)
         .eq("school_id", schoolId)
@@ -1773,8 +2494,22 @@ export default function VendorPurchasesPage() {
 
       if (error) throw error;
 
+      // The accounts(name) embed yields { account: { name } }, so flatten it
+      // to a plain string; rendering the object directly would crash React
+      // with "Objects are not valid as a React child".
       setViewJournal(
-        (data || []) as unknown as JournalLineView[],
+        (data || []).map((row: any) => ({
+          id: row.id,
+          debit: row.debit,
+          credit: row.credit,
+          description: row.description,
+          account_name:
+            (row.account &&
+            typeof row.account === "object"
+              ? (row.account as { name?: string | null }).name
+              : (row.account as string | null)) ??
+            null,
+        })),
       );
     } catch (e: any) {
       console.error(e);
@@ -1995,6 +2730,7 @@ export default function VendorPurchasesPage() {
     { key: "outstanding", label: "Outstanding Payables", icon: <Wallet size={15} /> },
     { key: "bills", label: "Purchase Bills", icon: <FileText size={15} /> },
     { key: "payments", label: "Vendor Payments", icon: <Banknote size={15} /> },
+    { key: "returns", label: "Purchase Returns", icon: <Receipt size={15} /> },
     { key: "vendors", label: "Vendors", icon: <Users size={15} /> },
     { key: "ledger", label: "Vendor Ledger", icon: <Landmark size={15} /> },
   ];
@@ -2051,6 +2787,24 @@ export default function VendorPurchasesPage() {
                 <Banknote size={17} />
                 Record Payment
               </button>
+
+              <div className="flex gap-2">
+                <Link
+                  href="/dashboard/expenses"
+                  className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-50"
+                >
+                  <Receipt size={15} />
+                  Expenses
+                </Link>
+
+                <Link
+                  href="/accounting/payment"
+                  className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-50"
+                >
+                  <Banknote size={15} />
+                  Payment
+                </Link>
+              </div>
             </div>
           </div>
 
@@ -2426,6 +3180,9 @@ export default function VendorPurchasesPage() {
                               View
                             </button>
 
+                            <button onClick={() => openPurchaseReturn(bill)} disabled={!bill.journal_entry_id || !bill.items.some((item) => Number(item.quantity) > (returnedQtyByBillItem[item.id] || 0))} className="rounded-lg border border-amber-300 px-3 py-1.5 text-xs font-semibold text-amber-800 disabled:opacity-40">Return</button>
+                            <button onClick={() => { setReturnsViewBillId(bill.id); setShowReturnsModal(true); }} className="rounded-lg border px-3 py-1.5 text-xs font-semibold text-slate-600">Return history</button>
+
                             <button
                               onClick={() => openEditBill(bill)}
                               className="inline-flex items-center gap-1 rounded-lg border px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50"
@@ -2451,6 +3208,184 @@ export default function VendorPurchasesPage() {
             </div>
           </section>
         )}
+
+        {tab === "returns" && (
+          <section className="overflow-hidden rounded-2xl border bg-white shadow-sm">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b px-5 py-4">
+              <div>
+                <h2 className="font-bold text-slate-900">Purchase Returns</h2>
+
+                <p className="mt-1 text-xs text-slate-500">
+                  Every posted return reduces the vendor payable (and the bill
+                  outstanding) automatically, and posts Dr Vendor Payables / Cr
+                  Inventory or Expense with the vendor name and description.
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <select
+                  value={returnsTabVendorId}
+                  onChange={(e) => setReturnsTabVendorId(e.target.value)}
+                  className="input max-w-xs"
+                >
+                  <option value="">All vendors</option>
+
+                  {vendors.map((vendor) => (
+                    <option key={vendor.id} value={vendor.id}>
+                      {vendor.name}
+                    </option>
+                  ))}
+                </select>
+
+                <button
+                  onClick={openManualReturn}
+                  className="inline-flex items-center gap-2 rounded-lg bg-amber-600 px-4 py-2 text-sm font-semibold text-white hover:bg-amber-700"
+                >
+                  <Plus size={15} />
+                  Record Return
+                </button>
+              </div>
+            </div>
+
+            <div className="border-b bg-slate-50 px-5 py-3 text-xs font-semibold text-slate-500">
+              {periodLabel} • {filteredReturns.length} return(s) • total{" "}
+              {money(filteredReturnsTotal)}
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="min-w-[1100px] w-full">
+                <thead className="bg-slate-50">
+                  <tr className="border-b">
+                    {[
+                      "Date",
+                      "Return No",
+                      "Vendor",
+                      "Bill No",
+                      "Settlement",
+                      "Amount",
+                      "Accounting",
+                      "Actions",
+                    ].map((h) => (
+                      <th
+                        key={h}
+                        className="px-5 py-4 text-left text-xs font-bold uppercase tracking-wide text-slate-500"
+                      >
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+
+                <tbody>
+                  {filteredReturns.length === 0 ? (
+                    <tr>
+                      <td
+                        colSpan={8}
+                        className="px-5 py-12 text-center text-sm text-slate-400"
+                      >
+                        {filterActive
+                          ? `No purchase returns for ${periodLabel}.`
+                          : "No purchase returns yet. Use Record Return for a manual entry, or the Return button on a purchase bill."}
+                      </td>
+                    </tr>
+                  ) : (
+filteredReturns.map((ret) => {
+                      const billNumber = billViews.find(
+                        (bill) => bill.id === ret.bill_id,
+                      )?.bill_number;
+
+                      return (
+                        <tr
+                          key={ret.id}
+                          className="border-b last:border-0 hover:bg-slate-50"
+                        >
+                          <td className="px-5 py-4 text-sm text-slate-600">
+                            {dateText(ret.return_date)}
+                          </td>
+
+                          <td className="px-5 py-4 text-sm font-semibold text-slate-800">
+                            {ret.return_number || "-"}
+                          </td>
+
+                          <td className="px-5 py-4 text-sm text-slate-700">
+                            {vendorMap.get(ret.vendor_id)?.name ||
+                              "Unknown vendor"}
+                          </td>
+
+                          <td className="px-5 py-4 text-sm text-slate-600">
+                            {billNumber || "-"}
+                          </td>
+
+                          <td className="px-5 py-4">
+                            <span
+                              className={`inline-flex rounded-full px-2.5 py-1 text-xs font-bold ${
+                                ret.settlement_type === "refund"
+                                  ? "bg-blue-50 text-blue-700"
+                                  : "bg-amber-50 text-amber-700"
+                              }`}
+                            >
+                              {ret.settlement_type === "refund"
+                                ? "Refund received"
+                                : "Credit note"}
+                            </span>
+                          </td>
+
+                          <td className="px-5 py-4 text-sm font-bold text-slate-900">
+                            {money(ret.total_amount)}
+                          </td>
+
+                          <td className="px-5 py-4">
+                            {ret.journal_entry_id ? (
+                              <span className="inline-flex rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700">
+                                {ret.settlement_type === "refund" &&
+                                ret.refund_journal_entry_id
+                                  ? "Return + refund posted"
+                                  : "Posted"}
+                              </span>
+                            ) : (
+                              <span className="inline-flex rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-500">
+                                Not posted
+                              </span>
+                            )}
+                          </td>
+
+                          <td className="px-5 py-4">
+                            <div className="flex items-center justify-end gap-2">
+                              <button
+                                onClick={() => setViewReturn(ret)}
+                                className="inline-flex items-center gap-1 rounded-lg border px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                              >
+                                <Eye size={14} />
+                                View
+                              </button>
+
+                              <button
+                                onClick={() => openEditReturn(ret)}
+                                className="inline-flex items-center gap-1 rounded-lg border px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                              >
+                                <Pencil size={14} />
+                                Edit
+                              </button>
+
+                              <button
+                                onClick={() => setDeleteReturnTarget(ret)}
+                                className="inline-flex items-center gap-1 rounded-lg border border-red-200 px-3 py-1.5 text-xs font-semibold text-red-600 hover:bg-red-50"
+                              >
+                                <Trash2 size={14} />
+                                Delete
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
+
 
         {tab === "vendors" && (
           <section className="overflow-hidden rounded-2xl border bg-white shadow-sm">
@@ -2707,7 +3642,7 @@ export default function VendorPurchasesPage() {
                 <table className="min-w-[900px] w-full">
                   <thead className="bg-slate-50">
                     <tr className="border-b">
-                      {["Date", "Particulars", "Type", "Purchase", "Payment", "Balance"].map(
+                      {["Date", "Particulars", "Type", "Purchase", "Payment", "Return", "Balance"].map(
                         (h) => (
                           <th
                             key={h}
@@ -2723,8 +3658,8 @@ export default function VendorPurchasesPage() {
                   <tbody>
                     {ledgerRows.length === 0 ? (
                       <tr>
-                        <td colSpan={6} className="px-5 py-12 text-center text-sm text-slate-400">
-                          No purchases or payments recorded for this vendor yet.
+                        <td colSpan={7} className="px-5 py-12 text-center text-sm text-slate-400">
+                          No purchases, payments or returns recorded for this vendor yet.
                         </td>
                       </tr>
                     ) : (
@@ -2745,14 +3680,18 @@ export default function VendorPurchasesPage() {
                                   ? "bg-blue-50 text-blue-700"
                                   : row.kind === "payment"
                                     ? "bg-emerald-50 text-emerald-700"
-                                    : "bg-slate-100 text-slate-600"
+                                    : row.kind === "return"
+                                      ? "bg-amber-50 text-amber-700"
+                                      : "bg-slate-100 text-slate-600"
                               }`}
                             >
                               {row.kind === "purchase"
                                 ? "Purchase"
                                 : row.kind === "payment"
                                   ? "Payment"
-                                  : "Opening"}
+                                  : row.kind === "return"
+                                    ? "Return"
+                                    : "Opening"}
                             </span>
                           </td>
 
@@ -2762,6 +3701,10 @@ export default function VendorPurchasesPage() {
 
                           <td className="px-5 py-4 text-sm text-emerald-600">
                             {row.payment ? money(row.payment) : "-"}
+                          </td>
+
+                          <td className="px-5 py-4 text-sm text-amber-700">
+                            {row.returnAmount ? money(row.returnAmount) : "-"}
                           </td>
 
                           <td className="px-5 py-4 text-sm font-bold text-slate-900">
@@ -2777,6 +3720,662 @@ export default function VendorPurchasesPage() {
           </section>
         )}
       </div>
+      {showReturnModal && (
+        <Modal
+          title={
+            editingReturn
+              ? `Edit Purchase Return ${editingReturn.return_number || ""}`
+              : manualReturnMode
+                ? "Record Purchase Return (Manual Entry)"
+                : "Record Purchase Return"
+          }
+          onClose={() => {
+            if (savingReturn) return;
+            setShowReturnModal(false);
+            resetReturnForm();
+          }}
+        >
+          {returnError && (
+            <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+              {returnError}
+            </div>
+          )}
+
+          {manualReturnMode && (
+            <div className="mb-4 grid gap-4 sm:grid-cols-2">
+              <Field label="Vendor *">
+                <select
+                  value={returnVendorId}
+                  onChange={(e) => {
+                    setReturnVendorId(e.target.value);
+                    setReturnBill(null);
+                    setReturnLines([]);
+                  }}
+                  className="input"
+                >
+                  <option value="">Select vendor...</option>
+
+                  {vendors.map((vendor) => (
+                    <option key={vendor.id} value={vendor.id}>
+                      {vendor.name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+
+              <Field label="Purchase Bill *">
+                <select
+                  value={returnBill?.id || ""}
+                  onChange={(e) => selectManualReturnBill(e.target.value)}
+                  disabled={!returnVendorId}
+                  className="input"
+                >
+                  <option value="">Select bill...</option>
+
+                  {returnVendorBills.map((bill) => (
+                    <option key={bill.id} value={bill.id}>
+                      {`${bill.bill_number || "No bill number"} — ${dateText(
+                        bill.bill_date,
+                      )} — ${money(bill.total_amount)}`}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            </div>
+          )}
+
+          {!returnBill ? (
+            <div className="rounded-xl bg-slate-50 p-4 text-sm text-slate-500">
+              Select the vendor and the purchase bill being returned. The return
+              amount is deducted from that bill outstanding automatically and
+              posted to the accounting entries with the vendor particulars.
+            </div>
+          ) : (
+            <>
+              <div className="rounded-xl border bg-slate-50 p-4">
+                <div className="flex flex-wrap gap-x-8 gap-y-3">
+                  <Info
+                    label="Vendor"
+                    value={vendorMap.get(returnBill.vendor_id)?.name || "Vendor"}
+                  />
+                  <Info label="Bill No" value={returnBill.bill_number || "-"} />
+                  <Info label="Bill Date" value={dateText(returnBill.bill_date)} />
+                  <Info label="Bill Total" value={money(returnBill.total_amount)} />
+                  <Info label="Paid" value={money(returnBill.paid)} />
+                  <Info
+                    label={editingReturn ? "Returned (others)" : "Already Returned"}
+                    value={money(
+                      returnedAmountByBill[returnBill.id] || 0,
+                    )}
+                  />
+                  <Info label="Outstanding now" value={money(returnBill.outstanding)} />
+                </div>
+              </div>
+
+              <div className="mt-4 overflow-x-auto rounded-xl border">
+                <table className="min-w-[820px] w-full">
+                  <thead className="bg-slate-50">
+                    <tr className="border-b">
+                      {[
+                        "Item / Description",
+                        "Purchased",
+                        "Returned",
+                        "Return Qty",
+                        "Unit Cost",
+                        "Return Amount",
+                      ].map((h) => (
+                        <th
+                          key={h}
+                          className="px-4 py-3 text-left text-xs font-bold uppercase tracking-wide text-slate-500"
+                        >
+                          {h}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+
+                  <tbody>
+                    {returnLines.map((line) => {
+                      const remaining = round2(
+                        line.purchasedQty - line.alreadyReturnedQty,
+                      );
+
+                      return (
+                        <tr key={line.billItemId} className="border-b last:border-0">
+                          <td className="px-4 py-3 text-sm font-semibold text-slate-800">
+                            {line.description}
+                          </td>
+
+                          <td className="px-4 py-3 text-sm text-slate-600">
+                            {line.purchasedQty}
+                          </td>
+
+                          <td className="px-4 py-3 text-sm text-amber-700">
+                            {line.alreadyReturnedQty || "-"}
+                          </td>
+
+                          <td className="px-4 py-3">
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.001"
+                              max={remaining > 0 ? remaining : undefined}
+                              value={line.qty}
+                              disabled={remaining <= 0}
+                              onChange={(e) =>
+                                setReturnLines((prev) =>
+                                  prev.map((item) =>
+                                    item.billItemId === line.billItemId
+                                      ? { ...item, qty: e.target.value }
+                                      : item,
+                                  ),
+                                )
+                              }
+                              placeholder="0"
+                              className="input max-w-[120px]"
+                            />
+
+                            <div className="mt-1 text-xs text-slate-400">
+                              {remaining > 0
+                                ? `Max ${remaining}`
+                                : "Fully returned"}
+                            </div>
+                          </td>
+
+                          <td className="px-4 py-3 text-sm text-slate-600">
+                            {money(line.unitCost)}
+                          </td>
+
+                          <td className="px-4 py-3 text-sm font-bold text-slate-900">
+                            {money(returnLineAmount(line))}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                <Field label="Return Date *">
+                  <input
+                    type="date"
+                    value={returnDate}
+                    onChange={(e) => setReturnDate(e.target.value)}
+                    className="input"
+                  />
+                </Field>
+
+                <Field label="Return Number">
+                  <input
+                    value={returnNumber}
+                    onChange={(e) => setReturnNumber(e.target.value)}
+                    placeholder="Credit note / return number"
+                    className="input"
+                  />
+                </Field>
+
+                <Field label="Settlement *">
+                  <select
+                    value={returnSettlement}
+                    onChange={(e) =>
+                      setReturnSettlement(e.target.value as "credit" | "refund")
+                    }
+                    className="input"
+                  >
+                    <option value="credit">
+                      Credit note — reduce the vendor payable / outstanding
+                    </option>
+                    <option value="refund">
+                      Refund — money received back into Cash / Bank
+                    </option>
+                  </select>
+                </Field>
+
+                {returnSettlement === "refund" && (
+                  <Field label="Refund To (Cash / Bank) *">
+                    <select
+                      value={returnRefundAccountId}
+                      onChange={(e) => setReturnRefundAccountId(e.target.value)}
+                      className="input"
+                    >
+                      <option value="">Select account...</option>
+
+                      {payAccounts.map((account) => (
+                        <option key={account.id} value={account.id}>
+                          {account.code ? `${account.code} - ` : ""}
+                          {account.name}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                )}
+
+                <Field label="Reason">
+                  <input
+                    value={returnReason}
+                    onChange={(e) => setReturnReason(e.target.value)}
+                    placeholder="Damaged, wrong item, excess supply..."
+                    className="input"
+                  />
+                </Field>
+
+                <Field label="Reference">
+                  <input
+                    value={returnReference}
+                    onChange={(e) => setReturnReference(e.target.value)}
+                    placeholder="Gate pass / debit note reference"
+                    className="input"
+                  />
+                </Field>
+              </div>
+
+              <div className="mt-4 rounded-xl bg-emerald-50 p-4 text-sm text-emerald-800">
+                <div className="flex flex-wrap justify-between gap-2 font-semibold">
+                  <span>Return value</span>
+                  <span>{money(returnTotalPreview)}</span>
+                </div>
+                <div className="mt-1 flex flex-wrap justify-between gap-2">
+                  <span>Outstanding after this return</span>
+                  <span>{money(returnRunningOutstanding)}</span>
+                </div>
+                <div className="mt-1 text-xs text-emerald-700">
+                  {returnSettlement === "refund"
+                    ? `Dr ${money(returnSettlementPreview.refund)} to Cash/Bank and Cr Vendor Payables; the invoice outstanding drops automatically.`
+                    : "Dr Vendor Payables / Cr Inventory or Expense; the invoice outstanding drops automatically."}
+                </div>
+              </div>
+
+              <div className="mt-5 flex justify-end gap-3 border-t pt-5">
+                <button
+                  onClick={() => {
+                    setShowReturnModal(false);
+                    resetReturnForm();
+                  }}
+                  className="rounded-lg border px-5 py-2.5 text-sm font-semibold"
+                >
+                  Cancel
+                </button>
+
+                <button
+                  onClick={() => void savePurchaseReturn()}
+                  disabled={
+                    savingReturn ||
+                    !returnBill ||
+                    returnTotalPreview <= 0 ||
+                    (returnSettlement === "refund" && !returnRefundAccountId)
+                  }
+                  className="inline-flex items-center gap-2 rounded-lg bg-amber-600 px-6 py-2.5 text-sm font-semibold text-white disabled:opacity-50"
+                >
+                  {savingReturn ? (
+                    <>
+                      <Loader2 size={16} className="animate-spin" />
+                      Saving...
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 size={16} />
+                      {editingReturn ? "Update Return" : "Post Return"}
+                    </>
+                  )}
+                </button>
+              </div>
+            </>
+          )}
+        </Modal>
+      )}
+            {showReturnsModal && returnsViewBill && (
+        <Modal
+          title="Return history"
+          onClose={() => {
+            if (deletingReturn || viewReturn) return;
+            setShowReturnsModal(false);
+            setReturnsViewBillId("");
+          }}
+        >
+          <div className="mb-4 text-sm text-slate-600">
+            Bill{" "}
+            <span className="font-semibold">
+              {returnsViewBill.bill_number || "— No bill number —"}
+            </span>{" "}
+            · {dateText(returnsViewBill.bill_date)} ·{" "}
+            {money(returnsViewBill.total_amount)}
+          </div>
+
+          {returnsViewRows.length === 0 ? (
+            <div className="p-3 text-sm text-slate-500">
+              No purchase return has been recorded for this bill yet.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[720px] table-fixed">
+                <thead className="bg-slate-50">
+                  <tr>
+                    {[
+                      "Date",
+                      "Return #",
+                      "Settlement",
+                      "Reason / Reference",
+                      "Amount",
+                      "Status",
+                      "Actions",
+                    ].map((h) => (
+                      <th
+                        key={h}
+                        className="px-4 py-2 text-left text-xs font-bold uppercase tracking-wide text-slate-500"
+                      >
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                                </thead>
+
+                <tbody>
+                  {returnsViewRows.map((ret) => {
+                    const ref =
+                      ret.return_number ||
+                      `PR-${ret.id.slice(0, 8).toUpperCase()}`;
+                    const refund = ret.settlement_type === "refund";
+                    const posted = Boolean(ret.journal_entry_id);
+
+                    return (
+                      <tr
+                        key={ret.id}
+                        className="border-b last:border-0 hover:bg-slate-50"
+                      >
+                        <td className="px-4 py-2.5 text-sm text-slate-600">
+                          {dateText(ret.return_date)}
+                        </td>
+
+                        <td className="px-4 py-2.5 text-sm font-semibold text-slate-800">
+                          {ref}
+                        </td>
+
+                        <td className="px-4 py-2.5">
+                          <span
+                            className={`inline-flex rounded-full px-2.5 py-1 text-xs font-bold ${
+                              refund
+                                ? "bg-blue-50 text-blue-700"
+                                : "bg-amber-50 text-amber-700"
+                            }`}
+                          >
+                            {refund ? "Refund" : "Credit note"}
+                          </span>
+                        </td>
+
+                        <td className="px-4 py-2.5 text-sm text-slate-600">
+                          {ret.reason
+                            ? `${ret.reason}${ret.reference ? ` · ${ret.reference}` : ""}`
+                            : ret.reference || "-"}
+                        </td>
+
+                        <td className="px-4 py-2.5 text-sm font-bold text-slate-900">
+                          {money(Number(ret.total_amount || 0))}
+                        </td>
+
+                        <td className="px-4 py-2.5">
+                          {posted ? (
+                            <span className="inline-flex rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700">
+                              Posted
+                            </span>
+                          ) : (
+                            <span className="inline-flex rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-500">
+                              Not posted
+                            </span>
+                          )}
+                        </td>
+
+                        <td className="px-4 py-2.5 text-right">
+                          <div className="flex items-center justify-end gap-1">
+                            <button
+                              onClick={() => setViewReturn(ret)}
+                              className="inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                            >
+                              <Eye size={12} />
+                              View
+                            </button>
+
+                            <button
+                              onClick={() => openEditReturn(ret)}
+                              className="inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                            >
+                              <Pencil size={12} />
+                              Edit
+                            </button>
+
+                            <button
+                              onClick={() => setDeleteReturnTarget(ret)}
+                              className="inline-flex items-center gap-1 rounded-lg border border-red-200 px-2 py-1 text-xs font-semibold text-red-600 hover:bg-red-50"
+                            >
+                              <Trash2 size={12} />
+                              Delete
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          <div className="mt-5 flex justify-end gap-3 border-t pt-4">
+            <button
+              onClick={() => openPurchaseReturn(returnsViewBill)}
+              disabled={
+                deletingReturn ||
+                !returnsViewBill.journal_entry_id ||
+                returnsViewBill.items.every(
+                  (item) =>
+                    Number(item.quantity || 0) <=
+                    (returnedQtyByBillItem[item.id] || 0),
+                )
+              }
+              className="inline-flex items-center gap-2 rounded-lg bg-amber-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50 hover:bg-amber-700"
+            >
+              <Plus size={14} />
+              Record Return on this Bill
+            </button>
+          </div>
+        </Modal>
+      )}
+            {viewReturn && (
+        <Modal
+          title={`Purchase return ${viewReturn.return_number || ""}`}
+          onClose={() => setViewReturn(null)}
+        >
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="Return Date">
+              <span className="text-sm text-slate-700">
+                {dateText(viewReturn.return_date)}
+              </span>
+            </Field>
+
+            <Field label="Settlement">
+              {viewReturn.settlement_type === "refund" ? (
+                <span className="inline-flex rounded-full px-2.5 py-1 text-xs font-bold bg-blue-50 text-blue-700">
+                  Refund to Cash/Bank
+                </span>
+              ) : (
+                <span className="inline-flex rounded-full px-2.5 py-1 text-xs font-bold bg-amber-50 text-amber-700">
+                  Credit note (vendor payable reduced)
+                </span>
+              )}
+            </Field>
+
+            <Field label="Bill">
+              {(() => {
+                const bill = billViews.find((b) => b.id === viewReturn.bill_id);
+                return (
+                  <span className="text-sm text-slate-700">
+                    {bill?.bill_number || "-"} ·{" "}
+                    {bill ? dateText(bill.bill_date) : "-"} ·{" "}
+                    {money(viewReturn.total_amount)}
+                  </span>
+                );
+              })()}
+            </Field>
+
+            <Field label="Vendor">
+              <span className="text-sm text-slate-700">
+                {vendorMap.get(viewReturn.vendor_id)?.name ||
+                  "Unknown vendor"}
+              </span>
+            </Field>
+
+            <div className="sm:col-span-2">
+              <Field label="Reason">
+                <span className="text-sm text-slate-700">
+                  {viewReturn.reason || "-"}
+                </span>
+              </Field>
+            </div>
+
+            <div className="sm:col-span-2">
+              <Field label="Reference">
+                <span className="text-sm text-slate-700">
+                  {viewReturn.reference || "-"}
+                </span>
+              </Field>
+            </div>
+
+            <div className="sm:col-span-2">
+              <Field label="Accounting">
+                <span className="text-sm font-mono text-slate-600 break-all">
+                  {viewReturn.journal_entry_id
+                    ? `Posted (${viewReturn.journal_entry_id})`
+                    : "Not posted"}
+                </span>
+              </Field>
+            </div>
+                    </div>
+
+          <div className="mt-5 overflow-x-auto">
+            <div className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-500">
+              Return lines
+            </div>
+
+            <table className="w-full table-fixed">
+              <thead className="bg-slate-50">
+                <tr>
+                  {["Description", "Quantity", "Unit cost", "Amount"].map(
+                    (h) => (
+                      <th
+                        key={h}
+                        className="px-4 py-2 text-left text-xs font-bold uppercase tracking-wide text-slate-500"
+                      >
+                        {h}
+                      </th>
+                    ),
+                  )}
+                </tr>
+              </thead>
+
+              <tbody>
+                {returnItemsFor(viewReturn.id).map((line) => (
+                  <tr key={line.id} className="border-b last:border-0">
+                    <td className="px-4 py-2 text-sm text-slate-700">
+                      {line.description || "-"}
+                    </td>
+
+                    <td className="px-4 py-2 text-sm text-slate-700">
+                      {Number(line.quantity || 0)}
+                    </td>
+
+                    <td className="px-4 py-2 text-sm text-slate-600">
+                      {money(Number(line.unit_cost || 0))}
+                    </td>
+
+                    <td className="px-4 py-2 text-sm font-bold text-slate-900">
+                      {money(Number(line.amount || 0))}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="mt-5 flex justify-end gap-3 border-t pt-4">
+            <button
+              onClick={() => setViewReturn(null)}
+              className="rounded-lg border px-5 py-2.5 text-sm font-semibold"
+            >
+              Close
+            </button>
+
+            <button
+              onClick={() => openEditReturn(viewReturn)}
+              className="inline-flex items-center gap-2 rounded-lg border px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+            >
+              <Pencil size={14} />
+              Edit Return
+            </button>
+
+            <button
+              onClick={() => setDeleteReturnTarget(viewReturn)}
+              className="inline-flex items-center gap-2 rounded-lg border border-red-200 px-4 py-2 text-sm font-semibold text-red-600 hover:bg-red-50"
+            >
+              <Trash2 size={14} />
+              Delete Return
+            </button>
+          </div>
+        </Modal>
+      )}
+            {deleteReturnTarget && (
+        <Modal
+          title="Delete Purchase Return"
+          onClose={() => !deletingReturn && setDeleteReturnTarget(null)}
+        >
+          <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+            This will delete the purchase return and reverse everything it
+            posted: the accounting adjustment (and, if the return was settled as
+            a refund, the refund receipt too) and the stock that was taken out
+            of inventory. The bill outstanding is restored automatically. This
+            action cannot be undone by the application.
+          </div>
+
+          <div className="mt-4 rounded-xl bg-slate-50 p-4">
+            <div className="font-semibold">
+              {vendorMap.get(deleteReturnTarget.vendor_id)?.name ||
+                "Vendor"}
+            </div>
+
+            <div className="mt-1 text-sm text-slate-500">
+              {deleteReturnTarget.return_number || "-"} ·{" "}
+              {dateText(deleteReturnTarget.return_date)} ·{" "}
+              {money(deleteReturnTarget.total_amount)}
+            </div>
+          </div>
+
+          <div className="mt-5 flex justify-end gap-3 border-t pt-5">
+            <button
+              onClick={() => setDeleteReturnTarget(null)}
+              disabled={deletingReturn}
+              className="rounded-lg border px-5 py-2.5 text-sm font-semibold"
+            >
+              Cancel
+            </button>
+
+            <button
+              onClick={() => void deleteReturn()}
+              disabled={deletingReturn}
+              className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-6 py-2.5 text-sm font-semibold text-white disabled:opacity-50"
+            >
+              {deletingReturn ? (
+                <>
+                  <Loader2 size={16} className="animate-spin" />
+                  Deleting...
+                </>
+              ) : (
+                <>
+                  <Trash2 size={16} />
+                  Delete Return
+                </>
+              )}
+            </button>
+          </div>
+        </Modal>
+      )}
       {showVendorModal && (
         <Modal
           title={editingVendor ? "Edit Vendor" : "Add Vendor"}
@@ -2784,6 +4383,12 @@ export default function VendorPurchasesPage() {
             !savingVendor && setShowVendorModal(false)
           }
         >
+          {error && (
+            <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+              {error}
+            </div>
+          )}
+
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Vendor Name *">
               <input
@@ -2921,6 +4526,30 @@ export default function VendorPurchasesPage() {
                 className="input"
               />
             </Field>
+
+            <Field label="Purchase Type *">
+              <select
+                value={billPurchaseType}
+                onChange={(e) =>
+                  setBillPurchaseType(
+                    e.target.value as "inventory" | "expense" | "service",
+                  )
+                }
+                className="input"
+              >
+                <option value="inventory">
+                  Inventory / Resale (stock for selling)
+                </option>
+                <option value="expense">Expense / Consumption</option>
+                <option value="service">Service</option>
+              </select>
+            </Field>
+
+            <div className="sm:col-span-2 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">
+              {billPurchaseType === "inventory"
+                ? "Inventory purchases are booked as an asset (Dr Inventory / Cr Vendor Payables). They do NOT appear as an operating expense until the items are sold."
+                : "Expense and service purchases are booked directly as operating expenses (Dr Expense / Cr Vendor Payables)."}
+            </div>
           </div>
 
           <div className="mt-5">
@@ -2965,33 +4594,57 @@ export default function VendorPurchasesPage() {
                         </Field>
                       </div>
 
-                      <div className="sm:col-span-3">
-                        <Field label="Expense Account">
-                          <select
-                            value={line.accountId}
-                            onChange={(e) =>
-                              updateLine(index, {
-                                accountId: e.target.value,
-                              })
-                            }
-                            className="input"
-                          >
-                            <option value="">Select...</option>
+                      {isInventoryBillType ? (
+                        <div className="sm:col-span-3">
+                          <Field label="Inventory Item">
+                            <select
+                              value={line.inventoryItemId}
+                              onChange={(e) =>
+                                updateLine(index, {
+                                  inventoryItemId: e.target.value,
+                                })
+                              }
+                              className="input"
+                            >
+                              <option value="">Select item...</option>
 
-                            {expenseAccounts.map((account) => (
-                              <option
-                                key={account.id}
-                                value={account.id}
-                              >
-                                {account.code
-                                  ? `${account.code} - `
-                                  : ""}
-                                {account.name}
-                              </option>
-                            ))}
-                          </select>
-                        </Field>
-                      </div>
+                              {inventoryItems.map((item) => (
+                                <option key={item.id} value={item.id}>
+                                  {item.name} ({item.category})
+                                </option>
+                              ))}
+                            </select>
+                          </Field>
+                        </div>
+                      ) : (
+                        <div className="sm:col-span-3">
+                          <Field label="Expense Account">
+                            <select
+                              value={line.accountId}
+                              onChange={(e) =>
+                                updateLine(index, {
+                                  accountId: e.target.value,
+                                })
+                              }
+                              className="input"
+                            >
+                              <option value="">Select...</option>
+
+                              {expenseAccounts.map((account) => (
+                                <option
+                                  key={account.id}
+                                  value={account.id}
+                                >
+                                  {account.code
+                                    ? `${account.code} - `
+                                    : ""}
+                                  {account.name}
+                                </option>
+                              ))}
+                            </select>
+                          </Field>
+                        </div>
+                      )}
 
                       <div className="sm:col-span-1">
                         <Field label="Qty">
@@ -3072,8 +4725,8 @@ export default function VendorPurchasesPage() {
 
           <div className="mt-4 rounded-xl bg-emerald-50 p-3 text-xs text-emerald-700">
             {editingBill
-              ? `On save: the existing accounting entry is removed and re-posted as Dr Expense accounts / Cr Vendor Payables for ${money(billTotal)}.`
-              : `On save: Dr Expense accounts / Cr Vendor Payables will be posted automatically for ${money(billTotal)}.`}
+              ? `On save: the existing accounting entry is removed and re-posted as ${isInventoryBillType ? "Dr Inventory" : "Dr Expense"} accounts / Cr Vendor Payables for ${money(billTotal)}.`
+              : `On save: ${isInventoryBillType ? "Dr Inventory" : "Dr Expense"} accounts / Cr Vendor Payables will be posted automatically for ${money(billTotal)}.`}
           </div>
 
           <div className="mt-5 flex justify-end gap-3 border-t pt-5">
