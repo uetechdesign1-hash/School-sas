@@ -39,3 +39,11 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# build/scratch artifacts accidentally committed earlier
+build-error.txt
+*-build*.log
+schoolflow-*.zip
+*.backup-payroll-accounting-v2
+.vscode/
+
