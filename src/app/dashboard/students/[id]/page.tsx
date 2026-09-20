@@ -6,11 +6,20 @@ import {
   useEffect,
   useState,
 } from "react";
+import type { ReactNode } from "react";
 import {
   useParams,
   useRouter,
 } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
+import {
+  BadgePercent,
+  Clock3,
+  Download,
+  IndianRupee,
+  Wallet,
+} from "lucide-react";
+import { generateFeeLedgerPDF } from "@/lib/fees/generateFeeLedger";
 
 type Gender =
   | "male"
@@ -68,6 +77,13 @@ type Student = {
   notes: string | null;
 };
 
+type FeeSummary = {
+  overall: number;
+  collected: number;
+  pending: number;
+  concession: number;
+};
+
 export default function StudentDetailsPage() {
   const params = useParams();
   const router = useRouter();
@@ -79,6 +95,20 @@ export default function StudentDetailsPage() {
 
   const [student, setStudent] =
     useState<Student | null>(null);
+
+  const [feeSummary, setFeeSummary] =
+    useState<FeeSummary>({
+      overall: 0,
+      collected: 0,
+      pending: 0,
+      concession: 0,
+    });
+
+  const [feeSummaryLoading, setFeeSummaryLoading] =
+    useState(true);
+
+  const [ledgerDownloading, setLedgerDownloading] =
+    useState(false);
 
   const [loading, setLoading] =
     useState(true);
@@ -456,6 +486,12 @@ export default function StudentDetailsPage() {
 
       setStudent(record);
 
+      loadFeeSummary(
+        supabase,
+        schoolId,
+        studentId
+      );
+
       fillForm(record);
 
       setClassId(
@@ -488,6 +524,307 @@ export default function StudentDetailsPage() {
       setClassesLoading(false);
       setAcademicYearsLoading(false);
       setLoading(false);
+    }
+  }
+
+  /*
+   * Fee summary for the four dashboard boxes.
+   *
+   * fee_bills is the canonical source (same as the Fee Ledger):
+   * - total_amount  -> Overall (net of concession, after recalculation)
+   * - paid_amount   -> Fee Collection
+   * - balance_amount-> Pending Collection
+   * fee_concessions -> Concession Given
+   */
+  async function loadFeeSummary(
+    supabase: ReturnType<typeof createClient>,
+    schoolId: string,
+    studentId: string
+  ) {
+    setFeeSummaryLoading(true);
+
+    try {
+      const [
+        billsResult,
+        concessionsResult,
+      ] = await Promise.all([
+        supabase
+          .from("fee_bills")
+          .select(
+            "total_amount, paid_amount, balance_amount"
+          )
+          .eq("school_id", schoolId)
+          .eq("student_id", studentId),
+
+        supabase
+          .from("fee_concessions")
+          .select("amount")
+          .eq("school_id", schoolId)
+          .eq("student_id", studentId),
+      ]);
+
+      if (billsResult.error) {
+        throw billsResult.error;
+      }
+
+      if (concessionsResult.error) {
+        throw concessionsResult.error;
+      }
+
+      const bills =
+        (billsResult.data || []) as Array<{
+          total_amount: number | null;
+          paid_amount: number | null;
+          balance_amount: number | null;
+        }>;
+
+      const concessions =
+        (concessionsResult.data ||
+          []) as Array<{
+          amount: number | null;
+        }>;
+
+      let overall = 0;
+      let collected = 0;
+      let pending = 0;
+      let concession = 0;
+
+      for (const bill of bills) {
+        overall +=
+          Math.max(
+            Number(bill.total_amount || 0),
+            0
+          );
+
+        collected +=
+          Math.max(
+            Number(bill.paid_amount || 0),
+            0
+          );
+
+        pending +=
+          Math.max(
+            Number(bill.balance_amount || 0),
+            0
+          );
+      }
+
+      for (const item of concessions) {
+        concession +=
+          Math.max(
+            Number(item.amount || 0),
+            0
+          );
+      }
+
+      setFeeSummary({
+        overall,
+        collected,
+        pending,
+        concession,
+      });
+    } catch (loadError) {
+      console.error(
+        "LOAD FEE SUMMARY ERROR:",
+        loadError
+      );
+
+      setFeeSummary({
+        overall: 0,
+        collected: 0,
+        pending: 0,
+        concession: 0,
+      });
+    } finally {
+      setFeeSummaryLoading(false);
+    }
+  }
+
+  /*
+   * Download the student's fee ledger as a PDF.
+   *
+   * Entries are built from the same canonical sources the Fee Ledger uses:
+   * - fee_bills        -> Debit (fee assigned)
+   * - fee_concessions  -> Credit (concession given)
+   * - fee_payments     -> Credit (payment received)
+   */
+  async function downloadLedger() {
+    if (!student || !studentId) {
+      return;
+    }
+
+    setLedgerDownloading(true);
+
+    try {
+      const supabase = createClient();
+
+      const schoolId = await getSchoolId(supabase);
+
+      if (!schoolId) {
+        return;
+      }
+
+      const [billsResult, concessionsResult, paymentsResult, schoolResult] =
+        await Promise.all([
+          supabase
+            .from("fee_bills")
+            .select(
+              "bill_number, bill_date, total_amount, paid_amount, balance_amount"
+            )
+            .eq("school_id", schoolId)
+            .eq("student_id", studentId)
+            .order("bill_date", { ascending: true }),
+
+          supabase
+            .from("fee_concessions")
+            .select("amount, created_at")
+            .eq("school_id", schoolId)
+            .eq("student_id", studentId)
+            .order("created_at", { ascending: true }),
+
+          supabase
+            .from("fee_payments")
+            .select("receipt_number, payment_date, amount, payment_method")
+            .eq("school_id", schoolId)
+            .eq("student_id", studentId)
+            .order("payment_date", { ascending: true }),
+
+          supabase
+            .from("schools")
+            .select("name, address, phone, email")
+            .eq("id", schoolId)
+            .maybeSingle(),
+        ]);
+
+      if (billsResult.error) {
+        throw billsResult.error;
+      }
+
+      if (concessionsResult.error) {
+        throw concessionsResult.error;
+      }
+
+      if (paymentsResult.error) {
+        throw paymentsResult.error;
+      }
+
+      type BillRow = {
+        bill_number: string;
+        bill_date: string;
+        total_amount: number | null;
+        paid_amount: number | null;
+        balance_amount: number | null;
+      };
+
+      type ConcessionRow = {
+        amount: number | null;
+        created_at: string | null;
+      };
+
+      type PaymentRow = {
+        receipt_number: string;
+        payment_date: string;
+        amount: number | null;
+        payment_method: string | null;
+      };
+
+      const bills = (billsResult.data || []) as BillRow[];
+      const concessions = (concessionsResult.data || []) as ConcessionRow[];
+      const payments = (paymentsResult.data || []) as PaymentRow[];
+      const school = (schoolResult.data || null) as {
+        name: string;
+        address: string | null;
+        phone: string | null;
+        email: string | null;
+      } | null;
+
+      type LedgerEntry = {
+        sortDate: string;
+        date: string;
+        particulars: string;
+        reference: string;
+        debit: number;
+        credit: number;
+      };
+
+      const entries: LedgerEntry[] = [];
+
+      for (const bill of bills) {
+        entries.push({
+          sortDate: bill.bill_date || "",
+          date: bill.bill_date || "",
+          particulars: "Fee Bill Assigned",
+          reference: bill.bill_number || "—",
+          debit: Math.max(Number(bill.total_amount || 0), 0),
+          credit: 0,
+        });
+      }
+
+      for (const item of concessions) {
+        entries.push({
+          sortDate: item.created_at || "",
+          date: (item.created_at || "").slice(0, 10),
+          particulars: "Concession Given",
+          reference: "—",
+          debit: 0,
+          credit: Math.max(Number(item.amount || 0), 0),
+        });
+      }
+
+      for (const payment of payments) {
+        entries.push({
+          sortDate: payment.payment_date || "",
+          date: payment.payment_date || "",
+          particulars: `Fee Payment${payment.payment_method ? ` (${payment.payment_method})` : ""}`,
+          reference: payment.receipt_number || "—",
+          debit: 0,
+          credit: Math.max(Number(payment.amount || 0), 0),
+        });
+      }
+
+      entries.sort((a, b) => a.sortDate.localeCompare(b.sortDate));
+
+      generateFeeLedgerPDF({
+        schoolName: school?.name || "School",
+        schoolAddress: school?.address || "",
+        schoolPhone: school?.phone || "",
+        schoolEmail: school?.email || "",
+
+        studentName: getStudentName(student),
+        admissionNumber: student.admission_no,
+        className: getClassName(classes, student.class_id),
+        section: getSectionName(sections, student.section_id),
+
+        academicYear: getAcademicYearName(
+          academicYears,
+          student.academic_year_id
+        ),
+
+        entries: entries.map((entry) => ({
+          date: entry.date,
+          particulars: entry.particulars,
+          reference: entry.reference,
+          debit: entry.debit,
+          credit: entry.credit,
+        })),
+
+        summary: {
+          overall: feeSummary.overall,
+          collected: feeSummary.collected,
+          pending: feeSummary.pending,
+          concession: feeSummary.concession,
+        },
+      });
+    } catch (downloadError) {
+      console.error("DOWNLOAD LEDGER ERROR:", downloadError);
+
+      alert(
+        downloadError instanceof Error
+          ? downloadError.message
+          : "Unable to download the fee ledger."
+      );
+    } finally {
+      setLedgerDownloading(false);
     }
   }
 
@@ -1348,6 +1685,48 @@ export default function StudentDetailsPage() {
         ) : (
           <div className="mt-6 space-y-6">
 
+            {/* FEE SUMMARY */}
+
+            <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+
+              <FeeSummaryBox
+                title="Overall"
+                value={formatINR(feeSummary.overall)}
+                subtitle="Total fee billed"
+                icon={<Wallet size={20} />}
+                iconClassName="bg-blue-50 text-blue-600"
+                loading={feeSummaryLoading}
+              />
+
+              <FeeSummaryBox
+                title="Fee Collection"
+                value={formatINR(feeSummary.collected)}
+                subtitle="Total amount collected"
+                icon={<IndianRupee size={20} />}
+                iconClassName="bg-emerald-50 text-emerald-600"
+                loading={feeSummaryLoading}
+              />
+
+              <FeeSummaryBox
+                title="Pending Collection"
+                value={formatINR(feeSummary.pending)}
+                subtitle="Amount still pending"
+                icon={<Clock3 size={20} />}
+                iconClassName="bg-amber-50 text-amber-600"
+                loading={feeSummaryLoading}
+              />
+
+              <FeeSummaryBox
+                title="Concession Given"
+                value={formatINR(feeSummary.concession)}
+                subtitle="Total concession applied"
+                icon={<BadgePercent size={20} />}
+                iconClassName="bg-purple-50 text-purple-600"
+                loading={feeSummaryLoading}
+              />
+
+            </section>
+
             {/* PROFILE */}
 
             <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
@@ -1545,12 +1924,28 @@ export default function StudentDetailsPage() {
                 Manage this student's fees and payments.
               </p>
 
-              <Link
-                href={`/dashboard/students/${student.id}/fees`}
-                className="mt-5 inline-block rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white hover:bg-blue-700"
-              >
-                Open Fees
-              </Link>
+              <div className="mt-5 flex flex-wrap gap-3">
+                <Link
+                  href={`/dashboard/students/${student.id}/fees`}
+                  className="inline-block rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white hover:bg-blue-700"
+                >
+                  Open Fees
+                </Link>
+
+                <button
+                  type="button"
+                  onClick={() => void downloadLedger()}
+                  disabled={ledgerDownloading}
+                  className="inline-flex items-center gap-2 rounded-xl border border-slate-300 bg-white px-5 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {ledgerDownloading ? (
+                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-slate-600" />
+                  ) : (
+                    <Download size={16} />
+                  )}
+                  Download Ledger (PDF)
+                </button>
+              </div>
 
             </section>
 
@@ -1617,6 +2012,67 @@ function getSectionName(
       (item) => item.id === sectionId
     )?.name || "—"
   );
+}
+
+function FeeSummaryBox({
+  title,
+  value,
+  subtitle,
+  icon,
+  iconClassName,
+  loading,
+}: {
+  title: string;
+  value: string;
+  subtitle: string;
+  icon: ReactNode;
+  iconClassName: string;
+  loading: boolean;
+}) {
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition hover:shadow-md">
+
+      <div className="flex items-start justify-between gap-3">
+
+        <div className="min-w-0">
+
+          <p className="text-sm font-medium text-slate-500">
+            {title}
+          </p>
+
+          <p className="mt-2 truncate text-2xl font-bold tracking-tight text-slate-900">
+            {loading
+              ? "—"
+              : value}
+          </p>
+
+          <p className="mt-1 text-xs text-slate-400">
+            {subtitle}
+          </p>
+
+        </div>
+
+        <div
+          className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl ${iconClassName}`}
+        >
+          {icon}
+        </div>
+
+      </div>
+
+    </div>
+  );
+}
+
+function formatINR(value: number) {
+  return new Intl.NumberFormat(
+    "en-IN",
+    {
+      style: "currency",
+      currency: "INR",
+      maximumFractionDigits: 0,
+    }
+  ).format(value || 0);
 }
 
 function formatDate(

@@ -83,6 +83,35 @@ type PaymentRow = {
   entries: TransactionEntry[];
 };
 
+type PaymentType = "expense" | "vendor" | "salary";
+
+type VendorOption = {
+  id: string;
+  name: string;
+  is_active: boolean | null;
+};
+
+type PurchaseBillOption = {
+  id: string;
+  vendor_id: string;
+  bill_number: string | null;
+  bill_date: string;
+  total_amount: number;
+};
+
+type VendorPaymentRow = {
+  id: string;
+  payment_date: string;
+  amount: number;
+  vendor_id: string;
+  paid_from_account_id: string | null;
+  reference_number: string | null;
+  notes: string | null;
+  payment_method: string | null;
+  journal_entry_id: string | null;
+};
+
+
 const PAYMENT_METHODS: {
   value: PaymentMethod;
   label: string;
@@ -107,6 +136,13 @@ function money(value: number) {
 function getToday() {
   return new Date().toISOString().split("T")[0];
 }
+
+function roundToTwo(value: number) {
+  return Math.round(
+    (Number(value || 0) + Number.EPSILON) * 100,
+  ) / 100;
+}
+
 
 function getParticulars(description: string | null) {
   if (!description) return "";
@@ -248,6 +284,48 @@ export default function PaymentPage() {
     useState("");
   const [payrollAccountingTransactionNumber, setPayrollAccountingTransactionNumber] =
     useState("");
+
+  // PAYMENT TYPE + VENDOR PAYMENT CONTEXT
+  const [paymentType, setPaymentType] =
+    useState<PaymentType>("expense");
+
+  const [vendors, setVendors] =
+    useState<VendorOption[]>([]);
+
+  const [vendorBills, setVendorBills] =
+    useState<PurchaseBillOption[]>([]);
+
+  const [vendorAllocations, setVendorAllocations] =
+    useState<{ bill_id: string; amount: number }[]>(
+      []
+    );
+
+  const [vendorReturns, setVendorReturns] =
+    useState<{ bill_id: string; total_amount: number }[]>(
+      []
+    );
+
+  const [vendorPayments, setVendorPayments] =
+    useState<VendorPaymentRow[]>([]);
+
+  const [vendorPaymentSaving, setVendorPaymentSaving] =
+    useState(false);
+
+  const [vendorPaymentDeletingId, setVendorPaymentDeletingId] =
+    useState<string | null>(null);
+
+  const [vendorPaymentId, setVendorPaymentId] =
+    useState("");
+
+  const [vendorBillId, setVendorBillId] =
+    useState("");
+
+  const [vendorAmount, setVendorAmount] =
+    useState("");
+
+  const [vendorRequestId, setVendorRequestId] =
+    useState("");
+
 
   // VIEW MODAL
   const [viewPayment, setViewPayment] =
@@ -604,6 +682,96 @@ export default function PaymentPage() {
 
   /*
    * =====================================================
+   * LOAD VENDOR PAYMENT DATA
+   *
+   * Reads exactly the same canonical rows the Vendor
+   * Purchases page uses (vendors, purchase_bills,
+   * bill_payment_allocations, purchase_returns,
+   * vendor_payments) so bill outstanding and the payment
+   * history share ONE source of truth.
+   * =====================================================
+   */
+
+  async function loadVendorData(
+    currentSchoolId: string
+  ) {
+    const [
+      vendorRes,
+      billRes,
+      allocationRes,
+      returnRes,
+      vendorPaymentRes,
+    ] = await Promise.all([
+      supabase
+        .from("vendors")
+        .select("id, name, is_active")
+        .eq("school_id", currentSchoolId)
+        .order("name"),
+
+      supabase
+        .from("purchase_bills")
+        .select(
+          "id, vendor_id, bill_number, bill_date, total_amount"
+        )
+        .eq("school_id", currentSchoolId)
+        .order("bill_date", { ascending: false }),
+
+      supabase
+        .from("bill_payment_allocations")
+        .select("bill_id, amount")
+        .eq("school_id", currentSchoolId),
+
+      supabase
+        .from("purchase_returns")
+        .select("bill_id, total_amount")
+        .eq("school_id", currentSchoolId),
+
+      supabase
+        .from("vendor_payments")
+        .select(
+          "id, payment_date, amount, vendor_id, paid_from_account_id, reference_number, notes, payment_method, journal_entry_id"
+        )
+        .eq("school_id", currentSchoolId)
+        .order("payment_date", { ascending: false })
+        .order("created_at", { ascending: false })
+        .limit(100),
+    ]);
+
+    if (vendorRes.error) throw vendorRes.error;
+    if (billRes.error) throw billRes.error;
+    if (allocationRes.error) throw allocationRes.error;
+    if (returnRes.error) throw returnRes.error;
+    if (vendorPaymentRes.error) throw vendorPaymentRes.error;
+
+    setVendors(
+      (vendorRes.data || []) as VendorOption[]
+    );
+    setVendorBills(
+      (billRes.data || []) as PurchaseBillOption[]
+    );
+    setVendorAllocations(
+      (allocationRes.data || []).map(
+        (row) => ({
+          bill_id: row.bill_id as string,
+          amount: Number(row.amount || 0),
+        })
+      )
+    );
+    setVendorReturns(
+      (returnRes.data || []).map(
+        (row) => ({
+          bill_id: row.bill_id as string,
+          total_amount: Number(row.total_amount || 0),
+        })
+      )
+    );
+    setVendorPayments(
+      (vendorPaymentRes.data || []) as VendorPaymentRow[]
+    );
+  }
+
+  /*
+   * =====================================================
    * LOAD EVERYTHING
    * =====================================================
    */
@@ -625,6 +793,10 @@ export default function PaymentPage() {
       );
 
       await loadPayments(
+        currentSchoolId
+      );
+
+      await loadVendorData(
         currentSchoolId
       );
     } catch (err: any) {
@@ -738,6 +910,7 @@ export default function PaymentPage() {
         : [];
 
     setPayrollMode(true);
+    setPaymentType("salary");
     setPayrollRunId(runId);
     setPayrollPayableAccountId(payableId);
     setPayrollAccountingTransactionNumber(
@@ -894,6 +1067,130 @@ export default function PaymentPage() {
       );
     }, [accounts]);
 
+  /*
+   * =====================================================
+   * VENDOR PAYMENT DATA
+   *
+   * Outstanding = bill total - allocations - purchase
+   * returns, computed from the canonical database rows
+   * (identical formula to the Vendor Purchases page).
+   * =====================================================
+   */
+
+  const activeVendors =
+    useMemo(() => {
+      return vendors.filter(
+        (vendor) =>
+          vendor.is_active !== false
+      );
+    }, [vendors]);
+
+  const vendorOutstandingByBill =
+    useMemo(() => {
+      const paidByBill: Record<
+        string,
+        number
+      > = {};
+      const returnedByBill: Record<
+        string,
+        number
+      > = {};
+
+      for (const allocation of vendorAllocations) {
+        paidByBill[allocation.bill_id] =
+          roundToTwo(
+            (paidByBill[allocation.bill_id] || 0) +
+              allocation.amount
+          );
+      }
+
+      for (const returned of vendorReturns) {
+        returnedByBill[returned.bill_id] =
+          roundToTwo(
+            (returnedByBill[returned.bill_id] || 0) +
+              returned.total_amount
+          );
+      }
+
+      const map: Record<
+        string,
+        {
+          total: number;
+          paid: number;
+          returned: number;
+          outstanding: number;
+        }
+      > = {};
+
+      for (const bill of vendorBills) {
+        const total = roundToTwo(
+          Number(bill.total_amount || 0)
+        );
+        const paid = roundToTwo(
+          paidByBill[bill.id] || 0
+        );
+        const returned = roundToTwo(
+          returnedByBill[bill.id] || 0
+        );
+
+        map[bill.id] = {
+          total,
+          paid,
+          returned,
+          outstanding: roundToTwo(
+            total - paid - returned
+          ),
+        };
+      }
+
+      return map;
+    }, [vendorBills, vendorAllocations, vendorReturns]);
+
+  const vendorBillOptions =
+    useMemo(() => {
+      return vendorBills
+        .filter(
+          (bill) =>
+            bill.vendor_id === vendorPaymentId
+        )
+        .sort((a, b) =>
+          a.bill_date < b.bill_date ? -1 : 1
+        );
+    }, [vendorBills, vendorPaymentId]);
+
+  const selectedVendorBill =
+    useMemo(() => {
+      return (
+        vendorBillOptions.find(
+          (bill) => bill.id === vendorBillId
+        ) || null
+      );
+    }, [vendorBillOptions, vendorBillId]);
+
+  const selectedVendorBillOutstanding =
+    selectedVendorBill
+      ? vendorOutstandingByBill[
+          selectedVendorBill.id
+        ]?.outstanding ?? 0
+      : 0;
+
+  const vendorRemainingAfterPayment =
+    useMemo(() => {
+      const paid = Number(vendorAmount || 0);
+
+      if (!Number.isFinite(paid) || paid <= 0) {
+        return selectedVendorBillOutstanding;
+      }
+
+      return roundToTwo(
+        Math.max(
+          selectedVendorBillOutstanding - paid,
+          0
+        )
+      );
+    }, [vendorAmount, selectedVendorBillOutstanding]);
+
+
 
   /*
    * =====================================================
@@ -947,6 +1244,84 @@ export default function PaymentPage() {
       }
     }
   }
+
+  /*
+   * =====================================================
+   * PAYMENT TYPE + VENDOR FORM HANDLERS
+   * =====================================================
+   */
+
+  function handlePaymentTypeChange(
+    type: PaymentType
+  ) {
+    setPaymentType(type);
+    setPayrollMode(type === "salary");
+
+    if (type === "vendor") {
+      setVendorRequestId(
+        crypto.randomUUID()
+      );
+    }
+
+    setError("");
+    setSuccess("");
+  }
+
+  function handleVendorPaymentVendorChange(
+    vendorId: string
+  ) {
+    setVendorPaymentId(vendorId);
+    setVendorBillId("");
+    setVendorAmount("");
+    setVendorRequestId(
+      crypto.randomUUID()
+    );
+
+    if (!vendorId) {
+      setParticulars("");
+      return;
+    }
+
+    const vendor = vendors.find(
+      (item) => item.id === vendorId
+    );
+
+    setParticulars(
+      `${vendor?.name || "Vendor"} • Vendor Payment`
+    );
+  }
+
+  function handleVendorPaymentBillChange(
+    billId: string
+  ) {
+    setVendorBillId(billId);
+    setVendorAmount("");
+    setVendorRequestId(
+      crypto.randomUUID()
+    );
+
+    const vendor = vendors.find(
+      (item) => item.id === vendorPaymentId
+    );
+
+    if (!vendor) return;
+
+    const bill = vendorBills.find(
+      (item) => item.id === billId
+    );
+
+    if (!bill) {
+      setParticulars(
+        `${vendor.name} • Vendor Payment`
+      );
+      return;
+    }
+
+    setParticulars(
+      `${vendor.name} • ${bill.bill_number || "Purchase bill"} • Vendor Payment`
+    );
+  }
+
 
   /*
    * =====================================================
@@ -1076,6 +1451,11 @@ export default function PaymentPage() {
 
     setError("");
     setSuccess("");
+
+    if (paymentType === "vendor") {
+      await submitVendorPayment();
+      return;
+    }
 
     if (!schoolId) {
       setError("Current school could not be determined.");
@@ -1676,6 +2056,70 @@ export default function PaymentPage() {
       console.error("PAYMENT RECORDING ERROR:", err);
 
       if (createdTransactionId) {
+        // Clean up canonical accounting entries first (journal_lines,
+        // journal_entries, accounting_events) before the legacy tables.
+        const {
+          data: accountingEvent,
+          error: eventReadError,
+        } = await supabase
+          .from("accounting_events")
+          .select("id, journal_entry_id")
+          .eq("school_id", schoolId)
+          .eq("source_module", "expenses")
+          .eq("source_table", "expenses")
+          .eq("source_record_id", createdTransactionId)
+          .maybeSingle();
+
+        let journalEntryId: string | null = null;
+
+        if (!eventReadError && accountingEvent?.journal_entry_id) {
+          journalEntryId = accountingEvent.journal_entry_id;
+        }
+
+        // Fallback: if no accounting_events record, look up journal_entries
+        // directly by source_table and source_record_id.
+        if (!journalEntryId) {
+          const {
+            data: journalEntry,
+            error: journalReadError,
+          } = await supabase
+            .from("journal_entries")
+            .select("id")
+            .eq("school_id", schoolId)
+            .eq("source_table", "expenses")
+            .eq("source_record_id", createdTransactionId)
+            .maybeSingle();
+
+          if (journalReadError) {
+            console.error("Failed to read journal entry:", journalReadError);
+          } else if (journalEntry?.id) {
+            journalEntryId = journalEntry.id;
+          }
+        }
+
+        if (journalEntryId) {
+          await supabase
+            .from("journal_lines")
+            .delete()
+            .eq("journal_entry_id", journalEntryId)
+            .eq("school_id", schoolId);
+
+          await supabase
+            .from("journal_entries")
+            .delete()
+            .eq("id", journalEntryId)
+            .eq("school_id", schoolId);
+
+          // Also delete the accounting_events record if it exists
+          if (accountingEvent?.id) {
+            await supabase
+              .from("accounting_events")
+              .delete()
+              .eq("id", accountingEvent.id)
+              .eq("school_id", schoolId);
+          }
+        }
+
         await supabase
           .from("transaction_entries")
           .delete()
@@ -1700,6 +2144,228 @@ export default function PaymentPage() {
       );
     } finally {
       setSaving(false);
+    }
+  }
+
+  /*
+   * =====================================================
+   * VENDOR PAYMENT — RECORD
+   *
+   * One atomic RPC inserts the vendor payment, allocates
+   * it to the selected purchase bill and posts the
+   * canonical Dr Vendor Payables / Cr Cash-Bank journal.
+   * The browser never decides the amount or accounts:
+   * the RPC re-validates everything server-side.
+   * =====================================================
+   */
+
+  async function submitVendorPayment() {
+    if (!schoolId) {
+      setError("Current school could not be determined.");
+      return;
+    }
+
+    if (!vendorPaymentId) {
+      setError("No vendor selected.");
+      return;
+    }
+
+    if (!vendorBillId) {
+      setError("No purchase bill selected.");
+      return;
+    }
+
+    const numericAmount = roundToTwo(
+      Number(vendorAmount)
+    );
+
+    if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
+      setError("Payment amount must be greater than zero.");
+      return;
+    }
+
+    if (numericAmount > selectedVendorBillOutstanding + 0.009) {
+      setError(
+        `Payment amount cannot exceed the outstanding amount of ${money(
+          selectedVendorBillOutstanding,
+        )}.`,
+      );
+      return;
+    }
+
+    if (!paidFromAccountId) {
+      setError(
+        "Select the Cash or Bank account from which the payment is made.",
+      );
+      return;
+    }
+
+    const paidFrom = accounts.find(
+      (account) => account.id === paidFromAccountId,
+    );
+
+    if (!paidFrom) {
+      setError("Selected Cash/Bank account was not found.");
+      return;
+    }
+
+    if (
+      paidFrom.account_type !== "cash" &&
+      paidFrom.account_type !== "bank"
+    ) {
+      setError("Pay From must be a Cash or Bank account.");
+      return;
+    }
+
+    if (!paymentDate) {
+      setError("Select payment date.");
+      return;
+    }
+
+    const requestId = vendorRequestId || crypto.randomUUID();
+    setVendorRequestId(requestId);
+
+    setVendorPaymentSaving(true);
+
+    try {
+      const { data, error: rpcError } = await supabase.rpc(
+        "record_vendor_payment",
+        {
+          p_school_id: schoolId,
+          p_vendor_id: vendorPaymentId,
+          p_request_id: requestId,
+          p_payment_date: paymentDate,
+          p_amount: numericAmount,
+          p_paid_from_account_id: paidFromAccountId,
+          p_bill_id: vendorBillId,
+          p_payment_method: paymentMethod,
+          p_reference_number: referenceNumber.trim() || null,
+          p_particulars: particulars.trim() || null,
+          p_notes: notes.trim() || null,
+        },
+      );
+
+      if (rpcError) {
+        throw new Error(
+          rpcError.message ||
+            "Vendor payment could not be recorded.",
+        );
+      }
+
+      if (!data?.vendor_payment_id) {
+        throw new Error(
+          "Vendor payment could not be recorded. Retry the same request.",
+        );
+      }
+
+      const previousOutstanding = Number(
+        data.previous_outstanding ?? selectedVendorBillOutstanding,
+      );
+      const remainingOutstanding = Number(
+        data.remaining_outstanding ?? 0,
+      );
+
+      setSuccess(
+        data.idempotent
+          ? `This vendor payment was already recorded. Previous outstanding ${money(
+              previousOutstanding,
+            )}, payment ${money(
+              Number(data.amount || numericAmount),
+            )}, remaining outstanding ${money(remainingOutstanding)}.`
+          : `Vendor payment of ${money(numericAmount)} recorded — Dr Vendor Payables / Cr ${
+              paidFrom.name
+            }. Previous outstanding ${money(
+              previousOutstanding,
+            )}, remaining outstanding ${money(remainingOutstanding)}.`,
+      );
+
+      setVendorAmount("");
+      setVendorRequestId(crypto.randomUUID());
+      setNotes("");
+
+      await loadVendorData(schoolId);
+    } catch (err: any) {
+      console.error("VENDOR PAYMENT ERROR:", err);
+      setError(
+        err?.message ||
+          "Vendor payment could not be recorded.",
+      );
+    } finally {
+      setVendorPaymentSaving(false);
+    }
+  }
+
+  /*
+   * =====================================================
+   * VENDOR PAYMENT — DELETE
+   *
+   * One atomic RPC reverses the journal entry and
+   * releases the bill allocations, restoring vendor
+   * outstanding. Purchase bills and other payments are
+   * never touched.
+   * =====================================================
+   */
+
+  async function confirmDeleteVendorPayment(
+    payment: VendorPaymentRow
+  ) {
+    if (!schoolId) return;
+
+    const vendorName =
+      vendors.find((item) => item.id === payment.vendor_id)
+        ?.name || "vendor";
+
+    if (
+      !window.confirm(
+        `Delete the vendor payment of ${money(
+          Number(payment.amount || 0),
+        )} to ${vendorName}? Its accounting entry will be reversed and the bill outstanding restored.`,
+      )
+    ) {
+      return;
+    }
+
+    setVendorPaymentDeletingId(payment.id);
+    setError("");
+    setSuccess("");
+
+    try {
+      const { data, error: rpcError } = await supabase.rpc(
+        "delete_vendor_payment",
+        {
+          p_school_id: schoolId,
+          p_vendor_payment_id: payment.id,
+        },
+      );
+
+      if (rpcError) {
+        throw new Error(
+          rpcError.message ||
+            "Vendor payment could not be deleted.",
+        );
+      }
+
+      if (!data?.deleted) {
+        throw new Error(
+          "Vendor payment could not be deleted. Refresh the page.",
+        );
+      }
+
+      setSuccess(
+        `Vendor payment of ${money(
+          Number(data.amount || 0),
+        )} to ${vendorName} deleted. The accounting entry was reversed and the bill outstanding restored.`,
+      );
+
+      await loadVendorData(schoolId);
+    } catch (err: any) {
+      console.error("VENDOR PAYMENT DELETE ERROR:", err);
+      setError(
+        err?.message ||
+          "Vendor payment could not be deleted.",
+      );
+    } finally {
+      setVendorPaymentDeletingId(null);
     }
   }
 
@@ -2103,6 +2769,60 @@ export default function PaymentPage() {
               }
               className="space-y-6"
             >
+              {/* PAYMENT TYPE */}
+
+              <div className="max-w-sm">
+                <label className="mb-1 block text-sm font-medium text-slate-700">
+                  Payment Type
+                </label>
+
+                <select
+                  value={paymentType}
+                  onChange={(e) =>
+                    handlePaymentTypeChange(
+                      e.target
+                        .value as PaymentType
+                    )
+                  }
+                  disabled={
+                    saving ||
+                    vendorPaymentSaving ||
+                    Boolean(editingId)
+                  }
+                  className="w-full rounded-lg border bg-white px-3 py-2.5 outline-none focus:border-blue-500"
+                >
+                  <option value="expense">
+                    Expense Payment
+                  </option>
+
+                  <option value="vendor">
+                    Vendor Payment
+                  </option>
+
+                  <option value="salary">
+                    Salary Payment
+                  </option>
+                </select>
+
+                {paymentType ===
+                  "salary" &&
+                  !payrollRunId && (
+                    <p className="mt-2 text-xs text-amber-600">
+                      Salary payments need a prepared payroll
+                      run. Return to Payroll and click
+                      &ldquo;Prepare Salary Payment&rdquo; to pay
+                      salaries.
+                    </p>
+                  )}
+
+                {editingId && (
+                  <p className="mt-2 text-xs text-slate-500">
+                    Editing an existing payment. Cancel the
+                    edit to switch payment type.
+                  </p>
+                )}
+              </div>
+
               {payrollMode && (
                 <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">
                   <div className="flex flex-wrap items-center justify-between gap-3">
@@ -2187,6 +2907,208 @@ export default function PaymentPage() {
                       )}
                     </select>
                   </div>
+                )}
+
+                {/* VENDOR PAYMENT FIELDS */}
+
+                {paymentType ===
+                  "vendor" && (
+                  <>
+                    <div className="md:col-span-2 lg:col-span-4">
+                      <label className="mb-1 block text-sm font-medium text-slate-700">
+                        Vendor
+                      </label>
+
+                      <select
+                        value={
+                          vendorPaymentId
+                        }
+                        onChange={(e) =>
+                          handleVendorPaymentVendorChange(
+                            e.target
+                              .value
+                          )
+                        }
+                        className="w-full rounded-lg border bg-white px-3 py-2.5 outline-none focus:border-blue-500"
+                      >
+                        <option value="">
+                          Select vendor
+                        </option>
+
+                        {activeVendors.map(
+                          (vendor) => (
+                            <option
+                              key={
+                                vendor.id
+                              }
+                              value={
+                                vendor.id
+                              }
+                            >
+                              {
+                                vendor.name
+                              }
+                            </option>
+                          ),
+                        )}
+                      </select>
+
+                      {activeVendors.length ===
+                        0 && (
+                        <p className="mt-2 text-xs text-red-600">
+                          No vendors found. Add
+                          vendors in Vendor
+                          Purchases.
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="md:col-span-2">
+                      <label className="mb-1 block text-sm font-medium text-slate-700">
+                        Purchase Bill
+                      </label>
+
+                      <select
+                        value={
+                          vendorBillId
+                        }
+                        onChange={(e) =>
+                          handleVendorPaymentBillChange(
+                            e.target
+                              .value
+                          )
+                        }
+                        disabled={
+                          !vendorPaymentId
+                        }
+                        className="w-full rounded-lg border bg-white px-3 py-2.5 outline-none focus:border-blue-500 disabled:bg-slate-50"
+                      >
+                        <option value="">
+                          {!vendorPaymentId
+                            ? "Select a vendor first"
+                            : vendorBillOptions.length
+                              ? "Select purchase bill"
+                              : "No purchase bills for this vendor"}
+                        </option>
+
+                        {vendorBillOptions.map(
+                          (bill) => {
+                            const outstanding =
+                              vendorOutstandingByBill[
+                                bill.id
+                              ];
+
+                            return (
+                              <option
+                                key={
+                                  bill.id
+                                }
+                                value={
+                                  bill.id
+                                }
+                              >
+                                {bill.bill_number ||
+                                  "Purchase bill"}
+                                {" • "}
+                                {bill.bill_date}
+                                {" • Total "}
+                                {money(
+                                  outstanding?.total ||
+                                    0,
+                                )}
+                                {" • Paid "}
+                                {money(
+                                  outstanding?.paid ||
+                                    0,
+                                )}
+                                {" • Outstanding "}
+                                {money(
+                                  outstanding?.outstanding ||
+                                    0,
+                                )}
+                              </option>
+                            );
+                          },
+                        )}
+                      </select>
+                    </div>
+
+                    <div className="md:col-span-2">
+                      <label className="mb-1 block text-sm font-medium text-slate-700">
+                        Bill Outstanding
+                      </label>
+
+                      <div className="rounded-lg border bg-slate-50 px-3 py-2.5 text-sm font-semibold text-slate-900">
+                        {money(
+                          selectedVendorBillOutstanding,
+                        )}
+                      </div>
+
+                      {selectedVendorBill &&
+                        selectedVendorBillOutstanding <=
+                          0.009 && (
+                          <p className="mt-2 text-xs text-amber-600">
+                            This bill is fully settled
+                            (payments and/or purchase
+                            returns cover its total).
+                          </p>
+                        )}
+                    </div>
+
+                    <div className="md:col-span-2">
+                      <label className="mb-1 block text-sm font-medium text-slate-700">
+                        Payment Amount
+                      </label>
+
+                      <div className="relative">
+                        <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">
+                          ₹
+                        </span>
+
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={
+                            vendorAmount
+                          }
+                          onChange={(e) =>
+                            setVendorAmount(
+                              e.target
+                                .value
+                            )
+                          }
+                          placeholder="0.00"
+                          className="w-full rounded-lg border py-2.5 pl-8 pr-3 outline-none focus:border-blue-500"
+                        />
+                      </div>
+
+                      <p className="mt-2 text-xs text-slate-500">
+                        Remaining outstanding after this
+                        payment:{" "}
+                        <span className="font-semibold text-slate-700">
+                          {money(
+                            vendorRemainingAfterPayment,
+                          )}
+                        </span>
+                      </p>
+
+                      {Number(
+                        vendorAmount || 0,
+                      ) >
+                        selectedVendorBillOutstanding +
+                          0.009 && (
+                        <p className="mt-2 text-xs text-red-600">
+                          Payment amount cannot exceed
+                          the outstanding amount of{" "}
+                          {money(
+                            selectedVendorBillOutstanding,
+                          )}
+                          .
+                        </p>
+                      )}
+                    </div>
+                  </>
                 )}
 
                 <div>
@@ -2284,6 +3206,8 @@ export default function PaymentPage() {
                   </select>
                 </div>
 
+                {paymentType !==
+                  "vendor" && (
                 <div>
                   <label className="mb-1 block text-sm font-medium text-slate-700">
                     Amount
@@ -2311,9 +3235,12 @@ export default function PaymentPage() {
                     />
                   </div>
                 </div>
+                )}
               </div>
 
               <div className="grid gap-4 md:grid-cols-2">
+                {paymentType !==
+                  "vendor" && (
                 <div>
                   <label className="mb-1 block text-sm font-medium text-slate-700">
                     Expense Account
@@ -2363,6 +3290,7 @@ export default function PaymentPage() {
                     </p>
                   )}
                 </div>
+                )}
 
                 <div>
                   <label className="mb-1 block text-sm font-medium text-slate-700">
@@ -2446,7 +3374,10 @@ export default function PaymentPage() {
                     </p>
 
                     <p className="mt-1 font-semibold text-slate-900">
-                      {payrollMode
+                      {paymentType ===
+                      "vendor"
+                        ? "Vendor Payables"
+                        : payrollMode
                         ? accounts.find(
                             (account) =>
                               account.id ===
@@ -2464,7 +3395,10 @@ export default function PaymentPage() {
                     <p className="mt-2 text-lg font-bold text-red-600">
                       {money(
                         Number(
-                          amount ||
+                          (paymentType ===
+                          "vendor"
+                            ? vendorAmount
+                            : amount) ||
                             0
                         )
                       )}
@@ -2488,7 +3422,10 @@ export default function PaymentPage() {
                     <p className="mt-2 text-lg font-bold text-blue-600">
                       {money(
                         Number(
-                          amount ||
+                          (paymentType ===
+                          "vendor"
+                            ? vendorAmount
+                            : amount) ||
                             0
                         )
                       )}
@@ -2517,19 +3454,23 @@ export default function PaymentPage() {
                 <button
                   type="submit"
                   disabled={
-                    saving
+                    saving ||
+                    vendorPaymentSaving
                   }
                   className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
                 >
-                  {saving ? (
+                  {saving ||
+                  vendorPaymentSaving ? (
                     <>
                       <Loader2
                         size={17}
                         className="animate-spin"
                       />
-                      {editingId
-                        ? "Updating..."
-                        : "Saving..."}
+                      {vendorPaymentSaving
+                        ? "Recording..."
+                        : editingId
+                          ? "Updating..."
+                          : "Saving..."}
                     </>
                   ) : (
                     <>
@@ -2543,9 +3484,12 @@ export default function PaymentPage() {
                         />
                       )}
 
-                      {editingId
-                        ? "Update Payment"
-                        : "Save Payment"}
+                      {paymentType ===
+                      "vendor"
+                        ? "Save Vendor Payment"
+                        : editingId
+                          ? "Update Payment"
+                          : "Save Payment"}
                     </>
                   )}
                 </button>
@@ -2623,7 +3567,7 @@ export default function PaymentPage() {
                     </th>
 
                     <th className="px-5 py-3 text-left text-xs text-slate-500">
-                      Expense
+                      Type
                     </th>
 
                     <th className="px-5 py-3 text-left text-xs text-slate-500">
@@ -2693,11 +3637,43 @@ export default function PaymentPage() {
                                 payment.description
                               )}
                             </div>
+                            <div className="mt-1 text-xs text-slate-500 truncate">
+                              {payment.description
+                                ? payment.description
+                                    .split(" | ")
+                                    .filter(
+                                      (p) =>
+                                        !p.startsWith("Payment method:")
+                                    )
+                                    .join(" | ")
+                                : ""}
+                            </div>
                           </td>
 
                           <td className="px-5 py-4 text-sm">
-                            {debitEntry?.account_name ||
-                              "-"}
+                            <div>
+                              {debitEntry?.account_name ||
+                                "-"}
+                            </div>
+
+                            <div className="mt-1 text-xs text-slate-500">
+                              {(() => {
+                                const debitAccount =
+                                  accounts.find(
+                                    (account) =>
+                                      account.id ===
+                                      debitEntry?.account_id,
+                                  );
+
+                                return debitAccount &&
+                                  (debitAccount.account_type ===
+                                    "payable" ||
+                                    debitAccount.account_type ===
+                                      "liability")
+                                  ? "Salary Payment"
+                                  : "Expense Payment";
+                              })()}
+                            </div>
                           </td>
 
                           <td className="px-5 py-4 text-sm">
@@ -2768,6 +3744,250 @@ export default function PaymentPage() {
                         </tr>
                       );
                     }
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+
+        {/* =================================================
+            VENDOR PAYMENT HISTORY
+        ================================================= */}
+
+        <section className="mt-6 overflow-hidden rounded-2xl border bg-white">
+          <div className="flex items-center justify-between border-b px-5 py-4">
+            <div>
+              <h2 className="font-semibold text-slate-900">
+                Vendor Payment History
+              </h2>
+
+              <p className="text-xs text-slate-500">
+                {vendorPayments.length} vendor
+                payments
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => {
+                if (schoolId) {
+                  loadVendorData(
+                    schoolId
+                  );
+                }
+              }}
+              className="inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm hover:bg-slate-50"
+            >
+              <RefreshCw
+                size={15}
+              />
+              Refresh
+            </button>
+          </div>
+
+          {vendorPayments.length ===
+          0 ? (
+            <div className="p-12 text-center">
+              <Landmark
+                size={36}
+                className="mx-auto text-slate-300"
+              />
+
+              <h3 className="mt-3 font-semibold text-slate-900">
+                No vendor payments
+              </h3>
+
+              <p className="mt-1 text-sm text-slate-500">
+                Select &ldquo;Vendor
+                Payment&rdquo; above to pay a
+                purchase bill.
+              </p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[1150px]">
+                <thead className="bg-slate-50">
+                  <tr>
+                    <th className="px-5 py-3 text-left text-xs text-slate-500">
+                      Date
+                    </th>
+
+                    <th className="px-5 py-3 text-left text-xs text-slate-500">
+                      Vendor
+                    </th>
+
+                    <th className="px-5 py-3 text-left text-xs text-slate-500">
+                      Purchase Bill
+                    </th>
+
+                    <th className="px-5 py-3 text-left text-xs text-slate-500">
+                      Particulars
+                    </th>
+
+                    <th className="px-5 py-3 text-left text-xs text-slate-500">
+                      Paid From
+                    </th>
+
+                    <th className="px-5 py-3 text-right text-xs text-slate-500">
+                      Amount
+                    </th>
+
+                    <th className="px-5 py-3 text-left text-xs text-slate-500">
+                      Reference
+                    </th>
+
+                    <th className="px-5 py-3 text-right text-xs text-slate-500">
+                      Actions
+                    </th>
+                  </tr>
+                </thead>
+
+                <tbody className="divide-y">
+                  {vendorPayments.map(
+                    (payment) => {
+                      const vendor =
+                        vendors.find(
+                          (item) =>
+                            item.id ===
+                            payment.vendor_id
+                        );
+
+                      const bills =
+                        Array.from(
+                          new Set(
+                            vendorAllocations
+                              .filter(
+                                (allocation) =>
+                                  vendorBills.some(
+                                    (bill) =>
+                                      bill.id ===
+                                        allocation.bill_id &&
+                                      bill.vendor_id ===
+                                        payment.vendor_id,
+                                  ),
+                              )
+                              .map(
+                                (allocation) =>
+                                  vendorBills.find(
+                                    (bill) =>
+                                      bill.id ===
+                                      allocation.bill_id,
+                                  )?.bill_number ||
+                                  "Purchase bill",
+                              ),
+                          ),
+                        );
+
+                      const paidFrom =
+                        accounts.find(
+                          (account) =>
+                            account.id ===
+                            payment.paid_from_account_id,
+                        );
+
+                      const particulars =
+                        [
+                          vendor?.name ||
+                            "Vendor",
+                          bills.length
+                            ? bills.join(
+                                ", ",
+                              )
+                            : null,
+                          "Vendor Payment",
+                        ]
+                          .filter(Boolean)
+                          .join(" • ");
+
+                      return (
+                        <tr
+                          key={payment.id}
+                          className="hover:bg-slate-50"
+                        >
+                          <td className="px-5 py-4 text-sm">
+                            {
+                              payment.payment_date
+                            }
+                          </td>
+
+                          <td className="px-5 py-4 text-sm font-medium text-slate-900">
+                            {vendor?.name ||
+                              "Unknown vendor"}
+                          </td>
+
+                          <td className="px-5 py-4 text-sm">
+                            {bills.length
+                              ? bills.join(
+                                  ", ",
+                                )
+                              : "-"}
+                          </td>
+
+                          <td className="max-w-[260px] px-5 py-4 text-sm">
+                            <div className="truncate">
+                              {
+                                particulars
+                              }
+                            </div>
+                          </td>
+
+                          <td className="px-5 py-4 text-sm">
+                            {paidFrom?.name ||
+                              "-"}
+                          </td>
+
+                          <td className="px-5 py-4 text-right font-semibold text-red-600">
+                            {money(
+                              Number(
+                                payment.amount ||
+                                  0,
+                              ),
+                            )}
+                          </td>
+
+                          <td className="px-5 py-4 text-sm">
+                            {payment.reference_number ||
+                              "-"}
+                          </td>
+
+                          <td className="px-5 py-4">
+                            <div className="flex justify-end">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  confirmDeleteVendorPayment(
+                                    payment,
+                                  )
+                                }
+                                disabled={
+                                  vendorPaymentDeletingId ===
+                                  payment.id
+                                }
+                                title="Delete Vendor Payment"
+                                className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-50"
+                              >
+                                {vendorPaymentDeletingId ===
+                                payment.id ? (
+                                  <Loader2
+                                    size={
+                                      16
+                                    }
+                                    className="animate-spin"
+                                  />
+                                ) : (
+                                  <Trash2
+                                    size={
+                                      16
+                                    }
+                                  />
+                                )}
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    },
                   )}
                 </tbody>
               </table>

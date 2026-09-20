@@ -45,6 +45,9 @@ vendor_bill_number?: string | null;
 vendor_payment_ref?: string | null;
 vendor_name?: string | null;
 vendor_id?: string | null;
+  staff_name?: string | null;
+  received_from?: string | null;
+  description?: string | null;
 created_at: string;
 };
 
@@ -305,11 +308,27 @@ const schoolId = await getCurrentSchoolId();
         const billNumber = isVendorPayment && row.vendor_bill_number ? row.vendor_bill_number : null;
         const paymentRef = isVendorPayment && row.vendor_payment_ref ? row.vendor_payment_ref : null;
 
+        // Determine "received from" / "paid to" label
+        let receivedFrom = row.received_from || null;
+        if (!receivedFrom) {
+          if (isVendorPayment && vendorName) {
+            receivedFrom = `To: ${vendorName}`;
+          } else if (student?.name) {
+            receivedFrom = `From: ${student.name}`;
+          } else if (row.staff_name) {
+            receivedFrom = `To: ${row.staff_name}`;
+          } else if (row.reference_type === "receipt") {
+            receivedFrom = row.description || null;
+          }
+        }
+
         return {
           ...row,
-          receipt_number: payment?.receiptNumber || null,
-          student_name: student?.name || null,
-          class_name: className || null,
+          receipt_number: payment?.receiptNumber || row.receipt_number || null,
+          student_name: student?.name || row.student_name || null,
+          class_name: className || row.class_name || null,
+          staff_name: row.staff_name || null,
+          received_from: receivedFrom,
           particulars_display:
             student?.name && className
               ? `${student.name} • ${className}`
@@ -318,9 +337,7 @@ const schoolId = await getCurrentSchoolId();
                   ? [
                       vendorName,
                       billNumber,
-                      row.line_description ||
-                        row.entry_description ||
-                        null,
+                      row.line_description || row.entry_description || null,
                     ]
                         .filter(Boolean)
                         .join(" — ")
@@ -536,10 +553,20 @@ const data = filteredRows.map((row) => {
   return [
     row.entry_date,
     row.entry_id,
-    row.receipt_number || "",
-    row.line_description ||
+    row.reference_type === "vendor_payment"
+      ? row.vendor_payment_ref || row.receipt_number || "PV"
+      : row.receipt_number || "",
+    (row.particulars_display ||
+      row.line_description ||
       row.entry_description ||
-      "",
+      "Accounting Entry") +
+      (row.student_name
+        ? ` — Student: ${row.student_name}${row.class_name ? ` (${row.class_name})` : ""}`
+        : row.staff_name
+          ? ` — Staff: ${row.staff_name}`
+          : row.received_from
+            ? ` — ${row.received_from}`
+            : ""),
     row.reference_type || "",
     moneyIn.toFixed(2),
     moneyOut.toFixed(2),
@@ -930,7 +957,7 @@ return ( <main className="min-h-screen bg-slate-50">
                 </th>
 
                 <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500">
-                  Receipt No.
+                  Reference / Receipt No.
                 </th>
 
                 <th className="px-5 py-3 text-left text-xs font-semibold text-slate-500">
@@ -1074,7 +1101,9 @@ return ( <main className="min-h-screen bg-slate-50">
 
                       <td className="px-5 py-4">
                         <span className="font-mono text-xs font-semibold text-blue-700">
-                          {row.receipt_number || "-"}
+                          {row.reference_type === "vendor_payment"
+                            ? row.vendor_payment_ref || row.receipt_number || "PV"
+                            : row.receipt_number || "-"}
                         </span>
                       </td>
 
@@ -1090,18 +1119,17 @@ return ( <main className="min-h-screen bg-slate-50">
                         </div>
 
                         <div className="mt-1 text-xs text-slate-500">
-
-                          {row.receipt_number
-                            ? `Receipt No. ${row.receipt_number}`
-                            : row.reference_type === "vendor_payment"
-                              ? row.vendor_name ||
-                                row.vendor_bill_number ||
-                                row.line_description ||
-                                row.entry_description ||
-                                "Vendor payment"
-                              : row.reference_type ||
-                                row.entry_type ||
-                                "-"}
+                          {row.student_name
+                            ? `Student: ${row.student_name}${row.class_name ? ` • ${row.class_name}` : ""}`
+                            : row.staff_name
+                              ? `Staff: ${row.staff_name}`
+                              : row.received_from
+                                ? row.received_from
+                                : row.reference_type === "vendor_payment"
+                                  ? `Vendor: ${row.vendor_name || "N/A"}`
+                                  : row.reference_type ||
+                                    row.entry_type ||
+                                    "-"}
 
                         </div>
 

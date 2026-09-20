@@ -114,6 +114,7 @@ export default function AccountsPage() {
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [showSystemAccounts, setShowSystemAccounts] = useState(false);
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [viewing, setViewing] = useState<Account | null>(null);
@@ -344,6 +345,11 @@ export default function AccountsPage() {
     const q = search.trim().toLowerCase();
 
     return accounts.filter((account) => {
+      // Always filter out system accounts unless explicitly shown
+      if (!showSystemAccounts && account.is_system) {
+        return false;
+      }
+
       const matchesSearch =
         !q ||
         (account.name || "").toLowerCase().includes(q) ||
@@ -360,7 +366,7 @@ export default function AccountsPage() {
 
       return matchesSearch && matchesType && matchesStatus;
     });
-  }, [accounts, search, typeFilter, statusFilter]);
+  }, [accounts, search, typeFilter, statusFilter, showSystemAccounts]);
 
   const counts = useMemo(() => {
     return {
@@ -672,8 +678,8 @@ export default function AccountsPage() {
                 Chart of Accounts
               </h1>
               <p className="mt-1 text-sm text-slate-500">
-                Manage the accounts used by Receipt, Payment, Contra,
-                Journal and all accounting reports.
+                Manage the accounts used by Receipt, Payment, Contra, Journal and
+                all accounting reports. Add only the accounts your school needs.
               </p>
             </div>
 
@@ -708,7 +714,7 @@ export default function AccountsPage() {
         )}
 
         <div className="mb-6 grid gap-4 md:grid-cols-4">
-          <StatCard label="Total Accounts" value={counts.total} />
+          <StatCard label="Custom Accounts" value={counts.total - counts.system} />
           <StatCard label="Active" value={counts.active} />
           <StatCard label="Inactive" value={counts.inactive} />
           <StatCard label="System Accounts" value={counts.system} />
@@ -778,9 +784,20 @@ export default function AccountsPage() {
             </div>
 
             <div className="mt-4 rounded-xl border border-blue-100 bg-blue-50 p-4 text-sm text-blue-800">
-              Financial-year opening balances are managed from the Opening
-              Balance screen so the chart of accounts remains the single
-              account master.
+              {showSystemAccounts ? (
+                <>
+                  System accounts are built-in and required for accounting
+                  operations. You can deactivate them if not needed, but cannot
+                  delete them. Use the "Hide System Accounts" button to focus on
+                  your custom accounts.
+                </>
+              ) : (
+                <>
+                  This view shows your custom accounts. System accounts are hidden
+                  — click "Show System Accounts" to view them. You can add new
+                  accounts anytime based on your school&apos;s needs.
+                </>
+              )}
             </div>
 
             <div className="mt-5 flex items-center justify-between rounded-xl border bg-slate-50 p-4">
@@ -877,6 +894,20 @@ export default function AccountsPage() {
 
                 <button
                   type="button"
+                  onClick={() => setShowSystemAccounts(!showSystemAccounts)}
+                  className={`inline-flex shrink-0 items-center gap-2 rounded-lg border px-3 text-sm font-semibold hover:bg-slate-50 ${
+                    showSystemAccounts
+                      ? "bg-amber-50 border-amber-200 text-amber-700"
+                      : "border-slate-200 text-slate-600"
+                  }`}
+                >
+                  <Eye size={15} />
+                  {showSystemAccounts ? "Hide" : "Show"}{" "}
+                  {counts.system} System
+                </button>
+
+                <button
+                  type="button"
                   onClick={() => loadAccounts()}
                   className="inline-flex shrink-0 items-center gap-2 rounded-lg border px-3 text-sm font-semibold hover:bg-slate-50"
                 >
@@ -894,7 +925,42 @@ export default function AccountsPage() {
             </div>
           ) : filteredAccounts.length === 0 ? (
             <div className="p-12 text-center text-sm text-slate-500">
-              No accounts found.
+              {showSystemAccounts ? (
+                <>
+                  No system accounts found.{" "}
+                  <button
+                    type="button"
+                    onClick={() => setShowSystemAccounts(false)}
+                    className="text-blue-600 hover:underline"
+                  >
+                    Clear filter
+                  </button>
+                </>
+              ) : (
+                <>
+                  No custom accounts yet. You can create accounts based on your
+                  school&apos;s needs.{" "}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      clearForm();
+                      window.scrollTo({ top: 0, behavior: "smooth" });
+                    }}
+                    className="text-blue-600 hover:underline"
+                  >
+                    Create your first account
+                  </button>
+                  {" or "}
+                  <button
+                    type="button"
+                    onClick={() => setShowSystemAccounts(true)}
+                    className="text-amber-600 hover:underline"
+                  >
+                    view system accounts
+                  </button>
+                  .
+                </>
+              )}
             </div>
           ) : (
             <div className="overflow-x-auto">

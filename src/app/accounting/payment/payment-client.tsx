@@ -1732,6 +1732,120 @@ export default function PaymentPage() {
       }
 
       /*
+       * Delete canonical accounting entries (journal_entries, journal_lines,
+       * accounting_events) linked to the expense before deleting the expense.
+       * The cash_book and bank_book views union both legacy and canonical data,
+       * so we must clean up both to fully remove the expense from the books.
+       */
+
+      const {
+        data: expense,
+        error: expenseReadError,
+      } = await supabase
+        .from("expenses")
+        .select("id")
+        .eq("transaction_id", transaction.id)
+        .eq("school_id", schoolId)
+        .maybeSingle();
+
+      if (expenseReadError) {
+        throw new Error(expenseReadError.message);
+      }
+
+      if (expense) {
+        const {
+          data: accountingEvent,
+          error: eventReadError,
+        } = await supabase
+          .from("accounting_events")
+          .select("id, journal_entry_id")
+          .eq("school_id", schoolId)
+          .eq("source_module", "expenses")
+          .eq("source_table", "expenses")
+          .eq("source_record_id", expense.id)
+          .maybeSingle();
+
+        let journalEntryId: string | null = null;
+
+        if (!eventReadError && accountingEvent?.journal_entry_id) {
+          journalEntryId = accountingEvent.journal_entry_id;
+        }
+
+        // Fallback: if no accounting_events record, look up journal_entries
+        // directly by source_table and source_record_id.
+        if (!journalEntryId) {
+          const {
+            data: journalEntry,
+            error: journalReadError,
+          } = await supabase
+            .from("journal_entries")
+            .select("id")
+            .eq("school_id", schoolId)
+            .eq("source_table", "expenses")
+            .eq("source_record_id", expense.id)
+            .maybeSingle();
+
+          if (journalReadError) {
+            throw new Error(journalReadError.message);
+          }
+
+          if (journalEntry?.id) {
+            journalEntryId = journalEntry.id;
+          }
+        }
+
+        if (journalEntryId) {
+          await supabase
+            .from("journal_lines")
+            .delete()
+            .eq("journal_entry_id", journalEntryId)
+            .eq("school_id", schoolId);
+
+          await supabase
+            .from("journal_entries")
+            .delete()
+            .eq("id", journalEntryId)
+            .eq("school_id", schoolId);
+
+          // Also delete the accounting_events record if it exists
+          if (accountingEvent?.id) {
+            await supabase
+              .from("accounting_events")
+              .delete()
+              .eq("id", accountingEvent.id)
+              .eq("school_id", schoolId);
+          }
+        }
+      }
+
+      /*
+       * Delete linked expenses before the transaction.
+       * The expenses table has a foreign key to transactions,
+       * so we must delete expenses first to avoid constraint violations.
+       */
+
+      const {
+        error:
+          deleteExpensesError,
+      } = await supabase
+        .from("expenses")
+        .delete()
+        .eq(
+          "transaction_id",
+          transaction.id
+        )
+        .eq(
+          "school_id",
+          schoolId
+        );
+
+      if (deleteExpensesError) {
+        throw new Error(
+          `Payment linked expenses could not be deleted: ${deleteExpensesError.message}`
+        );
+      }
+
+      /*
        * Delete transaction.
        */
 
@@ -2444,7 +2558,7 @@ export default function PaymentPage() {
                     </th>
 
                     <th className="px-5 py-3 text-left text-xs text-slate-500">
-                      Expense
+                      Paid To (Expense)
                     </th>
 
                     <th className="px-5 py-3 text-left text-xs text-slate-500">
@@ -2513,6 +2627,17 @@ export default function PaymentPage() {
                               {getParticulars(
                                 payment.description
                               )}
+                            </div>
+                            <div className="mt-1 text-xs text-slate-500 truncate">
+                              {payment.description
+                                ? payment.description
+                                    .split(" | ")
+                                    .filter(
+                                      (p) =>
+                                        !p.startsWith("Payment method:")
+                                    )
+                                    .join(" | ")
+                                : ""}
                             </div>
                           </td>
 

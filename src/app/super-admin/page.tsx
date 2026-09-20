@@ -7,8 +7,10 @@ import {
   useEffect,
   useState,
 } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
+import { Trash2 } from "lucide-react";
 
 type School = {
   id: string;
@@ -126,6 +128,12 @@ export default function SuperAdminPage() {
     useState("");
 
   const [resettingPassword, setResettingPassword] =
+    useState(false);
+
+  // Delete school state
+  const [deleteTarget, setDeleteTarget] =
+    useState<School | null>(null);
+  const [deleting, setDeleting] =
     useState(false);
 
   const [form, setForm] =
@@ -775,6 +783,75 @@ export default function SuperAdminPage() {
   }
 
   // --------------------------------------------------
+  // DELETE SCHOOL
+  // --------------------------------------------------
+
+  function openDeleteSchool(school: School) {
+    setErrorMessage("");
+    setSuccessMessage("");
+    setDeleteTarget(school);
+  }
+
+  function closeDeleteSchool() {
+    if (deleting) return;
+    setDeleteTarget(null);
+    setErrorMessage("");
+  }
+
+  async function handleDeleteSchool() {
+    if (!deleteTarget) return;
+
+    setErrorMessage("");
+    setSuccessMessage("");
+
+    setDeleting(true);
+
+    try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
+      if (!session?.access_token) {
+        throw new Error("Your login session has expired. Please log in again.");
+      }
+
+      const response = await fetch(
+        "/api/super-admin/schools/manage",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${session.access_token}`,
+          },
+          body: JSON.stringify({
+            action: "delete",
+            schoolId: deleteTarget.id,
+          }),
+        },
+      );
+
+      const result = await response.json();
+
+      if (!response.ok || !result?.success) {
+        throw new Error(result?.error || "Unable to delete school.");
+      }
+
+      setDeleteTarget(null);
+      setSuccessMessage(result.message || "School deleted successfully.");
+      await loadSchools();
+    } catch (error) {
+      console.error("DELETE SCHOOL ERROR:", error);
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Unable to delete school.",
+      );
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  // --------------------------------------------------
   // SIGN OUT
   // --------------------------------------------------
 
@@ -1061,8 +1138,15 @@ export default function SuperAdminPage() {
                         className="border-b border-slate-100 last:border-0"
                       >
                         <td className="px-4 py-4">
-                          <p className="font-semibold text-slate-900">
+                          <Link
+                            href={`/super-admin/schools/${school.id}`}
+                            className="font-semibold text-slate-900 transition hover:text-blue-600"
+                          >
                             {school.name}
+                          </Link>
+
+                          <p className="mt-0.5 text-xs font-medium text-blue-600">
+                            Click to open school data
                           </p>
                         </td>
 
@@ -1107,23 +1191,48 @@ export default function SuperAdminPage() {
                         </td>
 
                         <td className="px-4 py-4">
-                          <div className="flex flex-wrap gap-2">
-                            <button
-                              type="button"
-                              onClick={() => void openEditSchool(school)}
-                              className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-100"
-                            >
-                              Edit
-                            </button>
+                          <div className="flex flex-wrap gap-2">                         <div className="relative">
+                             <select
+                               value=""
+                               onChange={(e) => {
+                                 const action = e.target.value;
+                                 if (action === "open") {
+                                   router.push(
+                                     `/super-admin/schools/${school.id}`
 
-                            <button
-                              type="button"
-                              onClick={() => openResetPassword(school)}
-                              className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-700 hover:bg-amber-100"
-                            >
-                              Reset Password
-                            </button>
-                          </div>
+                                   );
+                                 } else if (action === "edit") {
+                                   openEditSchool(school);
+                                 } else if (action === "reset") {
+                                   openResetPassword(school);
+                                 } else if (action === "delete") {
+                                   openDeleteSchool(school);
+                                 }
+                                 e.target.value = "";
+                               }}
+                               className="rounded-lg border border-slate-300 bg-white px-3 py-2 pr-8 text-xs font-medium text-slate-700 focus:border-blue-500 focus:outline-none"
+                             >
+                               <option value="">Actions</option>
+                               <option value="open">Open</option>
+                               <option value="edit">Edit</option>
+                               <option value="reset">Reset Password</option>
+                               <option value="delete">Delete</option>
+                             </select>
+
+                             <svg
+                               className="absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
+                               fill="none"
+                               stroke="currentColor"
+                               viewBox="0 0 24 24"
+                             >
+                               <path
+                                 strokeLinecap="round"
+                                 strokeLinejoin="round"
+                                 strokeWidth={2}
+                                 d="M19 9l-7 7-7-7"
+                               />
+                             </svg>
+                           </div></div>
                         </td>
                       </tr>
                     )
@@ -1134,6 +1243,71 @@ export default function SuperAdminPage() {
           )}
         </section>
       </div>
+
+      {/* ==================================================
+          DELETE SCHOOL CONFIRMATION MODAL
+      ================================================== */}
+
+      {deleteTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              closeDeleteSchool();
+            }
+          }}
+        >
+          <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
+            <div className="flex items-start gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-red-100 text-red-600">
+                <Trash2 size={20} />
+              </div>
+
+              <div>
+                <h3 className="font-bold text-slate-900">
+                  Delete School?
+                </h3>
+
+                <p className="mt-1 text-sm leading-6 text-slate-500">
+                  This will permanently delete the school "{deleteTarget.name}" and ALL its data.
+                </p>
+
+                <ul className="mt-3 space-y-1.5 text-sm text-slate-600">
+                  <li>• All students and staff</li>
+                  <li>• All fee records and payments</li>
+                  <li>• All accounting data (journals, accounts, etc.)</li>
+                  <li>• All classes, sections, and academic years</li>
+                  <li>• All other module data</li>
+                </ul>
+
+                <p className="mt-3 text-sm text-red-600">
+                  This action cannot be undone!
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-6 flex items-center justify-end gap-3">
+              <button
+                type="button"
+                onClick={closeDeleteSchool}
+                disabled={deleting}
+                className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Cancel
+              </button>
+
+              <button
+                type="button"
+                onClick={handleDeleteSchool}
+                disabled={deleting}
+                className="rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {deleting ? "Deleting..." : "Delete School"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ==================================================
           EDIT SCHOOL MODAL

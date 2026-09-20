@@ -3543,10 +3543,6 @@ export default function ReceiptPage() {
                           </th>
 
                           <th className="px-5 py-3 text-left text-xs text-slate-500">
-                            Student / Class
-                          </th>
-
-                          <th className="px-5 py-3 text-left text-xs text-slate-500">
                             Fee Categories Paid
                           </th>
 
@@ -3588,15 +3584,6 @@ export default function ReceiptPage() {
                               {row.manual_bill_number || "—"}
                             </td>
 
-                            <td className="px-5 py-4 text-sm">
-                              <div className="font-semibold text-slate-800">
-                                {row.student_name || "—"}
-                              </div>
-                              <div className="text-xs text-slate-500">
-                                {row.class_name || "—"}{row.section_name ? ` • ${row.section_name}` : ""}
-                              </div>
-                            </td>
-
                             <td className="max-w-[240px] px-5 py-4 text-xs font-semibold text-blue-700">
                               {getDisplayedHistoryCategories(row).join(", ") || "—"}
                             </td>
@@ -3610,9 +3597,7 @@ export default function ReceiptPage() {
                             </td>
 
                             <td className="max-w-[360px] px-5 py-4 text-sm font-medium text-slate-700">
-                              {row.receipt_type === "student_fee"
-                                ? [row.student_name, row.class_name].filter(Boolean).join(" • ") || "—"
-                                : row.description}
+                              {row.description}
                             </td>
 
                             <td className="px-5 py-4 text-right font-semibold text-emerald-600">
@@ -3662,7 +3647,7 @@ export default function ReceiptPage() {
                       <tfoot>
                         <tr className="border-t-2 bg-slate-50">
                           <td
-                            colSpan={9}
+                            colSpan={8}
                             className="px-5 py-3 text-right text-sm font-bold text-slate-700"
                           >
                             Filtered Total

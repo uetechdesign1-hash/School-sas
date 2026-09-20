@@ -1415,6 +1415,93 @@ export default function ExpensesPage() {
         }
       }
 
+      // First, clean up the canonical accounting entries (journal_entries,
+      // journal_lines, accounting_events) so the cash_book and bank_book
+      // views stop showing the expense. The expenses table has a foreign key
+      // to transactions, but the canonical journal entries are linked
+      // through accounting_events and directly via source_record_id.
+      const {
+        data: accountingEvent,
+        error: eventReadError,
+      } = await supabase
+        .from("accounting_events")
+        .select("id, journal_entry_id")
+        .eq("school_id", schoolId)
+        .eq("source_module", "expenses")
+        .eq("source_table", "expenses")
+        .eq("source_record_id", deleteTarget.id)
+        .maybeSingle();
+
+      let journalEntryId: string | null = null;
+
+      if (!eventReadError && accountingEvent?.journal_entry_id) {
+        journalEntryId = accountingEvent.journal_entry_id;
+      }
+
+      // Fallback: if no accounting_events record, look up journal_entries
+      // directly by source_table and source_record_id.
+      if (!journalEntryId) {
+        const {
+          data: journalEntry,
+          error: journalReadError,
+        } = await supabase
+          .from("journal_entries")
+          .select("id")
+          .eq("school_id", schoolId)
+          .eq("source_table", "expenses")
+          .eq("source_record_id", deleteTarget.id)
+          .maybeSingle();
+
+        if (journalReadError) {
+          throw journalReadError;
+        }
+
+        if (journalEntry?.id) {
+          journalEntryId = journalEntry.id;
+        }
+      }
+
+      if (journalEntryId) {
+        const {
+          error: journalLineError,
+        } = await supabase
+          .from("journal_lines")
+          .delete()
+          .eq("journal_entry_id", journalEntryId)
+          .eq("school_id", schoolId);
+
+        if (journalLineError) {
+          throw journalLineError;
+        }
+
+        const {
+          error: journalEntryError,
+        } = await supabase
+          .from("journal_entries")
+          .delete()
+          .eq("id", journalEntryId)
+          .eq("school_id", schoolId);
+
+        if (journalEntryError) {
+          throw journalEntryError;
+        }
+
+        // Also delete the accounting_events record if it exists
+        if (accountingEvent?.id) {
+          const {
+            error: eventError,
+          } = await supabase
+            .from("accounting_events")
+            .delete()
+            .eq("id", accountingEvent.id)
+            .eq("school_id", schoolId);
+
+          if (eventError) {
+            throw eventError;
+          }
+        }
+      }
+
       const {
         error: expenseError,
       } = await supabase
@@ -1478,7 +1565,7 @@ export default function ExpensesPage() {
       setDeleteTarget(null);
 
       setSuccess(
-        "Expense and linked accounting transaction deleted.",
+        "Expense and all linked accounting entries deleted.",
       );
 
       await loadData(

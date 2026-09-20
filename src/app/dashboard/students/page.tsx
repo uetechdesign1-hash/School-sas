@@ -4,9 +4,12 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import {
   ArrowRight,
+  BadgePercent,
   Check,
   CheckSquare,
   ChevronRight,
+  Clock3,
+  FileSpreadsheet,
   GraduationCap,
   IndianRupee,
   Loader2,
@@ -75,6 +78,15 @@ export default function StudentsPage() {
   const [outstandingFees, setOutstandingFees] = useState<Record<string, number>>(
     {},
   );
+
+  // Fee totals across ALL students of ALL classes (canonical fee_bills source,
+  // same as the per-student dashboard boxes and the Fee Ledger).
+  const [feeTotals, setFeeTotals] = useState({
+    overall: 0,
+    collected: 0,
+    pending: 0,
+    concession: 0,
+  });
 
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("all");
@@ -380,9 +392,11 @@ export default function StudentsPage() {
             bill.academic_year_id === currentYear.id,
         );
 
+        // Outstanding must come only from the actual current-year fee bill.
+        // If no bill is assigned, there is no outstanding amount yet.
         feeMap[student.id] = hasCurrentYearBill
           ? Math.max(balanceByStudent.get(student.id) || 0, 0)
-          : Math.max(configuredCurrentFee, 0);
+          : 0;
       }
 
       setStudents(loadedStudents);
@@ -390,6 +404,31 @@ export default function StudentsPage() {
       setSections(loadedSections);
       setAcademicYears(loadedYears);
       setOutstandingFees(feeMap);
+
+      // Aggregate fee totals across all students of all classes from the
+      // canonical fee_bills + fee_concessions tables.
+      let totalOverall = 0;
+      let totalCollected = 0;
+      let totalPending = 0;
+      let totalConcession = 0;
+
+      for (const bill of bills) {
+        totalOverall += Math.max(Number(bill.total_amount || 0), 0);
+        totalCollected += Math.max(Number(bill.paid_amount || 0), 0);
+        totalPending += Math.max(Number(bill.balance_amount || 0), 0);
+      }
+
+      for (const item of concessions) {
+        totalConcession += Math.max(Number(item.amount || 0), 0);
+      }
+
+      setFeeTotals({
+        overall: totalOverall,
+        collected: totalCollected,
+        pending: totalPending,
+        concession: totalConcession,
+      });
+
       setSelectedStudentIds([]);
     } catch (loadError) {
       console.error("STUDENTS ERROR:", loadError);
@@ -752,6 +791,14 @@ export default function StudentsPage() {
             )}
 
             <Link
+              href="/dashboard/students/import"
+              className="inline-flex items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-5 py-3 text-sm font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-100"
+            >
+              <FileSpreadsheet size={17} />
+              Import from Excel
+            </Link>
+
+            <Link
               href="/dashboard/students/new"
               className="inline-flex items-center justify-center rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700"
             >
@@ -764,6 +811,41 @@ export default function StudentsPage() {
           <Stat title="Total Students" value={students.length} />
           <Stat title="Active" value={activeCount} />
           <Stat title="Inactive" value={inactiveCount} />
+        </div>
+
+        {/* FEE SUMMARY (all students, all classes) */}
+        <div className="mt-4 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <FeeStat
+            title="Overall Fee Assigned"
+            value={formatINR(feeTotals.overall)}
+            subtitle="All students, all classes"
+            icon={<IndianRupee size={20} />}
+            iconClassName="bg-blue-50 text-blue-600"
+          />
+
+          <FeeStat
+            title="Fee Collection"
+            value={formatINR(feeTotals.collected)}
+            subtitle="Total fees collected"
+            icon={<Check size={20} />}
+            iconClassName="bg-green-50 text-green-600"
+          />
+
+          <FeeStat
+            title="Pending Collection"
+            value={formatINR(feeTotals.pending)}
+            subtitle="Amount still pending"
+            icon={<Clock3 size={20} />}
+            iconClassName="bg-amber-50 text-amber-600"
+          />
+
+          <FeeStat
+            title="Concession Given"
+            value={formatINR(feeTotals.concession)}
+            subtitle="Total concession applied"
+            icon={<BadgePercent size={20} />}
+            iconClassName="bg-purple-50 text-purple-600"
+          />
         </div>
 
         <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
@@ -1430,6 +1512,42 @@ function Stat({
       <p className="text-sm text-slate-500">{title}</p>
 
       <p className="mt-2 text-3xl font-bold text-slate-900">{value}</p>
+    </div>
+  );
+}
+
+function FeeStat({
+  title,
+  value,
+  subtitle,
+  icon,
+  iconClassName,
+}: {
+  title: string;
+  value: string;
+  subtitle: string;
+  icon: React.ReactNode;
+  iconClassName: string;
+}) {
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-sm font-medium text-slate-500">{title}</p>
+
+          <p className="mt-2 truncate text-2xl font-bold tracking-tight text-slate-900">
+            {value}
+          </p>
+
+          <p className="mt-1 text-xs text-slate-400">{subtitle}</p>
+        </div>
+
+        <div
+          className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl ${iconClassName}`}
+        >
+          {icon}
+        </div>
+      </div>
     </div>
   );
 }

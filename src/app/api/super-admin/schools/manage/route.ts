@@ -297,6 +297,206 @@ export async function POST(request: Request) {
       return json({ success: true });
     }
 
+    // --------------------------------------------------
+    // DELETE SCHOOL (with all data)
+    // --------------------------------------------------
+    if (action === "delete") {
+      const schoolId = body?.schoolId || "";
+
+      if (!schoolId) {
+        return json(
+          { success: false, error: "School ID is required." },
+          400,
+        );
+      }
+
+      // First verify school exists
+      const { data: school, error: schoolError } = await admin
+        .from("schools")
+        .select("id, name, code, school_code")
+        .eq("id", schoolId)
+        .maybeSingle();
+
+      if (schoolError) {
+        return json(
+          { success: false, error: schoolError.message },
+          400,
+        );
+      }
+
+      if (!school) {
+        return json(
+          { success: false, error: "School not found." },
+          404,
+        );
+      }
+
+      // --------------------------------------------------
+      // COLLECT THE LOGINS THAT BELONG TO THIS SCHOOL
+      //
+      // school_users / staff rows are deleted by the cleanup loop below, so
+      // the ids must be read first. Reading school_users afterwards returned
+      // nothing and left orphaned Supabase Auth users behind, which then
+      // blocked re-creating the same School ID / owner email with
+      // "A user with this email address has already been registered".
+      // --------------------------------------------------
+
+      const linkedUserIds = new Set<string>();
+
+      const { data: schoolUserRows } = await admin
+        .from("school_users")
+        .select("user_id")
+        .eq("school_id", schoolId);
+
+      for (const row of schoolUserRows || []) {
+        if (row?.user_id) {
+          linkedUserIds.add(String(row.user_id));
+        }
+      }
+
+      const { data: staffRows } = await admin
+        .from("staff")
+        .select("user_id")
+        .eq("school_id", schoolId);
+
+      for (const row of staffRows || []) {
+        if (row?.user_id) {
+          linkedUserIds.add(String(row.user_id));
+        }
+      }
+
+      // Delete all school data in correct order
+      // Using raw SQL for cascade delete since we need to delete from multiple tables
+
+      const tablesToDelete = [
+        // Accounting
+        "accounting_audit_log",
+        "accounting_events",
+        "opening_balances",
+        "journal_lines",
+        "journal_entries",
+        "fiscal_years",
+        "accounts",
+        // Fees
+        "fee_payment_allocations",
+        "fee_payments",
+        "fee_concessions",
+        "fee_carry_forwards",
+        "fee_bill_items",
+        "fee_bills",
+        "fee_categories",
+        // Students & Staff
+        "students",
+        "staff",
+        // Classes & Academics
+        "sections",
+        "classes",
+        "academic_years",
+        // User associations (delete before auth users)
+        "school_users",
+        // Optional modules (will fail silently if not exist)
+        "transport_routes",
+        "transport_fees",
+        "library_transactions",
+        "library_books",
+        "attendance",
+        "teacher_attendance",
+        "expenses",
+        "expense_categories",
+        "payroll_items",
+        "payroll_runs",
+        "salary_slips",
+        "leave_requests",
+        "bill_payment_allocations",
+        "vendor_payments",
+        "vendor_purchases",
+        "vendors",
+        "inventory_transactions",
+        "inventory_items",
+        "purchase_returns",
+        "purchase_orders",
+        "transactions",
+        "documents",
+        "messages_read",
+        "messages",
+        "notice_read",
+        "notice",
+        "exam_results",
+        // Attendance & subscriptions
+        "student_attendance",
+        "staff_attendance_timings",
+        "school_subscriptions",
+      ];
+
+      // Delete from each table
+      for (const table of tablesToDelete) {
+        try {
+          await admin.from(table).delete().eq("school_id", schoolId);
+        } catch {
+          // Table might not exist or have no records - ignore
+        }
+      }
+
+      // --------------------------------------------------
+      // DELETE THE SCHOOL LOGINS
+      //
+      // Without this, a deleted school leaves its owner / staff accounts in
+      // Supabase Auth and re-creating the same owner email fails with
+      // "A user with this email address has already been registered".
+      // --------------------------------------------------
+
+      for (const userId of linkedUserIds) {
+        try {
+          await admin.from("user_profiles").delete().eq("id", userId);
+          await admin.from("profiles").delete().eq("id", userId);
+
+          const { error: authUserError } = await admin.auth.admin.deleteUser(
+            userId,
+          );
+
+          if (authUserError) {
+            console.log(
+              `Could not delete auth user ${userId}:`,
+              authUserError.message,
+            );
+          }
+        } catch (userError: unknown) {
+          // User might already be deleted or not exist - ignore
+          console.log(
+            `Could not delete auth user ${userId}:`,
+            userError instanceof Error ? userError.message : String(userError),
+          );
+        }
+      }
+
+      // Profile rows that still carry this School ID as their login id.
+      const schoolCode = String(school.school_code || school.code || "").trim();
+
+      if (schoolCode) {
+        await admin.from("user_profiles").delete().eq("login_id", schoolCode);
+      }
+
+      // Finally delete the school itself
+      const { error: schoolDeleteError } = await admin
+        .from("schools")
+        .delete()
+        .eq("id", schoolId);
+
+      if (schoolDeleteError) {
+        return json(
+          { success: false, error: schoolDeleteError.message },
+          400,
+        );
+      }
+
+      return json({
+        success: true,
+        message:
+          `School "${school.name}", all its data and ` +
+          `${linkedUserIds.size} login(s) have been deleted.`,
+      });
+    }
+
     return json(
       { success: false, error: "Unknown action." },
       400,

@@ -960,16 +960,25 @@ export default function FeeStructurePage() {
             </p>
           </div>
 
-          <button
-            type="button"
-            onClick={openCreateForm}
-            className="inline-flex items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700"
-          >
-            <span className="text-lg leading-none">
-              +
-            </span>
-            Add Fee Structure
-          </button>
+          <div className="flex items-center gap-3">
+            <Link
+              href="/dashboard/fees/assign"
+              className="inline-flex items-center justify-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-5 py-3 text-sm font-semibold text-blue-600 transition hover:bg-blue-100"
+            >
+              Assign to Students
+            </Link>
+
+            <button
+              type="button"
+              onClick={openCreateForm}
+              className="inline-flex items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700"
+            >
+              <span className="text-lg leading-none">
+                +
+              </span>
+              Add Fee Structure
+            </button>
+          </div>
         </div>
 
         {/* MESSAGES */}
