@@ -534,6 +534,7 @@ export default function FeeAssignmentPage() {
       setSuccess(`${money(added)} optional fee(s) added to ${getStudentName(student)}. Outstanding recalculated.`);
       setSelectedOptionalByStudent(prev=>{const next={...prev};delete next[student.id];return next;});
       await loadClassData();
+      const schoolId = await getSchoolId();
       if(schoolId && currentYear) await loadAllClassSummaries(schoolId,currentYear.id,classes);
     } catch(e) { console.error("STUDENT OPTIONAL FEE ERROR:",e); setError(e instanceof Error?e.message:"Unable to add optional fee."); }
     finally { setChangingOptional(false); }
