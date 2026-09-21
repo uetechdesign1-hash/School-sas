@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -50,6 +50,7 @@ type JournalEntry = {
   entry_type: string | null;
   reference_type: string | null;
   reference_id: string | null;
+  description?: string | null;
 };
 
 type JournalLine = {
@@ -59,6 +60,7 @@ type JournalLine = {
   account_id: string;
   debit: number | string | null;
   credit: number | string | null;
+  description?: string | null;
 };
 
 type OpeningBalance = {
@@ -142,7 +144,7 @@ function formatBalance(value: number, accountType?: string) {
   const debitNormal = getDebitNormal(accountType);
   const amount = Math.abs(value);
 
-  if (amount === 0) return "₹0.00";
+  if (amount === 0) return "â‚¹0.00";
 
   const side =
     value >= 0
@@ -333,13 +335,13 @@ export default function LedgerPage() {
         supabase
           .from("journal_entries")
           .select(
-            "id, school_id, entry_date, entry_type, reference_type, reference_id",
+            "id, school_id, entry_date, entry_type, reference_type, reference_id, description",
           )
           .eq("school_id", currentSchoolId),
         supabase
           .from("journal_lines")
           .select(
-            "id, school_id, journal_entry_id, account_id, debit, credit",
+            "id, school_id, journal_entry_id, account_id, debit, credit, description",
           )
           .eq("school_id", currentSchoolId),
       ]);
@@ -645,7 +647,7 @@ export default function LedgerPage() {
         date: journal!.entry_date,
         transactionId: journal!.id,
         transactionType: journal!.entry_type || "-",
-        particulars: journal!.reference_type || "Journal Entry",
+        particulars: journal!.description || line.description || journal!.reference_type || "Journal Entry",
         referenceType: journal!.reference_type || "-",
         debit: Number(line.debit || 0),
         credit: Number(line.credit || 0),
@@ -1045,7 +1047,7 @@ export default function LedgerPage() {
                     </h2>
 
                     <p className="text-xs text-slate-500">
-                      {selectedAccount?.account_type} •{" "}
+                      {selectedAccount?.account_type} â€¢{" "}
                       {formatDate(dateFrom)} to{" "}
                       {formatDate(dateTo)}
                     </p>
@@ -1226,11 +1228,11 @@ export default function LedgerPage() {
                           </td>
 
                           <td className="px-5 py-4 text-right font-semibold text-red-600">
-                            {row.debit > 0 ? money(row.debit) : "—"}
+                            {row.debit > 0 ? money(row.debit) : "â€”"}
                           </td>
 
                           <td className="px-5 py-4 text-right font-semibold text-blue-600">
-                            {row.credit > 0 ? money(row.credit) : "—"}
+                            {row.credit > 0 ? money(row.credit) : "â€”"}
                           </td>
 
                           <td className="px-5 py-4 text-right font-bold text-slate-900">
