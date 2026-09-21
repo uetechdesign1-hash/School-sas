@@ -1705,9 +1705,11 @@ export default function PaymentPage() {
 
     setSaving(true);
 
-    let createdTransactionId: string | null = null;
+    let expenseCategoryId: string | null = null;
 
     try {
+      const { data: userData } = await supabase.auth.getUser();
+
       const descriptionParts = [
         particulars.trim(),
         `Payment method: ${paymentMethod}`,
@@ -1735,103 +1737,42 @@ export default function PaymentPage() {
 
       const description = descriptionParts.join(" | ");
 
-      const {
-        data: transaction,
-        error: transactionError,
-      } = await supabase
-        .from("transactions")
-        .insert({
-          school_id: schoolId,
-          transaction_date: paymentDate,
-          transaction_type: "expense",
-          description,
-          reference_type: "payment",
-          reference_id: payrollMode ? payrollRunId : null,
-        })
-        .select(
-          `
-            id,
-            transaction_number,
-            transaction_date,
-            transaction_type,
-            description,
-            reference_type,
-            reference_id,
-            created_at
-          `,
-        )
-        .single();
+      // Canonical accounting only: we post through journal_entries/journal_lines
+      // and do NOT create legacy transactions/transaction_entries for the same
+      // financial event. This prevents the cash_book/bank_book views from showing
+      // the same payment twice (legacy UNION ALL canonical).
+      const setup = await ensureSchoolAccountingSetup(supabase, schoolId);
 
-      if (transactionError) {
-        throw new Error(transactionError.message);
+      if (payrollMode) {
+        await postSalaryPaymentJournal(supabase, {
+          schoolId,
+          fiscalYearId: setup.fiscalYearId,
+          entryDate: paymentDate,
+          sourceRecordId: null, // Will be linked after expense creation
+          salaryPayableAccountId: debitAccountId,
+          paymentAccountId: paidFromAccountId,
+          amount: numericAmount,
+          createdBy: userData.user?.id || null,
+        });
+      } else {
+        await postExpenseJournal(supabase, {
+          schoolId,
+          fiscalYearId: setup.fiscalYearId,
+          entryDate: paymentDate,
+          sourceRecordId: null, // Will be linked after expense creation
+          expenseAccountId: debitAccountId,
+          paymentAccountId: paidFromAccountId,
+          amount: numericAmount,
+          createdBy: userData.user?.id || null,
+        });
       }
 
-      if (!transaction) {
-        throw new Error("Payment transaction was not created.");
-      }
-
-      createdTransactionId = transaction.id;
-
-      const entries = [
-        {
-          school_id: schoolId,
-          transaction_id: transaction.id,
-          account_id: debitAccountId,
-          debit: numericAmount,
-          credit: 0,
-          description: payrollMode
-            ? `Salary payable settled - ${particulars.trim()}`
-            : `Expense - ${particulars.trim()}`,
-        },
-        {
-          school_id: schoolId,
-          transaction_id: transaction.id,
-          account_id: paidFromAccountId,
-          debit: 0,
-          credit: numericAmount,
-          description: `Paid from ${paidFrom.name} - ${particulars.trim()}`,
-        },
-      ];
-
-      const debitTotal = entries.reduce(
-        (sum, entry) => sum + Number(entry.debit || 0),
-        0,
-      );
-
-      const creditTotal = entries.reduce(
-        (sum, entry) => sum + Number(entry.credit || 0),
-        0,
-      );
-
-      if (Math.abs(debitTotal - creditTotal) > 0.005) {
-        throw new Error("Accounting entry is not balanced.");
-      }
-
-      const { error: entriesError } = await supabase
-        .from("transaction_entries")
-        .insert(entries);
-
-      if (entriesError) {
-        throw new Error(
-          `Accounting entries could not be created: ${entriesError.message}`,
-        );
-      }
-
-      /*
-       * The Expenses dashboard is backed by public.expenses.
-       *
-       * IMPORTANT:
-       * - Normal payments create an expense row.
-       * - Payroll salary payments ALSO create an individual expense row.
-       * - Payroll preparation must NOT create a combined employee expense row.
-       *
-       * This means every actual salary payment appears separately in
-       * Expenses, with the employee name and the Cash/Bank account used.
+      /* We already posted the canonical journal entry above.
+       * Now create the expense record for the Expenses dashboard only.
+       * The accounting effect is ONLY from the journal entry, not from
+       * the expenses table. This prevents double-counting in cash_book/bank_book.
        */
       {
-        const { data: userData } =
-          await supabase.auth.getUser();
-
         const payrollExpenseDescription = payrollMode && paymentStaff
           ? `Salary - ${paymentStaff.name} - ${formatPayrollMonthLabel(
               payrollMonth,
@@ -1854,6 +1795,11 @@ export default function PaymentPage() {
           throw new Error("Built-in expense category could not be created.");
         }
 
+        expenseCategoryId = expenseCategory.id;
+
+        // Create expense record WITHOUT a transaction_id since we're not
+        // creating a legacy transaction. The expense record is for dashboard
+        // display only - the canonical journal entry handles the accounting.
         const { error: expenseRowError } = await supabase
           .from("expenses")
           .insert({
@@ -1862,7 +1808,7 @@ export default function PaymentPage() {
             expense_date: paymentDate,
             amount: numericAmount,
             paid_from_account_id: paidFromAccountId,
-            transaction_id: transaction.id,
+            transaction_id: null, // No legacy transaction - canonical journal only
             vendor_name: payrollMode && paymentStaff
               ? paymentStaff.name
               : null,
@@ -1875,31 +1821,6 @@ export default function PaymentPage() {
           throw new Error(
             `Expense record could not be created: ${expenseRowError.message}`,
           );
-        }
-
-        const setup = await ensureSchoolAccountingSetup(supabase, schoolId);
-        if (payrollMode) {
-          await postSalaryPaymentJournal(supabase, {
-            schoolId,
-            fiscalYearId: setup.fiscalYearId,
-            entryDate: paymentDate,
-            sourceRecordId: transaction.id,
-            salaryPayableAccountId: debitAccountId,
-            paymentAccountId: paidFromAccountId,
-            amount: numericAmount,
-            createdBy: userData.user?.id || null,
-          });
-        } else {
-          await postExpenseJournal(supabase, {
-            schoolId,
-            fiscalYearId: setup.fiscalYearId,
-            entryDate: paymentDate,
-            sourceRecordId: transaction.id,
-            expenseAccountId: debitAccountId,
-            paymentAccountId: paidFromAccountId,
-            amount: numericAmount,
-            createdBy: userData.user?.id || null,
-          });
         }
       }
 
@@ -2040,11 +1961,7 @@ export default function PaymentPage() {
         }
       } else {
         setSuccess(
-          `Payment saved successfully${
-            transaction.transaction_number
-              ? ` — ${transaction.transaction_number}`
-              : ""
-          }. ${money(
+          `Payment saved successfully — ${money(
             numericAmount,
           )} paid from ${paidFrom.name}.`,
         );
@@ -2055,88 +1972,18 @@ export default function PaymentPage() {
     } catch (err: any) {
       console.error("PAYMENT RECORDING ERROR:", err);
 
-      if (createdTransactionId) {
-        // Clean up canonical accounting entries first (journal_lines,
-        // journal_entries, accounting_events) before the legacy tables.
-        const {
-          data: accountingEvent,
-          error: eventReadError,
-        } = await supabase
-          .from("accounting_events")
-          .select("id, journal_entry_id")
-          .eq("school_id", schoolId)
-          .eq("source_module", "expenses")
-          .eq("source_table", "expenses")
-          .eq("source_record_id", createdTransactionId)
-          .maybeSingle();
-
-        let journalEntryId: string | null = null;
-
-        if (!eventReadError && accountingEvent?.journal_entry_id) {
-          journalEntryId = accountingEvent.journal_entry_id;
-        }
-
-        // Fallback: if no accounting_events record, look up journal_entries
-        // directly by source_table and source_record_id.
-        if (!journalEntryId) {
-          const {
-            data: journalEntry,
-            error: journalReadError,
-          } = await supabase
-            .from("journal_entries")
-            .select("id")
-            .eq("school_id", schoolId)
-            .eq("source_table", "expenses")
-            .eq("source_record_id", createdTransactionId)
-            .maybeSingle();
-
-          if (journalReadError) {
-            console.error("Failed to read journal entry:", journalReadError);
-          } else if (journalEntry?.id) {
-            journalEntryId = journalEntry.id;
-          }
-        }
-
-        if (journalEntryId) {
-          await supabase
-            .from("journal_lines")
-            .delete()
-            .eq("journal_entry_id", journalEntryId)
-            .eq("school_id", schoolId);
-
-          await supabase
-            .from("journal_entries")
-            .delete()
-            .eq("id", journalEntryId)
-            .eq("school_id", schoolId);
-
-          // Also delete the accounting_events record if it exists
-          if (accountingEvent?.id) {
-            await supabase
-              .from("accounting_events")
-              .delete()
-              .eq("id", accountingEvent.id)
-              .eq("school_id", schoolId);
-          }
-        }
-
-        await supabase
-          .from("transaction_entries")
-          .delete()
-          .eq("transaction_id", createdTransactionId)
-          .eq("school_id", schoolId);
-
+      // Clean up the expense record if it was created
+      if (expenseCategoryId && paidFromAccountId) {
         await supabase
           .from("expenses")
           .delete()
-          .eq("transaction_id", createdTransactionId)
-          .eq("school_id", schoolId);
-
-        await supabase
-          .from("transactions")
-          .delete()
-          .eq("id", createdTransactionId)
-          .eq("school_id", schoolId);
+          .eq("school_id", schoolId)
+          .eq("expense_category_id", expenseCategoryId)
+          .eq("paid_from_account_id", paidFromAccountId)
+          .eq("expense_date", paymentDate)
+          .eq("amount", numericAmount)
+          .eq("description", particulars.trim())
+          .maybeSingle();
       }
 
       setError(

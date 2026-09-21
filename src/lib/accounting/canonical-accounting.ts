@@ -57,7 +57,7 @@ export type JournalEntryPostInput = {
     | "CLOSING";
   sourceModule: string;
   sourceTable: string;
-  sourceRecordId?: string;
+  sourceRecordId?: string | null;
   referenceType?: string | null;
   referenceId?: string | null;
   createdBy?: string | null;
@@ -479,7 +479,7 @@ export async function postSalaryPaymentJournal(
     schoolId: string;
     fiscalYearId: string;
     entryDate: string;
-    sourceRecordId: string;
+    sourceRecordId?: string | null;
     salaryPayableAccountId: string;
     paymentAccountId: string;
     amount: number;
@@ -494,9 +494,9 @@ export async function postSalaryPaymentJournal(
     entryType: "PAYMENT",
     sourceModule: "salary_payment",
     sourceTable: "salary_payments",
-    sourceRecordId: input.sourceRecordId,
+    sourceRecordId: input.sourceRecordId ?? null,
     referenceType: "salary_payment",
-    referenceId: input.sourceRecordId,
+    referenceId: input.sourceRecordId ?? null,
     createdBy: input.createdBy ?? null,
     lines: [
       {
@@ -521,7 +521,7 @@ export async function postExpenseJournal(
     schoolId: string;
     fiscalYearId: string;
     entryDate: string;
-    sourceRecordId: string;
+    sourceRecordId?: string | null;
     expenseAccountId: string;
     paymentAccountId: string;
     amount: number;
@@ -545,9 +545,9 @@ export async function postExpenseJournal(
     entryType: "GENERAL",
     sourceModule: "expenses",
     sourceTable: "expenses",
-    sourceRecordId: input.sourceRecordId,
+    sourceRecordId: input.sourceRecordId ?? null,
     referenceType: "expense",
-    referenceId: input.sourceRecordId,
+    referenceId: input.sourceRecordId ?? null,
     createdBy: input.createdBy ?? null,
     lines: [
       {
