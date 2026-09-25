@@ -284,9 +284,9 @@ export default function RecordPaymentPage() {
           entryDate: paymentDate,
           sourceRecordId: String(data.id),
           paymentAccountId,
-          feeReceivableAccountId:
-            setup.accountMap.STUDENT_FEE_RECEIVABLE ||
-            setup.accountMap["STUDENT_FEE_RECEIVABLE"],
+          feeIncomeAccountId:
+            setup.accountMap.STUDENT_FEES ||
+            setup.accountMap["STUDENT_FEES"],
           amount: numericAmount,
           createdBy:
             (await supabase.auth.getUser()).data.user?.id || null,

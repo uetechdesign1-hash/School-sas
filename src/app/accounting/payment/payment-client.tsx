@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { ensureBuiltInExpenseCategories } from "@/lib/accounting/expense-categories";
+import { deleteCanonicalJournalForSource } from "@/lib/accounting/canonical-accounting";
 import { AccountingExportActions } from "../accounting-export";
 
 type Account = {
@@ -1753,69 +1754,21 @@ export default function PaymentPage() {
       }
 
       if (expense) {
-        const {
-          data: accountingEvent,
-          error: eventReadError,
-        } = await supabase
-          .from("accounting_events")
-          .select("id, journal_entry_id")
-          .eq("school_id", schoolId)
-          .eq("source_module", "expenses")
-          .eq("source_table", "expenses")
-          .eq("source_record_id", expense.id)
-          .maybeSingle();
-
-        let journalEntryId: string | null = null;
-
-        if (!eventReadError && accountingEvent?.journal_entry_id) {
-          journalEntryId = accountingEvent.journal_entry_id;
-        }
-
-        // Fallback: if no accounting_events record, look up journal_entries
-        // directly by source_table and source_record_id.
-        if (!journalEntryId) {
-          const {
-            data: journalEntry,
-            error: journalReadError,
-          } = await supabase
-            .from("journal_entries")
-            .select("id")
-            .eq("school_id", schoolId)
-            .eq("source_table", "expenses")
-            .eq("source_record_id", expense.id)
-            .maybeSingle();
-
-          if (journalReadError) {
-            throw new Error(journalReadError.message);
-          }
-
-          if (journalEntry?.id) {
-            journalEntryId = journalEntry.id;
-          }
-        }
-
-        if (journalEntryId) {
-          await supabase
-            .from("journal_lines")
-            .delete()
-            .eq("journal_entry_id", journalEntryId)
-            .eq("school_id", schoolId);
-
-          await supabase
-            .from("journal_entries")
-            .delete()
-            .eq("id", journalEntryId)
-            .eq("school_id", schoolId);
-
-          // Also delete the accounting_events record if it exists
-          if (accountingEvent?.id) {
-            await supabase
-              .from("accounting_events")
-              .delete()
-              .eq("id", accountingEvent.id)
-              .eq("school_id", schoolId);
-          }
-        }
+        /*
+         * The shared helper resolves the entry (accounting_events,
+         * source_record_id, reference_id), clears the journal_lines,
+         * accounting_events and every table pointing at the entry
+         * (vendor_payments, purchase_bills, purchase_returns) and only then
+         * deletes the journal entry - so the delete can never be blocked by
+         * vendor_payments_journal_entry_id_fkey.
+         */
+        await deleteCanonicalJournalForSource(supabase, {
+          schoolId,
+          sourceRecordId: expense.id,
+          legacyTransactionId: transaction.id,
+          sourceModule: "expenses",
+          sourceTable: "expenses",
+        });
       }
 
       /*

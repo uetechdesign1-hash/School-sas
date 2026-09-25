@@ -14,6 +14,12 @@ import {
   X,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
+import {
+  deleteCanonicalJournalForSource,
+  ensureSchoolAccountingSetup,
+  postCanonicalJournalEntry,
+} from "@/lib/accounting/canonical-accounting";
+import { filterSelectableAccounts } from "@/lib/accounting/account-visibility";
 import { AccountingExportActions } from "../accounting-export";
 
 type Account = {
@@ -423,6 +429,31 @@ export default function JournalPage() {
     );
   }
 
+  /*
+   * Accounts offered in the journal line selector: accounts created by the
+   * school from Dashboard -> Accounting -> Accounts plus the common accounts
+   * (Cash, Bank, Student Fees, Student Fee Receivable, Salary Payable).
+   * Accounts already used in the form stay visible so editing an existing
+   * entry never silently drops a posting.
+   */
+  const selectableAccounts = useMemo(() => {
+    const visible = filterSelectableAccounts(accounts);
+    const visibleIds = new Set(visible.map((account) => account.id));
+
+    for (const line of lines) {
+      if (!line.account_id || visibleIds.has(line.account_id)) continue;
+
+      const used = accounts.find((account) => account.id === line.account_id);
+
+      if (used) {
+        visible.push(used);
+        visibleIds.add(used.id);
+      }
+    }
+
+    return visible;
+  }, [accounts, lines]);
+
   function updateLine(
     index: number,
     field: keyof FormLine,
@@ -797,6 +828,48 @@ export default function JournalPage() {
           );
         }
 
+        /*
+         * Reverse the previous canonical journal entry and post the updated
+         * one, so the Cash Book, Bank Book, Ledger and reports always show the
+         * journal as it stands now - exactly once.
+         */
+        await deleteCanonicalJournalForSource(supabase, {
+          schoolId,
+          sourceRecordId: editingId,
+          legacyTransactionId: editingId,
+        });
+
+        const setup = await ensureSchoolAccountingSetup(
+          supabase,
+          schoolId
+        );
+
+        await postCanonicalJournalEntry(supabase, {
+          schoolId,
+          fiscalYearId: setup.fiscalYearId,
+          entryDate: journalDate,
+          description:
+            transactionDescription,
+          entryType: "GENERAL",
+          sourceModule: "journal",
+          sourceTable: "journal_entries",
+          sourceRecordId: editingId,
+          referenceType: "journal",
+          referenceId: editingId,
+          createdBy:
+            (
+              await supabase.auth.getUser()
+            ).data.user?.id || null,
+          lines: usableLines.map((line) => ({
+            accountId: line.account_id,
+            debit: Number(line.debit || 0),
+            credit: Number(line.credit || 0),
+            description:
+              line.description.trim() ||
+              transactionDescription,
+          })),
+        });
+
         setSuccess(
           "Journal updated successfully."
         );
@@ -920,6 +993,44 @@ export default function JournalPage() {
           `Journal lines could not be created: ${insertError.message}`
         );
       }
+
+      /*
+       * Post the ONE canonical journal entry for this journal transaction
+       * (linked through reference_id = transaction id). The Cash Book, Bank
+       * Book, Ledger, Trial Balance and the other reports read the canonical
+       * journal, so a manual journal that moves cash or bank now appears there
+       * exactly once.
+       */
+      const setup = await ensureSchoolAccountingSetup(
+        supabase,
+        schoolId
+      );
+
+      await postCanonicalJournalEntry(supabase, {
+        schoolId,
+        fiscalYearId: setup.fiscalYearId,
+        entryDate: journalDate,
+        description:
+          transactionDescription,
+        entryType: "GENERAL",
+        sourceModule: "journal",
+        sourceTable: "journal_entries",
+        sourceRecordId: transaction.id,
+        referenceType: "journal",
+        referenceId: transaction.id,
+        createdBy:
+          (
+            await supabase.auth.getUser()
+          ).data.user?.id || null,
+        lines: usableLines.map((line) => ({
+          accountId: line.account_id,
+          debit: Number(line.debit || 0),
+          credit: Number(line.credit || 0),
+          description:
+            line.description.trim() ||
+            transactionDescription,
+        })),
+      });
 
       setSuccess(
         `Journal saved successfully${
@@ -1147,6 +1258,16 @@ export default function JournalPage() {
           deleteTransactionError.message
         );
       }
+
+      /*
+       * Remove the canonical journal entry of this journal as well, so the
+       * Cash Book, Bank Book, Ledger and reports stop showing it.
+       */
+      await deleteCanonicalJournalForSource(supabase, {
+        schoolId,
+        sourceRecordId: transaction.id,
+        legacyTransactionId: transaction.id,
+      });
 
       setDeleteJournal(null);
 
@@ -1418,7 +1539,7 @@ export default function JournalPage() {
                                   Select Account
                                 </option>
 
-                                {accounts.map(
+                                {selectableAccounts.map(
                                   (account) => (
                                     <option
                                       key={

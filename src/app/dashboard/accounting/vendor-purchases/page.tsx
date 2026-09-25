@@ -30,6 +30,7 @@ import * as XLSX from "xlsx";
 import { createClient } from "@/lib/supabase/client";
 import Link from "next/link";
 import {
+  deleteCanonicalJournalForSource,
   ensureSchoolAccountingSetup,
   postPurchaseBillJournal,
   postPurchaseReturnJournal,
@@ -1802,14 +1803,17 @@ export default function VendorPurchasesPage() {
       }
 
       // Re-post the accounting entry so corrected amounts are reflected.
+      // The shared helper clears purchase_bills.journal_entry_id (and every
+      // other table pointing at the entry) before deleting, otherwise the
+      // foreign key blocks the delete.
       if (editingBill?.journal_entry_id) {
-        const { error: clearJournalError } = await supabase
-          .from("journal_entries")
-          .delete()
-          .eq("id", editingBill.journal_entry_id)
-          .eq("school_id", schoolId);
-
-        if (clearJournalError) throw clearJournalError;
+        await deleteCanonicalJournalForSource(supabase, {
+          schoolId,
+          sourceRecordId: billId,
+          sourceModule: "vendor_purchases",
+          sourceTable: "purchase_bills",
+          journalEntryIds: [editingBill.journal_entry_id],
+        });
       }
 
       const setup = await ensureSchoolAccountingSetup(
@@ -2340,14 +2344,17 @@ export default function VendorPurchasesPage() {
       );
 
       // Re-post the accounting entry so corrected amounts are reflected.
+      // vendor_payments.journal_entry_id still points at the old entry, so it
+      // is cleared first - otherwise the delete fails with
+      // vendor_payments_journal_entry_id_fkey.
       if (editing?.journal_entry_id) {
-        const { error: clearJournalError } = await supabase
-          .from("journal_entries")
-          .delete()
-          .eq("id", editing.journal_entry_id)
-          .eq("school_id", schoolId);
-
-        if (clearJournalError) throw clearJournalError;
+        await deleteCanonicalJournalForSource(supabase, {
+          schoolId,
+          sourceRecordId: paymentId,
+          sourceModule: "vendor_purchases",
+          sourceTable: "vendor_payments",
+          journalEntryIds: [editing.journal_entry_id],
+        });
       }
 
       const posted = await postVendorPaymentJournal(supabase, {
@@ -2406,13 +2413,13 @@ export default function VendorPurchasesPage() {
       }
 
       if (deleteBillTarget.journal_entry_id) {
-        const { error: journalError } = await supabase
-          .from("journal_entries")
-          .delete()
-          .eq("id", deleteBillTarget.journal_entry_id)
-          .eq("school_id", schoolId);
-
-        if (journalError) throw journalError;
+        await deleteCanonicalJournalForSource(supabase, {
+          schoolId,
+          sourceRecordId: deleteBillTarget.id,
+          sourceModule: "vendor_purchases",
+          sourceTable: "purchase_bills",
+          journalEntryIds: [deleteBillTarget.journal_entry_id],
+        });
       }
 
       const { error: billError } = await supabase
@@ -2444,13 +2451,13 @@ export default function VendorPurchasesPage() {
       setError("");
 
       if (deletePaymentTarget.journal_entry_id) {
-        const { error: journalError } = await supabase
-          .from("journal_entries")
-          .delete()
-          .eq("id", deletePaymentTarget.journal_entry_id)
-          .eq("school_id", schoolId);
-
-        if (journalError) throw journalError;
+        await deleteCanonicalJournalForSource(supabase, {
+          schoolId,
+          sourceRecordId: deletePaymentTarget.id,
+          sourceModule: "vendor_purchases",
+          sourceTable: "vendor_payments",
+          journalEntryIds: [deletePaymentTarget.journal_entry_id],
+        });
       }
 
       const { error: paymentError } = await supabase

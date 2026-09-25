@@ -19,6 +19,12 @@ import {
 import { createClient } from "@/lib/supabase/client";
 import { ensureBuiltInExpenseCategories } from "@/lib/accounting/expense-categories";
 import {
+  CASH_BANK_ACCOUNT_TYPES,
+  EXPENSE_ACCOUNT_TYPES,
+  filterSelectableAccountsByTypes,
+} from "@/lib/accounting/account-visibility";
+import {
+  deleteCanonicalJournalForSource,
   ensureSchoolAccountingSetup,
   postExpenseJournal,
   postSalaryPaymentJournal,
@@ -465,6 +471,95 @@ export default function PaymentPage() {
   async function loadPayments(
     currentSchoolId: string
   ) {
+    /*
+     * Payment history is read from the CANONICAL journal (entries tagged
+     * reference_type = "payment") plus any historical legacy transaction that
+     * has no canonical counterpart yet. That keeps the history complete
+     * without ever listing the same payment twice.
+     */
+    const {
+      data: journalEntries,
+      error: journalError,
+    } = await supabase
+      .from("journal_entries")
+      .select(
+        `
+          id,
+          entry_number,
+          entry_date,
+          description,
+          reference_type,
+          reference_id,
+          source_record_id,
+          created_at
+        `
+      )
+      .eq(
+        "school_id",
+        currentSchoolId
+      )
+      .eq(
+        "reference_type",
+        "payment"
+      )
+      .order(
+        "entry_date",
+        {
+          ascending: false,
+        }
+      )
+      .order(
+        "created_at",
+        {
+          ascending: false,
+        }
+      )
+      .limit(100);
+
+    if (journalError) {
+      throw new Error(journalError.message);
+    }
+
+    const canonicalEntries = journalEntries || [];
+
+    const canonicalEntryIds = canonicalEntries.map(
+      (entry) => String(entry.id)
+    );
+
+    // A canonical entry may point at a legacy transaction (older payments)
+    // through reference_id - those legacy rows must not be listed again.
+    const canonicalReferenceIds = new Set(
+      canonicalEntries
+        .map((entry) => String(entry.reference_id || ""))
+        .filter(Boolean)
+    );
+
+    const {
+      data: canonicalLines,
+      error: canonicalLinesError,
+    } = canonicalEntryIds.length > 0
+      ? await supabase
+          .from("journal_lines")
+          .select(
+            "id, journal_entry_id, account_id, debit, credit, description"
+          )
+          .eq("school_id", currentSchoolId)
+          .in("journal_entry_id", canonicalEntryIds)
+      : { data: [] as {
+          id: string;
+          journal_entry_id: string;
+          account_id: string;
+          debit: number | null;
+          credit: number | null;
+          description: string | null;
+        }[], error: null };
+
+    if (canonicalLinesError) {
+      throw new Error(canonicalLinesError.message);
+    }
+
+    const canonicalLineRows = canonicalLines || [];
+
     const {
       data: transactions,
       error: transactionError,
@@ -516,8 +611,21 @@ export default function PaymentPage() {
     const transactionRows =
       transactions || [];
 
+    /*
+     * Legacy rows already represented by a canonical journal entry (older
+     * payments stored both) are skipped so each payment is listed once.
+     */
+    const legacyRowsSource =
+      transactionRows.filter(
+        (transaction) =>
+          !canonicalReferenceIds.has(
+            String(transaction.id)
+          )
+      );
+
     if (
-      transactionRows.length === 0
+      legacyRowsSource.length === 0 &&
+      canonicalEntries.length === 0
     ) {
       setPayments([]);
       return;
@@ -564,10 +672,16 @@ export default function PaymentPage() {
     const accountIds =
       Array.from(
         new Set(
-          entryRows.map(
-            (entry) =>
-              entry.account_id
-          )
+          [
+            ...entryRows.map(
+              (entry) =>
+                entry.account_id
+            ),
+            ...canonicalLineRows.map(
+              (line) =>
+                line.account_id
+            ),
+          ].filter(Boolean)
         )
       );
 
@@ -621,8 +735,8 @@ export default function PaymentPage() {
       }
     }
 
-    const result: PaymentRow[] =
-      transactionRows.map(
+    const legacyPaymentRows: PaymentRow[] =
+      legacyRowsSource.map(
         (transaction) => ({
           id: transaction.id,
           transaction_number:
@@ -676,6 +790,86 @@ export default function PaymentPage() {
               ),
         })
       );
+
+    /*
+     * Canonical payments: the journal entry is the payment and its lines are
+     * the Cash/Bank movement plus the expense or salary-payable leg.
+     */
+    const canonicalPaymentRows: PaymentRow[] =
+      canonicalEntries.map((entry) => ({
+        id: String(entry.id),
+        transaction_number:
+          entry.entry_number
+            ? String(entry.entry_number)
+            : null,
+        transaction_date: String(
+          entry.entry_date
+        ),
+        description:
+          entry.description || null,
+        reference_type:
+          entry.reference_type || null,
+        reference_id:
+          String(
+            entry.reference_id ||
+              entry.source_record_id ||
+              ""
+          ) || null,
+        created_at: String(
+          entry.created_at || ""
+        ),
+        entries: canonicalLineRows
+          .filter(
+            (line) =>
+              String(line.journal_entry_id) ===
+              String(entry.id)
+          )
+          .map((line) => {
+            const account =
+              accountMap.get(
+                String(line.account_id)
+              );
+
+            return {
+              id: String(line.id),
+              transaction_id: String(
+                line.journal_entry_id
+              ),
+              account_id: String(
+                line.account_id
+              ),
+              debit: Number(line.debit || 0),
+              credit: Number(
+                line.credit || 0
+              ),
+              description:
+                line.description || null,
+              account_name:
+                account?.name ||
+                "Unknown Account",
+              account_code:
+                account?.code || null,
+            };
+          }),
+      }));
+
+    const result: PaymentRow[] = [
+      ...canonicalPaymentRows,
+      ...legacyPaymentRows,
+    ].sort((a, b) => {
+      const dateCompare =
+        b.transaction_date.localeCompare(
+          a.transaction_date
+        );
+
+      if (dateCompare !== 0) {
+        return dateCompare;
+      }
+
+      return String(b.created_at).localeCompare(
+        String(a.created_at)
+      );
+    });
 
     setPayments(result);
   }
@@ -1049,21 +1243,29 @@ export default function PaymentPage() {
 
   const cashBankAccounts =
     useMemo(() => {
-      return accounts.filter(
-        (account) =>
-          account.account_type ===
-            "cash" ||
-          account.account_type ===
-            "bank"
+      /*
+       * Pay-from selector: only Cash/Bank accounts the school can actually
+       * pay from - school-created Cash/Bank accounts plus the common
+       * Cash/Bank defaults. Seeded accounts of other types never appear here.
+       */
+      return filterSelectableAccountsByTypes(
+        accounts,
+        CASH_BANK_ACCOUNT_TYPES
       );
     }, [accounts]);
 
   const expenseAccounts =
     useMemo(() => {
-      return accounts.filter(
-        (account) =>
-          account.account_type ===
-          "expense"
+      /*
+       * Expense selector: accounts created by the school from
+       * Dashboard -> Accounting -> Accounts (for example "Electricity
+       * Expense" or "School Bus Expense"). The seeded generic expense
+       * accounts are hidden so the selector only lists the school's own
+       * chart of accounts.
+       */
+      return filterSelectableAccountsByTypes(
+        accounts,
+        EXPENSE_ACCOUNT_TYPES
       );
     }, [accounts]);
 
@@ -1449,6 +1651,15 @@ export default function PaymentPage() {
   ) {
     event.preventDefault();
 
+    /*
+     * Duplicate protection: while a submission is in flight, ignore any
+     * repeated submit (double click, Enter twice, retried request) so ONE
+     * financial event can only produce ONE canonical posting.
+     */
+    if (saving) {
+      return;
+    }
+
     setError("");
     setSuccess("");
 
@@ -1521,22 +1732,70 @@ export default function PaymentPage() {
     let alreadyPaid = 0;
 
     if (payrollMode) {
-      if (!payrollRunId || !payrollPayableAccountId) {
+      if (!payrollRunId) {
         setError(
           "Payroll information is incomplete. Return to Payroll and click Prepare Salary Payment again.",
         );
         return;
       }
 
-      const payable = accounts.find(
-        (account) => account.id === payrollPayableAccountId,
-      );
+      /*
+       * The Salary Payable account normally travels with the payroll context
+       * (?payable_account_id=... / sessionStorage). When it is missing - deep
+       * link, cleared storage, or preparation that finished without the old
+       * RPC - resolve it from the seeded chart of accounts so an individual
+       * staff payment can still be recorded and posted to Salary Payable
+       * instead of failing with "Payroll information is incomplete".
+       */
+      let effectivePayableAccountId = payrollPayableAccountId;
+
+      if (!effectivePayableAccountId) {
+        const setup = await ensureSchoolAccountingSetup(supabase, schoolId);
+        effectivePayableAccountId = setup.accountMap.SALARY_PAYABLE || "";
+      }
+
+      let payable =
+        accounts.find(
+          (account) => account.id === effectivePayableAccountId,
+        ) || null;
+
+      if (!payable && effectivePayableAccountId) {
+        const { data: payableAccount, error: payableAccountError } =
+          await supabase
+            .from("accounts")
+            .select("*")
+            .eq("school_id", schoolId)
+            .eq("id", effectivePayableAccountId)
+            .maybeSingle();
+
+        if (payableAccountError) {
+          setError(payableAccountError.message);
+          return;
+        }
+
+        payable = payableAccount;
+      }
 
       if (!payable) {
+        payable =
+          accounts.find(
+            (account) =>
+              (account.account_type === "payable" ||
+                account.account_type === "liability") &&
+              /salary payable/i.test(account.name),
+          ) || null;
+      }
+
+      if (!effectivePayableAccountId || !payable) {
         setError(
-          "Salary Payable account was not found in the current school.",
+          "Payroll information is incomplete. Return to Payroll and click Prepare Salary Payment again.",
         );
         return;
+      }
+
+      if (payable.id !== payrollPayableAccountId) {
+        setPayrollPayableAccountId(payable.id);
+        effectivePayableAccountId = payable.id;
       }
 
       if (
@@ -1707,6 +1966,10 @@ export default function PaymentPage() {
 
     let expenseCategoryId: string | null = null;
 
+    // Canonical payment record created for this submission. Used for the
+    // cleanup below when the canonical posting fails.
+    let createdExpenseId: string | null = null;
+
     try {
       const { data: userData } = await supabase.auth.getUser();
 
@@ -1743,85 +2006,112 @@ export default function PaymentPage() {
       // the same payment twice (legacy UNION ALL canonical).
       const setup = await ensureSchoolAccountingSetup(supabase, schoolId);
 
+      /*
+       * =====================================================
+       * ONE FINANCIAL EVENT = ONE CANONICAL POSTING
+       * -----------------------------------------------------
+       * 1. The payment record (expenses table) is the canonical source of
+       *    this financial event.
+       * 2. Exactly ONE canonical journal entry is posted, linked to that
+       *    payment record through source_record_id / reference_id.
+       *
+       * Because the journal entry is linked, deleting the payment also
+       * removes its accounting effect from the Cash Book, Bank Book, Ledger
+       * and reports, and a repeated submission re-uses the existing posting
+       * instead of creating a second one.
+       * =====================================================
+       */
+
+      const payrollExpenseDescription = payrollMode && paymentStaff
+        ? `Salary - ${paymentStaff.name} - ${formatPayrollMonthLabel(
+            payrollMonth,
+          )}`
+        : particulars.trim();
+
+      const payrollExpenseReference = payrollMode && paymentStaff
+        ? `PAYROLL-${payrollMonth}-${paymentStaff.employee_no}`
+        : referenceNumber.trim() || null;
+
+      const expenseCategories = await ensureBuiltInExpenseCategories(
+        supabase,
+        schoolId,
+      );
+      const expenseCategory = expenseCategories.get(
+        (payrollMode ? "Salary" : "Fee").toLowerCase(),
+      );
+
+      if (!expenseCategory) {
+        throw new Error("Built-in expense category could not be created.");
+      }
+
+      expenseCategoryId = expenseCategory.id;
+
+      // 1. Create the payment record first (no legacy transaction).
+      const { data: paymentExpense, error: expenseRowError } = await supabase
+        .from("expenses")
+        .insert({
+          school_id: schoolId,
+          expense_category_id: expenseCategory.id,
+          expense_date: paymentDate,
+          amount: numericAmount,
+          paid_from_account_id: paidFromAccountId,
+          transaction_id: null, // canonical journal only - no legacy transaction
+          vendor_name: payrollMode && paymentStaff
+            ? paymentStaff.name
+            : null,
+          invoice_number: payrollExpenseReference,
+          description: payrollExpenseDescription,
+          created_by: userData.user?.id || null,
+        })
+        .select("id")
+        .single();
+
+      if (expenseRowError) {
+        throw new Error(
+          `Expense record could not be created: ${expenseRowError.message}`,
+        );
+      }
+
+      if (!paymentExpense?.id) {
+        throw new Error("Payment record could not be created.");
+      }
+
+      createdExpenseId = String(paymentExpense.id);
+
+      // Human readable narration for the Cash Book, Bank Book and Ledger.
+      const paymentNarration = payrollMode && paymentStaff
+        ? `Salary payment - ${paymentStaff.name} - ${formatPayrollMonthLabel(
+            payrollMonth,
+          )}`
+        : description;
+
+      // 2. Post the ONE canonical journal entry for this payment.
       if (payrollMode) {
         await postSalaryPaymentJournal(supabase, {
           schoolId,
           fiscalYearId: setup.fiscalYearId,
           entryDate: paymentDate,
-          sourceRecordId: null, // Will be linked after expense creation
+          sourceRecordId: createdExpenseId,
           salaryPayableAccountId: debitAccountId,
           paymentAccountId: paidFromAccountId,
           amount: numericAmount,
           createdBy: userData.user?.id || null,
+          entryDescription: paymentNarration,
+          referenceType: "payment",
         });
       } else {
         await postExpenseJournal(supabase, {
           schoolId,
           fiscalYearId: setup.fiscalYearId,
           entryDate: paymentDate,
-          sourceRecordId: null, // Will be linked after expense creation
+          sourceRecordId: createdExpenseId,
           expenseAccountId: debitAccountId,
           paymentAccountId: paidFromAccountId,
           amount: numericAmount,
           createdBy: userData.user?.id || null,
+          entryDescription: paymentNarration,
+          referenceType: "payment",
         });
-      }
-
-      /* We already posted the canonical journal entry above.
-       * Now create the expense record for the Expenses dashboard only.
-       * The accounting effect is ONLY from the journal entry, not from
-       * the expenses table. This prevents double-counting in cash_book/bank_book.
-       */
-      {
-        const payrollExpenseDescription = payrollMode && paymentStaff
-          ? `Salary - ${paymentStaff.name} - ${formatPayrollMonthLabel(
-              payrollMonth,
-            )}`
-          : particulars.trim();
-
-        const payrollExpenseReference = payrollMode && paymentStaff
-          ? `PAYROLL-${payrollMonth}-${paymentStaff.employee_no}`
-          : referenceNumber.trim() || null;
-
-        const expenseCategories = await ensureBuiltInExpenseCategories(
-          supabase,
-          schoolId,
-        );
-        const expenseCategory = expenseCategories.get(
-          (payrollMode ? "Salary" : "Fee").toLowerCase(),
-        );
-
-        if (!expenseCategory) {
-          throw new Error("Built-in expense category could not be created.");
-        }
-
-        expenseCategoryId = expenseCategory.id;
-
-        // Create expense record WITHOUT a transaction_id since we're not
-        // creating a legacy transaction. The expense record is for dashboard
-        // display only - the canonical journal entry handles the accounting.
-        const { error: expenseRowError } = await supabase
-          .from("expenses")
-          .insert({
-            school_id: schoolId,
-            expense_category_id: expenseCategory.id,
-            expense_date: paymentDate,
-            amount: numericAmount,
-            paid_from_account_id: paidFromAccountId,
-            transaction_id: null, // No legacy transaction - canonical journal only
-            vendor_name: payrollMode && paymentStaff
-              ? paymentStaff.name
-              : null,
-            invoice_number: payrollExpenseReference,
-            description: payrollExpenseDescription,
-            created_by: userData.user?.id || null,
-          });
-
-        if (expenseRowError) {
-          throw new Error(
-            `Expense record could not be created: ${expenseRowError.message}`,
-          );
-        }
       }
 
       if (payrollMode) {
@@ -1860,85 +2150,97 @@ export default function PaymentPage() {
         }
 
         /*
-         * Check every employee after this payment.
-         * Finalize only when all payroll items are fully paid.
+         * Check every employee after this payment and finalize the run only
+         * when all payroll items are fully paid.
+         *
+         * This step is deliberately BEST-EFFORT: the payment itself (expense
+         * row + canonical journal + paid payroll item) is already stored, so
+         * a failure here must never roll the payment back. Rolling back at
+         * this point previously left payroll_items marked paid while the
+         * expense row and the journal entry had been deleted again.
          */
-        const {
-          data: allPayrollItems,
-          error: allItemsError,
-        } = await supabase
-          .from("payroll_items")
-          .select(
-            "id, employee_id, net_salary, paid_amount, paid, status",
-          )
-          .eq("payroll_run_id", payrollRunId)
-          .eq("school_id", schoolId);
+        let successMessage = "";
+        let finalizeWarning = "";
 
-        if (allItemsError) {
-          throw new Error(
-            `Unable to verify remaining payroll payments: ${allItemsError.message}`,
-          );
-        }
-
-        if (!allPayrollItems || allPayrollItems.length === 0) {
-          throw new Error(
-            "No payroll items were found after recording the employee payment.",
-          );
-        }
-
-        const allPaid = allPayrollItems.every(
-          (item) =>
-            Boolean(item.paid) ||
-            item.status === "paid" ||
-            Number(item.paid_amount || 0) >=
-              Number(item.net_salary || 0) - 0.005,
-        );
-
-        if (allPaid) {
+        try {
           const {
-            data: finalizedRun,
-            error: runUpdateError,
+            data: allPayrollItems,
+            error: allItemsError,
           } = await supabase
-            .from("payroll_runs")
-            .update({
-              status: "finalized",
-              finalized_at: new Date().toISOString(),
-              updated_at: new Date().toISOString(),
-            })
-            .eq("id", payrollRunId)
-            .eq("school_id", schoolId)
-            .eq("status", "prepared")
-            .select("id, status, finalized_at")
-            .maybeSingle();
+            .from("payroll_items")
+            .select(
+              "id, employee_id, net_salary, paid_amount, paid, status",
+            )
+            .eq("payroll_run_id", payrollRunId)
+            .eq("school_id", schoolId);
 
-          if (runUpdateError) {
+          if (allItemsError) {
             throw new Error(
-              `Payroll could not be finalized: ${runUpdateError.message}`,
+              `Unable to verify remaining payroll payments: ${allItemsError.message}`,
             );
           }
 
-          if (!finalizedRun) {
+          if (!allPayrollItems || allPayrollItems.length === 0) {
             throw new Error(
-              "Payroll payment was recorded, but the payroll could not be finalized.",
+              "No payroll items were found after recording the employee payment.",
             );
           }
 
-          try {
-            window.sessionStorage.removeItem(
-              "schoolflow_payroll_payment",
-            );
-          } catch {
-            // Storage cleanup only.
-          }
-
-          setSuccess(
-            `Salary payment completed — ${money(
-              numericAmount,
-            )} paid from ${paidFrom.name} for ${paymentStaff!.name}. Payroll is now fully finalized.`,
+          const allPaid = allPayrollItems.every(
+            (item) =>
+              Boolean(item.paid) ||
+              item.status === "paid" ||
+              Number(item.paid_amount || 0) >=
+                Number(item.net_salary || 0) - 0.005,
           );
-        } else {
-          const remainingPayrollAmount =
-            allPayrollItems.reduce(
+
+          if (allPaid) {
+            const {
+              data: finalizedRun,
+              error: runUpdateError,
+            } = await supabase
+              .from("payroll_runs")
+              .update({
+                status: "finalized",
+                finalized_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", payrollRunId)
+              .eq("school_id", schoolId)
+              // Accept 'prepared' (the normal path) but also 'draft', so a
+              // run whose status was never persisted (older preparation flow)
+              // can still be closed instead of failing the whole payment.
+              .in("status", ["draft", "prepared"])
+              .select("id, status, finalized_at")
+              .maybeSingle();
+
+            if (runUpdateError) {
+              throw new Error(
+                `Payroll could not be finalized: ${runUpdateError.message}`,
+              );
+            }
+
+            if (finalizedRun) {
+              try {
+                window.sessionStorage.removeItem(
+                  "schoolflow_payroll_payment",
+                );
+              } catch {
+                // Storage cleanup only.
+              }
+
+              successMessage = `Salary payment completed — ${money(
+                numericAmount,
+              )} paid from ${paidFrom.name} for ${paymentStaff!.name}. Payroll is now fully finalized.`;
+            } else {
+              successMessage = `Salary payment completed — ${money(
+                numericAmount,
+              )} paid from ${paidFrom.name} for ${paymentStaff!.name}.`;
+              finalizeWarning =
+                " The payment is saved, but the payroll run status could not be set to finalized — finish it from Payroll.";
+            }
+          } else {
+            const remainingPayrollAmount = allPayrollItems.reduce(
               (sum, item) =>
                 sum +
                 Math.max(
@@ -1949,16 +2251,26 @@ export default function PaymentPage() {
               0,
             );
 
-          setPayrollTotalAmount(
-            remainingPayrollAmount.toFixed(2),
-          );
+            setPayrollTotalAmount(remainingPayrollAmount.toFixed(2));
 
-          setSuccess(
-            `Salary payment completed — ${money(
+            successMessage = `Salary payment completed — ${money(
               numericAmount,
-            )} paid from ${paidFrom.name} for ${paymentStaff!.name}. Other employees remain unpaid.`,
-          );
+            )} paid from ${paidFrom.name} for ${paymentStaff!.name}. Other employees remain unpaid.`;
+          }
+        } catch (finalizeError) {
+          // Never undo a saved payment because of the status refresh.
+          console.error("PAYROLL FINALIZE WARNING:", finalizeError);
+          successMessage = `Salary payment completed — ${money(
+            numericAmount,
+          )} paid from ${paidFrom.name} for ${paymentStaff!.name}.`;
+          finalizeWarning = ` The payment is saved, but the payroll status could not be refreshed: ${
+            finalizeError instanceof Error
+              ? finalizeError.message
+              : "unknown error"
+          }`;
         }
+
+        setSuccess(successMessage + finalizeWarning);
       } else {
         setSuccess(
           `Payment saved successfully — ${money(
@@ -1972,18 +2284,25 @@ export default function PaymentPage() {
     } catch (err: any) {
       console.error("PAYMENT RECORDING ERROR:", err);
 
-      // Clean up the expense record if it was created
-      if (expenseCategoryId && paidFromAccountId) {
-        await supabase
-          .from("expenses")
-          .delete()
-          .eq("school_id", schoolId)
-          .eq("expense_category_id", expenseCategoryId)
-          .eq("paid_from_account_id", paidFromAccountId)
-          .eq("expense_date", paymentDate)
-          .eq("amount", numericAmount)
-          .eq("description", particulars.trim())
-          .maybeSingle();
+      // Clean up the canonical payment record and its journal entry so a
+      // failed submission never leaves a half-recorded payment behind.
+      if (createdExpenseId) {
+        try {
+          await deleteCanonicalJournalForSource(supabase, {
+            schoolId,
+            sourceRecordId: createdExpenseId,
+            sourceModule: "expenses",
+            sourceTable: "expenses",
+          });
+
+          await supabase
+            .from("expenses")
+            .delete()
+            .eq("school_id", schoolId)
+            .eq("id", createdExpenseId);
+        } catch (cleanupError) {
+          console.error("PAYMENT ROLLBACK ERROR:", cleanupError);
+        }
       }
 
       setError(
@@ -2355,111 +2674,157 @@ export default function PaymentPage() {
 
     try {
       /*
-       * Verify payment belongs to
-       * current school.
+       * The row can be a CANONICAL payment (journal entry) or a historical
+       * legacy transaction. Either way exactly ONE accounting effect is
+       * removed: the canonical journal entry of that payment.
        */
 
       const {
-        data: transaction,
-        error:
-          transactionError,
+        data: journalEntry,
+        error: journalReadError,
       } = await supabase
-        .from("transactions")
+        .from("journal_entries")
         .select(
-          "id, transaction_number"
+          "id, entry_number, description, reference_id, source_record_id"
         )
-        .eq(
-          "id",
-          deletePayment.id
-        )
-        .eq(
-          "school_id",
-          schoolId
-        )
-        .eq(
-          "transaction_type",
-          "expense"
-        )
-        .eq(
-          "reference_type",
-          "payment"
-        )
+        .eq("id", deletePayment.id)
+        .eq("school_id", schoolId)
         .maybeSingle();
 
-      if (transactionError) {
+      if (journalReadError) {
         throw new Error(
-          transactionError.message
+          journalReadError.message
         );
       }
 
-      if (!transaction) {
-        throw new Error(
-          "Payment could not be found or does not belong to the current school."
+      let paymentLabel =
+        deletePayment.transaction_number || "";
+
+      if (journalEntry) {
+        // Canonical payment: remove the journal entry and the payment record.
+        const sourceRecordId = String(
+          journalEntry.reference_id ||
+            journalEntry.source_record_id ||
+            ""
         );
+
+        if (journalEntry.entry_number) {
+          paymentLabel = String(
+            journalEntry.entry_number
+          );
+        }
+
+        await deleteCanonicalJournalForSource(
+          supabase,
+          {
+            schoolId,
+            sourceRecordId,
+            journalEntryIds: [journalEntry.id],
+            sourceModule: "expenses",
+            sourceTable: "expenses",
+          }
+        );
+
+        if (sourceRecordId) {
+          const {
+            error: expenseDeleteError,
+          } = await supabase
+            .from("expenses")
+            .delete()
+            .eq("id", sourceRecordId)
+            .eq("school_id", schoolId);
+
+          if (expenseDeleteError) {
+            throw new Error(
+              expenseDeleteError.message
+            );
+          }
+        }
+      } else {
+        /*
+         * Historical legacy payment. Delete the legacy rows and the canonical
+         * journal entry linked to that transaction (older payments posted
+         * both) so nothing is left behind in the ledger or cash/bank books.
+         */
+        const {
+          data: transaction,
+          error: transactionError,
+        } = await supabase
+          .from("transactions")
+          .select("id, transaction_number")
+          .eq("id", deletePayment.id)
+          .eq("school_id", schoolId)
+          .eq("transaction_type", "expense")
+          .eq("reference_type", "payment")
+          .maybeSingle();
+
+        if (transactionError) {
+          throw new Error(
+            transactionError.message
+          );
+        }
+
+        if (!transaction) {
+          throw new Error(
+            "Payment could not be found or does not belong to the current school."
+          );
+        }
+
+        paymentLabel =
+          transaction.transaction_number ||
+          paymentLabel;
+
+        await deleteCanonicalJournalForSource(
+          supabase,
+          {
+            schoolId,
+            sourceRecordId:
+              transaction.id,
+            legacyTransactionId:
+              transaction.id,
+          }
+        );
+
+        const {
+          error: deleteEntriesError,
+        } = await supabase
+          .from("transaction_entries")
+          .delete()
+          .eq(
+            "transaction_id",
+            transaction.id
+          )
+          .eq("school_id", schoolId);
+
+        if (deleteEntriesError) {
+          throw new Error(
+            `Payment accounting entries could not be deleted: ${deleteEntriesError.message}`
+          );
+        }
+
+        const {
+          error: deleteTransactionError,
+        } = await supabase
+          .from("transactions")
+          .delete()
+          .eq("id", transaction.id)
+          .eq("school_id", schoolId);
+
+        if (deleteTransactionError) {
+          throw new Error(
+            `Payment could not be deleted: ${deleteTransactionError.message}`
+          );
+        }
       }
 
-      /*
-       * Delete transaction entries first.
-       */
-
-      const {
-        error:
-          deleteEntriesError,
-      } = await supabase
-        .from("transaction_entries")
-        .delete()
-        .eq(
-          "transaction_id",
-          transaction.id
-        )
-        .eq(
-          "school_id",
-          schoolId
-        );
-
-      if (deleteEntriesError) {
-        throw new Error(
-          `Payment accounting entries could not be deleted: ${deleteEntriesError.message}`
-        );
-      }
-
-      /*
-       * Delete transaction.
-       */
-
-      const {
-        error:
-          deleteTransactionError,
-      } = await supabase
-        .from("transactions")
-        .delete()
-        .eq(
-          "id",
-          transaction.id
-        )
-        .eq(
-          "school_id",
-          schoolId
-        );
-
-      if (
-        deleteTransactionError
-      ) {
-        throw new Error(
-          `Payment could not be deleted: ${deleteTransactionError.message}`
-        );
-      }
-
-      setDeletePayment(
-        null
-      );
+      setDeletePayment(null);
 
       setSuccess(
         `Payment${
-          transaction.transaction_number
-            ? ` ${transaction.transaction_number}`
+          paymentLabel
+            ? ` ${paymentLabel}`
             : ""
-        } deleted successfully.`
+        } and its accounting entry deleted successfully.`
       );
 
       await loadPayments(

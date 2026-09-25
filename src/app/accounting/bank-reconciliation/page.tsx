@@ -212,7 +212,7 @@ export default function BankReconciliationPage() {
           .order("name", { ascending: true }),
 
         supabase
-          .from("transactions")
+          .from("ledger_transactions")
           .select(
             "id, transaction_date, transaction_type, description, reference_type, reference_id, created_at",
           )
@@ -221,7 +221,7 @@ export default function BankReconciliationPage() {
           .order("created_at", { ascending: true }),
 
         supabase
-          .from("transaction_entries")
+          .from("ledger_entries")
           .select(
             "id, school_id, transaction_id, account_id, debit, credit, description",
           )

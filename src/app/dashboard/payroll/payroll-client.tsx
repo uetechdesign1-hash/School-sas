@@ -902,75 +902,160 @@ export default function PayrollPage() {
           );
         }
 
-        if (!preparedTransaction) {
-          throw new Error(
-            "This payroll is marked Prepared, but its Salary Expense / Salary Payable journal could not be found.",
-          );
-        }
-
-        const { data: preparedEntries, error: preparedEntriesError } =
-          await supabase
-            .from("transaction_entries")
-            .select("account_id, debit, credit")
-            .eq("school_id", schoolId)
-            .eq("transaction_id", preparedTransaction.id);
-
-        if (preparedEntriesError) {
-          throw new Error(
-            `Unable to recover salary journal entries: ${preparedEntriesError.message}`,
-          );
-        }
-
-        const accountIds = Array.from(
-          new Set(
-            (preparedEntries || [])
-              .map((entry) => entry.account_id)
-              .filter(Boolean),
-          ),
-        );
-
-        if (!accountIds.length) {
-          throw new Error(
-            "The prepared salary journal has no accounting entries.",
-          );
-        }
-
-        const { data: preparedAccounts, error: preparedAccountsError } =
-          await supabase
-            .from("accounts")
-            .select("id, name, account_type")
-            .eq("school_id", schoolId)
-            .in("id", accountIds);
-
-        if (preparedAccountsError) {
-          throw new Error(
-            `Unable to recover salary accounts: ${preparedAccountsError.message}`,
-          );
-        }
-
         let payableAccountId = "";
         let payableAccountName = "Salary Payable";
+        let preparedTransactionId = "";
+        let preparedTransactionNumber: string | null = null;
 
-        for (const account of preparedAccounts || []) {
-          const entry = (preparedEntries || []).find(
-            (item) => item.account_id === account.id,
+        /*
+         * Legacy preparation wrote a transactions row with
+         * reference_type = 'payroll'. Recover the journal from there when it
+         * exists. The canonical flow posts straight into journal_entries, so
+         * the legacy row is optional and its absence must not stop the page
+         * from taking individual staff payments.
+         */
+        if (preparedTransaction) {
+          preparedTransactionId = preparedTransaction.id;
+          preparedTransactionNumber =
+            preparedTransaction.transaction_number || null;
+
+          const { data: preparedEntries, error: preparedEntriesError } =
+            await supabase
+              .from("transaction_entries")
+              .select("account_id, debit, credit")
+              .eq("school_id", schoolId)
+              .eq("transaction_id", preparedTransaction.id);
+
+          if (preparedEntriesError) {
+            throw new Error(
+              `Unable to recover salary journal entries: ${preparedEntriesError.message}`,
+            );
+          }
+
+          const accountIds = Array.from(
+            new Set(
+              (preparedEntries || [])
+                .map((entry) => entry.account_id)
+                .filter(Boolean),
+            ),
           );
 
-          if (
-            entry &&
-            Number(entry.credit || 0) > 0 &&
-            (account.account_type === "payable" ||
-              account.account_type === "liability")
-          ) {
-            payableAccountId = account.id;
-            payableAccountName = account.name;
-            break;
+          if (accountIds.length) {
+            const { data: preparedAccounts, error: preparedAccountsError } =
+              await supabase
+                .from("accounts")
+                .select("id, name, account_type")
+                .eq("school_id", schoolId)
+                .in("id", accountIds);
+
+            if (preparedAccountsError) {
+              throw new Error(
+                `Unable to recover salary accounts: ${preparedAccountsError.message}`,
+              );
+            }
+
+            for (const account of preparedAccounts || []) {
+              const entry = (preparedEntries || []).find(
+                (item) => item.account_id === account.id,
+              );
+
+              if (
+                entry &&
+                Number(entry.credit || 0) > 0 &&
+                (account.account_type === "payable" ||
+                  account.account_type === "liability")
+              ) {
+                payableAccountId = account.id;
+                payableAccountName = account.name;
+                break;
+              }
+            }
           }
+        }
+
+        /*
+         * Canonical fallback: read the Cr Salary Payable line of the accrual
+         * posted for this run (Dr Salary Expense / Cr Salary Payable) from
+         * journal_lines through accounting_events.
+         */
+        if (!payableAccountId) {
+          const { data: accrualEvent, error: accrualEventError } =
+            await supabase
+              .from("accounting_events")
+              .select("journal_entry_id")
+              .eq("school_id", schoolId)
+              .eq("source_module", "payroll")
+              .eq("source_record_id", savedRun.id)
+              .limit(1)
+              .maybeSingle();
+
+          if (accrualEventError) {
+            throw new Error(
+              `Unable to recover the prepared salary journal: ${accrualEventError.message}`,
+            );
+          }
+
+          if (accrualEvent?.journal_entry_id) {
+            const { data: accrualLines, error: accrualLinesError } =
+              await supabase
+                .from("journal_lines")
+                .select("account_id, debit, credit")
+                .eq("school_id", schoolId)
+                .eq("journal_entry_id", accrualEvent.journal_entry_id);
+
+            if (accrualLinesError) {
+              throw new Error(
+                `Unable to recover salary journal lines: ${accrualLinesError.message}`,
+              );
+            }
+
+            const payableLine = (accrualLines || []).find(
+              (line) => Number(line.credit || 0) > 0,
+            );
+
+            if (payableLine?.account_id) {
+              const { data: payableAccount } = await supabase
+                .from("accounts")
+                .select("id, name")
+                .eq("school_id", schoolId)
+                .eq("id", payableLine.account_id)
+                .maybeSingle();
+
+              payableAccountId = payableLine.account_id;
+              payableAccountName = payableAccount?.name || "Salary Payable";
+            }
+
+            if (!preparedTransactionId) {
+              preparedTransactionId = accrualEvent.journal_entry_id;
+            }
+
+            if (!preparedTransactionNumber) {
+              const { data: accrualEntry } = await supabase
+                .from("journal_entries")
+                .select("entry_number")
+                .eq("school_id", schoolId)
+                .eq("id", accrualEvent.journal_entry_id)
+                .maybeSingle();
+
+              preparedTransactionNumber = accrualEntry?.entry_number || null;
+            }
+          }
+        }
+
+        /*
+         * Last resort: the seeded Salary Payable account. Preparation can be
+         * interrupted after the run is marked prepared, and a prepared run
+         * must still be able to receive individual staff payments.
+         */
+        if (!payableAccountId) {
+          const setup = await ensureSchoolAccountingSetup(supabase, schoolId);
+          payableAccountId = setup.accountMap.SALARY_PAYABLE || "";
+          payableAccountName = "Salary Payable";
         }
 
         if (!payableAccountId) {
           throw new Error(
-            "Salary Payable account could not be recovered from the prepared journal.",
+            "Salary Payable account could not be recovered. Run Prepare Salary Payment from Payroll again.",
           );
         }
 
@@ -1028,9 +1113,8 @@ export default function PayrollPage() {
           reference: `PAYROLL-${month}`,
           staff_count: staffItems.length || totals.staff,
           staff_items: staffItems,
-          accounting_transaction_id: preparedTransaction.id,
-          accounting_transaction_number:
-            preparedTransaction.transaction_number || null,
+          accounting_transaction_id: preparedTransactionId,
+          accounting_transaction_number: preparedTransactionNumber,
           payable_account_id: payableAccountId,
           payable_account_name: payableAccountName,
           accounting_status: "payable_created",
@@ -1054,7 +1138,7 @@ export default function PayrollPage() {
               payableAccountId,
             )}` +
             `&accounting_transaction_id=${encodeURIComponent(
-              preparedTransaction.id,
+              preparedTransactionId || savedRun.id,
             )}`,
         );
 
@@ -1085,40 +1169,92 @@ export default function PayrollPage() {
         throw new Error("Payroll was not saved. Please try again.");
       }
 
-      const { data, error } = await supabase.rpc(
-        "prepare_payroll_accounting",
-        {
-          p_payroll_run_id: runToPrepare.id,
-        },
-      );
-
-      if (error) {
-        throw new Error(
-          `Unable to prepare salary accounting: ${error.message}`,
-        );
-      }
-
-      if (!data?.success) {
-        throw new Error(
-          "Salary payroll accounting was not completed.",
-        );
-      }
-
+      /*
+       * =====================================================
+       * PREPARE SALARY ACCOUNTING — NO DATABASE RPC
+       * -----------------------------------------------------
+       * This used to call a `prepare_payroll_accounting` RPC. That function
+       * is not defined in any migration in this repository and is not
+       * present in the project's PostgREST schema, so every preparation
+       * failed (either "function ... does not exist", or - on databases
+       * where an older copy of the RPC was still installed - the
+       * journal_entries_entry_type_check violation reported in payroll).
+       *
+       * The canonical posting helpers reproduce exactly what the RPC did,
+       * with the same idempotency guarantees:
+       *
+       *   1. ensure the fiscal year and the seeded chart of accounts exist,
+       *   2. post THE ONE accrual journal for this run
+       *        Dr Salary Expense / Cr Salary Payable
+       *      (keyed by source_record_id, so a repeated click re-uses the
+       *      existing entry instead of accruing the payroll twice),
+       *   3. persist payroll_runs.status = 'prepared' so the Payment page
+       *      can finalize the run once every staff member has been paid.
+       *
+       * Bank/Cash is NOT touched here — individual staff payments post
+       * Dr Salary Payable / Cr Cash-Bank from Accounting -> Payment.
+       * =====================================================
+       */
       const payrollAmount = Number(totals.net.toFixed(2));
 
       const setup = await ensureSchoolAccountingSetup(supabase, schoolId);
-      await postPayrollAccrualJournal(supabase, {
+
+      const salaryExpenseAccountId = setup.accountMap.SALARY_EXPENSE;
+      const salaryPayableAccountId = setup.accountMap.SALARY_PAYABLE;
+
+      if (!salaryExpenseAccountId || !salaryPayableAccountId) {
+        throw new Error(
+          "Salary Expense / Salary Payable accounts could not be prepared for this school.",
+        );
+      }
+
+      const accrual = await postPayrollAccrualJournal(supabase, {
         schoolId,
         fiscalYearId: setup.fiscalYearId,
         entryDate: `${runToPrepare.year}-${String(runToPrepare.month).padStart(2, "0")}-01`,
         sourceRecordId: runToPrepare.id,
-        salaryExpenseAccountId:
-          data.expense_account_id || setup.accountMap.SALARY_EXPENSE,
-        salaryPayableAccountId:
-          data.payable_account_id || setup.accountMap.SALARY_PAYABLE,
+        salaryExpenseAccountId,
+        salaryPayableAccountId,
         amount: payrollAmount,
         createdBy: (await supabase.auth.getUser()).data.user?.id || null,
       });
+
+      const { error: prepareStatusError } = await supabase
+        .from("payroll_runs")
+        .update({
+          status: "prepared",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", runToPrepare.id)
+        .eq("school_id", schoolId)
+        .in("status", ["draft", "prepared"]);
+
+      if (prepareStatusError) {
+        throw new Error(
+          `Salary accounting was posted, but the payroll could not be marked prepared: ${prepareStatusError.message}`,
+        );
+      }
+
+      const { data: salaryAccounts, error: salaryAccountsError } =
+        await supabase
+          .from("accounts")
+          .select("id, name")
+          .eq("school_id", schoolId)
+          .in("id", [salaryExpenseAccountId, salaryPayableAccountId]);
+
+      if (salaryAccountsError) {
+        throw new Error(
+          `Unable to load salary accounts: ${salaryAccountsError.message}`,
+        );
+      }
+
+      const salaryAccountNames = new Map(
+        (salaryAccounts || []).map((account) => [account.id, account.name]),
+      );
+
+      const accrualJournalNumber =
+        (accrual.journalEntry as { entry_number?: string } | null)
+          ?.entry_number || null;
 
       const staffItems = rows
         .map((r) => ({
@@ -1154,15 +1290,14 @@ export default function PayrollPage() {
         reference: `PAYROLL-${month}`,
         staff_count: totals.staff,
         staff_items: staffItems,
-        accounting_transaction_id: data.transaction_id || data.journal_entry_id,
-        accounting_transaction_number:
-          data.transaction_number || null,
-        payable_account_id: data.payable_account_id,
+        accounting_transaction_id: accrual.journalEntryId,
+        accounting_transaction_number: accrualJournalNumber,
+        payable_account_id: salaryPayableAccountId,
         payable_account_name:
-          data.payable_account_name || "Salary Payable",
-        expense_account_id: data.expense_account_id,
+          salaryAccountNames.get(salaryPayableAccountId) || "Salary Payable",
+        expense_account_id: salaryExpenseAccountId,
         expense_account_name:
-          data.expense_account_name || "Salary Expense",
+          salaryAccountNames.get(salaryExpenseAccountId) || "Salary Expense",
         accounting_status: "payable_created",
       };
 
@@ -1189,10 +1324,10 @@ export default function PayrollPage() {
         `&particulars=${encodeURIComponent(payload.particulars)}` +
         `&reference=${encodeURIComponent(payload.reference)}` +
         `&payable_account_id=${encodeURIComponent(
-          data.payable_account_id,
+          salaryPayableAccountId,
         )}` +
         `&accounting_transaction_id=${encodeURIComponent(
-          data.transaction_id,
+          accrual.journalEntryId || runToPrepare.id,
         )}`;
 
       window.location.assign(paymentUrl);

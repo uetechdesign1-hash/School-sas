@@ -314,7 +314,7 @@ export default function TrialBalancePage() {
           .order("name"),
 
         supabase
-          .from("transactions")
+          .from("ledger_transactions")
           .select(
             `
             id,
@@ -327,7 +327,7 @@ export default function TrialBalancePage() {
           ),
 
         supabase
-          .from("transaction_entries")
+          .from("ledger_entries")
           .select(
             `
             id,

@@ -13,6 +13,10 @@ import {
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import { createClient } from "@/lib/supabase/client";
+import {
+  getBalanceSheetSection,
+  openingBalanceSide,
+} from "@/lib/accounting/balance-sheet-classification";
 
 type Account = {
   id: string;
@@ -269,7 +273,7 @@ export default function BalanceSheetPage() {
           .order("name"),
 
         supabase
-          .from("transactions")
+          .from("ledger_transactions")
           .select(
             `
               id,
@@ -282,7 +286,7 @@ export default function BalanceSheetPage() {
           ),
 
         supabase
-          .from("transaction_entries")
+          .from("ledger_entries")
           .select(
             `
               id,
@@ -529,8 +533,8 @@ export default function BalanceSheetPage() {
          * account type.
          *
          * Balance Sheet accounts only:
-         *   asset/cash/bank/receivable  -> Debit
-         *   liability/equity/payable -> Credit
+         *   asset/cash/bank/receivable        -> Debit
+         *   liability/equity/payable          -> Credit
          *
          * Income/expense are deliberately ignored.
          */
@@ -545,42 +549,36 @@ export default function BalanceSheetPage() {
           continue;
         }
 
+        const section =
+          getBalanceSheetSection(type);
+
         if (
-          type === "asset" ||
-          type === "cash" ||
-          type === "bank" ||
-          type === "receivable"
+          section !== "asset" &&
+          section !== "liability" &&
+          section !== "equity"
         ) {
-          const current =
-            totals.get(opening.account_id) || {
-              debit: 0,
-              credit: 0,
-            };
-
-          current.debit += amount;
-
-          totals.set(
-            opening.account_id,
-            current
-          );
-        } else if (
-          type === "liability" ||
-          type === "equity" ||
-          type === "payable"
-        ) {
-          const current =
-            totals.get(opening.account_id) || {
-              debit: 0,
-              credit: 0,
-            };
-
-          current.credit += amount;
-
-          totals.set(
-            opening.account_id,
-            current
-          );
+          continue;
         }
+
+        const current =
+          totals.get(opening.account_id) || {
+            debit: 0,
+            credit: 0,
+          };
+
+        if (
+          openingBalanceSide(type) ===
+          "credit"
+        ) {
+          current.credit += amount;
+        } else {
+          current.debit += amount;
+        }
+
+        totals.set(
+          opening.account_id,
+          current
+        );
       }
 
       /*
@@ -660,10 +658,8 @@ export default function BalanceSheetPage() {
          */
 
         if (
-          type !== "asset" &&
-          type !== "cash" &&
-          type !== "bank" &&
-          type !== "receivable"
+          getBalanceSheetSection(type) !==
+          "asset"
         ) {
           continue;
         }
@@ -719,6 +715,18 @@ export default function BalanceSheetPage() {
   /*
    * =====================================================
    * LIABILITIES
+   *
+   * A "payable" account IS a liability. Vendor Payables,
+   * Salary Payables, Other Payables and Loan Payables are
+   * all seeded with account_type = "payable", so accepting
+   * only the literal type "liability" made the Liabilities
+   * total show 0 and broke
+   *
+   *     Assets = Liabilities + Equity
+   *
+   * Any account whose type resolves to the liability
+   * section is included, and its credit balance is shown
+   * as a positive amount (credit - debit).
    * =====================================================
    */
 
@@ -732,7 +740,8 @@ export default function BalanceSheetPage() {
           account.account_type.toLowerCase();
 
         if (
-          type !== "liability"
+          getBalanceSheetSection(type) !==
+          "liability"
         ) {
           continue;
         }
@@ -801,7 +810,8 @@ export default function BalanceSheetPage() {
           account.account_type.toLowerCase();
 
         if (
-          type !== "equity"
+          getBalanceSheetSection(type) !==
+          "equity"
         ) {
           continue;
         }

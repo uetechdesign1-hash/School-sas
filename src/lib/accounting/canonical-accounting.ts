@@ -397,7 +397,7 @@ export async function postFeeCollectionJournal(
     entryDate: string;
     sourceRecordId: string;
     paymentAccountId: string;
-    feeReceivableAccountId: string;
+    feeIncomeAccountId: string;
     amount: number;
     createdBy?: string | null;
   },
@@ -422,10 +422,10 @@ export async function postFeeCollectionJournal(
         description: "Fee payment received",
       },
       {
-        accountId: input.feeReceivableAccountId,
+        accountId: input.feeIncomeAccountId,
         debit: 0,
         credit: Number(input.amount || 0),
-        description: "Fee receivable cleared",
+        description: "Student fee income earned",
       },
     ],
   });
@@ -484,18 +484,28 @@ export async function postSalaryPaymentJournal(
     paymentAccountId: string;
     amount: number;
     createdBy?: string | null;
+    /*
+     * Optional narration (for example "Salary payment - Ravi Kumar - 2026-08")
+     * so Cash Book, Bank Book and the Ledger show a human readable particulars
+     * instead of a generic "Salary payment".
+     */
+    entryDescription?: string | null;
+    /* Optional canonical tag, defaults to "salary_payment". */
+    referenceType?: string | null;
   },
 ) {
+  const entryDescription =
+    input.entryDescription?.trim() || "Salary payment";
   return postCanonicalJournalEntry(supabase, {
     schoolId: input.schoolId,
     fiscalYearId: input.fiscalYearId,
     entryDate: input.entryDate,
-    description: "Salary payment",
+    description: entryDescription,
     entryType: "PAYMENT",
     sourceModule: "salary_payment",
     sourceTable: "salary_payments",
     sourceRecordId: input.sourceRecordId ?? null,
-    referenceType: "salary_payment",
+    referenceType: input.referenceType?.trim() || "salary_payment",
     referenceId: input.sourceRecordId ?? null,
     createdBy: input.createdBy ?? null,
     lines: [
@@ -503,13 +513,13 @@ export async function postSalaryPaymentJournal(
         accountId: input.salaryPayableAccountId,
         debit: Number(input.amount || 0),
         credit: 0,
-        description: "Salary payable cleared",
+        description: `${entryDescription} - salary payable cleared`,
       },
       {
         accountId: input.paymentAccountId,
         debit: 0,
         credit: Number(input.amount || 0),
-        description: "Salary paid from cash or bank",
+        description: entryDescription,
       },
     ],
   });
@@ -529,6 +539,18 @@ export async function postExpenseJournal(
     vendorName?: string | null;
     expenseDescription?: string | null;
     invoiceNumber?: string | null;
+    /*
+     * Optional canonical tag. The Payment page tags its postings as
+     * "payment" so the payment history can read them from the canonical
+     * journal. Defaults to "expense" (the Expenses page postings).
+     */
+    referenceType?: string | null;
+    /*
+     * Optional entry/line narration override. When provided it becomes the
+     * journal description so Cash Book, Bank Book and the Ledger show the
+     * particulars the user typed instead of a generic label.
+     */
+    entryDescription?: string | null;
   },
 ) {
   const detailBits = [
@@ -537,16 +559,18 @@ export async function postExpenseJournal(
     input.invoiceNumber ? `Invoice ${input.invoiceNumber}` : "",
   ].filter(Boolean);
   const detailSuffix = detailBits.length > 0 ? ` - ${detailBits.join(" | ")}` : "";
+  const entryDescription =
+    input.entryDescription?.trim() || `Expense booking${detailSuffix}`;
   return postCanonicalJournalEntry(supabase, {
     schoolId: input.schoolId,
     fiscalYearId: input.fiscalYearId,
     entryDate: input.entryDate,
-    description: `Expense booking${detailSuffix}`,
+    description: entryDescription,
     entryType: "GENERAL",
     sourceModule: "expenses",
     sourceTable: "expenses",
     sourceRecordId: input.sourceRecordId ?? null,
-    referenceType: "expense",
+    referenceType: input.referenceType?.trim() || "expense",
     referenceId: input.sourceRecordId ?? null,
     createdBy: input.createdBy ?? null,
     lines: [
@@ -554,13 +578,13 @@ export async function postExpenseJournal(
         accountId: input.expenseAccountId,
         debit: Number(input.amount || 0),
         credit: 0,
-        description: `Expense recognized${detailSuffix}`,
+        description: entryDescription,
       },
       {
         accountId: input.paymentAccountId,
         debit: 0,
         credit: Number(input.amount || 0),
-        description: `Expense settled from cash or bank${detailSuffix}`,
+        description: entryDescription,
       },
     ],
   });
@@ -656,6 +680,203 @@ export async function postOpeningBalanceJournal(
       },
     ],
   });
+}
+
+/*
+ * =====================================================
+ * DETACH ROWS THAT ONLY POINT AT A JOURNAL ENTRY
+ * =====================================================
+ *
+ * vendor_payments, purchase_bills and purchase_returns keep a nullable
+ * foreign key to journal_entries. The schema declares ON DELETE SET NULL,
+ * but a table that was created outside the migrations can still carry the
+ * default NO ACTION rule, which blocks the delete with
+ *
+ *   update or delete on table "journal_entries" violates foreign key
+ *   constraint "vendor_payments_journal_entry_id_fkey" on table
+ *   "vendor_payments"
+ *
+ * Clearing the references first makes the delete succeed on every page
+ * (Expenses, Journal, Payment, Vendor Purchases). Once the matching
+ * migration has been applied the updates simply match zero rows.
+ *
+ * The cleanup is best effort: rows hidden by RLS or tables that are not in
+ * an older database must not break the delete, which reports the real
+ * problem itself if it is still blocked.
+ */
+const JOURNAL_ENTRY_REFERENCE_COLUMNS: { table: string; column: string }[] = [
+  { table: "vendor_payments", column: "journal_entry_id" },
+  { table: "purchase_bills", column: "journal_entry_id" },
+  { table: "purchase_returns", column: "journal_entry_id" },
+  { table: "purchase_returns", column: "refund_journal_entry_id" },
+];
+
+export async function detachJournalEntryReferences(
+  supabase: SupabaseClient,
+  schoolId: string,
+  journalEntryIds: string[],
+): Promise<void> {
+  if (journalEntryIds.length === 0) {
+    return;
+  }
+
+  for (const reference of JOURNAL_ENTRY_REFERENCE_COLUMNS) {
+    const { error } = await supabase
+      .from(reference.table)
+      .update({ [reference.column]: null })
+      .eq("school_id", schoolId)
+      .in(reference.column, journalEntryIds);
+
+    if (error) {
+      console.warn(
+        `Unable to clear ${reference.table}.${reference.column}: ${error.message}`,
+      );
+    }
+  }
+}
+
+/*
+ * =====================================================
+ * DELETE / REVERSE ONE CANONICAL POSTING
+ * =====================================================
+ *
+ * Removes the ONE canonical journal entry that belongs to a source record
+ * (expense, payment, fee payment, vendor payment, ...). The journal entry id
+ * is resolved through the canonical links, in this order:
+ *
+ *   0. the explicit journalEntryIds of the caller, for pages that already
+ *      know the id (vendor_payments.journal_entry_id, ...)
+ *   1. accounting_events (source_module / source_table / source_record_id)
+ *   2. journal_entries.source_record_id
+ *   3. journal_entries.reference_id (legacy callers passed the legacy
+ *      transaction id, or the expense id)
+ *
+ * journal_lines and accounting_events cascade from journal_entries, but they
+ * are deleted explicitly so the operation works even when the database does
+ * not have the cascade in place yet. Tables that reference the entry
+ * without owning it are detached first, see detachJournalEntryReferences.
+ *
+ * This helper never touches historical rows of other sources and never
+ * deletes anything outside the calling school.
+ */
+export async function deleteCanonicalJournalForSource(
+  supabase: SupabaseClient,
+  input: {
+    schoolId: string;
+    sourceRecordId?: string | null;
+    sourceModule?: string | null;
+    sourceTable?: string | null;
+    legacyTransactionId?: string | null;
+    journalEntryIds?: (string | null)[];
+  },
+): Promise<{ journalEntryIds: string[] }> {
+  const candidateIds = new Set<string>();
+
+  // 0. Ids the caller already knows.
+  for (const entryId of input.journalEntryIds ?? []) {
+    if (entryId) {
+      candidateIds.add(String(entryId));
+    }
+  }
+
+  const recordIds = [input.sourceRecordId, input.legacyTransactionId].filter(
+    (value): value is string => Boolean(value),
+  );
+
+  if (recordIds.length === 0 && candidateIds.size === 0) {
+    return { journalEntryIds: [] };
+  }
+
+  if (recordIds.length > 0) {
+    // 1. Canonical event rows.
+    let eventQuery = supabase
+      .from("accounting_events")
+      .select("id, journal_entry_id, source_record_id")
+      .eq("school_id", input.schoolId)
+      .in("source_record_id", recordIds);
+
+    if (input.sourceModule) {
+      eventQuery = eventQuery.eq("source_module", input.sourceModule);
+    }
+
+    if (input.sourceTable) {
+      eventQuery = eventQuery.eq("source_table", input.sourceTable);
+    }
+
+    const { data: events } = await eventQuery;
+
+    for (const event of events ?? []) {
+      if (event.journal_entry_id) {
+        candidateIds.add(String(event.journal_entry_id));
+      }
+    }
+
+    // 2. Journal entries linked either by source record or by reference id.
+    const { data: journalEntries, error: journalReadError } = await supabase
+      .from("journal_entries")
+      .select("id, source_record_id, reference_id")
+      .eq("school_id", input.schoolId)
+      .or(
+        [`source_record_id.in.(${recordIds.join(",")})`, `reference_id.in.(${recordIds.join(",")})`].join(
+          ",",
+        ),
+      );
+
+    if (journalReadError) {
+      throw new Error(journalReadError.message);
+    }
+
+    for (const entry of journalEntries ?? []) {
+      if (entry.id) {
+        candidateIds.add(String(entry.id));
+      }
+    }
+  }
+
+  if (candidateIds.size === 0) {
+    return { journalEntryIds: [] };
+  }
+
+  const journalEntryIds = Array.from(candidateIds);
+
+  const { error: lineError } = await supabase
+    .from("journal_lines")
+    .delete()
+    .eq("school_id", input.schoolId)
+    .in("journal_entry_id", journalEntryIds);
+
+  if (lineError) {
+    throw new Error(lineError.message);
+  }
+
+  const { error: eventDeleteError } = await supabase
+    .from("accounting_events")
+    .delete()
+    .eq("school_id", input.schoolId)
+    .in("journal_entry_id", journalEntryIds);
+
+  if (eventDeleteError) {
+    throw new Error(eventDeleteError.message);
+  }
+
+  /*
+   * Rows that only point at the entry (vendor_payments, purchase_bills,
+   * purchase_returns) are cleared first, so the delete never trips a foreign
+   * key such as vendor_payments_journal_entry_id_fkey.
+   */
+  await detachJournalEntryReferences(supabase, input.schoolId, journalEntryIds);
+
+  const { error: entryDeleteError } = await supabase
+    .from("journal_entries")
+    .delete()
+    .eq("school_id", input.schoolId)
+    .in("id", journalEntryIds);
+
+  if (entryDeleteError) {
+    throw new Error(entryDeleteError.message);
+  }
+
+  return { journalEntryIds };
 }
 
 export function buildLegacyCompatibilitySummary() {

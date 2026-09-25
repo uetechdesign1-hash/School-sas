@@ -29,6 +29,7 @@ import {
 import { createClient } from "@/lib/supabase/client";
 import { getCurrentSchoolId } from "@/lib/supabase/current-school";
 import { generateReceiptPDF } from "@/lib/fees/generateReceipt";
+import { ensureSchoolAccountingSetup } from "@/lib/accounting/canonical-accounting";
 
 type ReceiptType = "student_fee" | "other_income";
 
@@ -213,6 +214,46 @@ function paymentMethodLabel(value: string) {
   );
 }
 
+const STUDENT_FEE_INCOME_CODE = "STUDENT_FEES";
+const STUDENT_FEE_INCOME_NAMES = new Set([
+  "student fees",
+  "fee income",
+  "student fee income",
+  "fees income",
+]);
+
+function accountType(account: Account) {
+  return account.account_type.trim().toLowerCase();
+}
+
+function isIncomeAccount(account: Account) {
+  return accountType(account) === "income";
+}
+
+function isStudentFeeIncomeAccount(account: Account) {
+  if (!account.is_active || !isIncomeAccount(account)) return false;
+
+  const code = account.code?.trim().toLowerCase();
+  const name = account.name.trim().toLowerCase();
+
+  return code === STUDENT_FEE_INCOME_CODE.toLowerCase() ||
+    STUDENT_FEE_INCOME_NAMES.has(name);
+}
+
+function findStudentFeeIncomeAccount(rows: Account[]) {
+  return rows.find(isStudentFeeIncomeAccount);
+}
+
+function isCashOrBankAccount(account: Account) {
+  const type = accountType(account);
+  return account.is_active && (type === "cash" || type === "bank");
+}
+
+function isIncomeOrReceivableAccount(account: Account) {
+  const type = accountType(account);
+  return account.is_active && (type === "income" || type === "receivable");
+}
+
 
 export default function ReceiptPage() {
   const supabase = useMemo(() => createClient(), []);
@@ -343,30 +384,32 @@ export default function ReceiptPage() {
   );
 
   const cashBankAccounts = useMemo(
-    () =>
-      accounts.filter(
-        (account) =>
-          account.is_active &&
-          (account.account_type === "cash" ||
-            account.account_type === "bank")
-      ),
+    () => accounts.filter(isCashOrBankAccount),
     [accounts]
   );
 
-  const cashAccounts = useMemo(() => accounts.filter((account) => account.is_active && account.account_type === "cash"), [accounts]);
-  const bankAccounts = useMemo(() => accounts.filter((account) => account.is_active && account.account_type === "bank"), [accounts]);
+  const cashAccounts = useMemo(
+    () =>
+      accounts.filter(
+        (account) =>
+          account.is_active && accountType(account) === "cash"
+      ),
+    [accounts]
+  );
+  const bankAccounts = useMemo(
+    () =>
+      accounts.filter(
+        (account) =>
+          account.is_active && accountType(account) === "bank"
+      ),
+    [accounts]
+  );
   const cashSplit = Number(cashCollectionAmount || 0);
   const bankSplit = Number(bankCollectionAmount || 0);
   const splitCollectionTotal = cashSplit + bankSplit;
 
   const incomeAccounts = useMemo(
-    () =>
-      accounts.filter(
-        (account) =>
-          account.is_active &&
-          (account.account_type === "income" ||
-            account.account_type === "receivable")
-      ),
+    () => accounts.filter(isIncomeOrReceivableAccount),
     [accounts]
   );
 
@@ -420,23 +463,21 @@ export default function ReceiptPage() {
     const mainCash =
       rows.find(
         (account) =>
-          account.account_type === "cash" &&
+          accountType(account) === "cash" &&
           account.name.toLowerCase().includes("main cash")
       ) ||
-      rows.find((account) => account.account_type === "cash");
+      rows.find((account) => accountType(account) === "cash");
 
     if (mainCash) {
       setReceiveIntoAccountId(mainCash.id);
     }
 
-    const feeIncome = rows.find(
-      (account) =>
-        account.account_type === "income" &&
-        account.name.toLowerCase() === "fee income"
-    );
+    const feeIncome = findStudentFeeIncomeAccount(rows);
 
     if (feeIncome) {
       setIncomeAccountId(feeIncome.id);
+    } else {
+      setIncomeAccountId("");
     }
   }
 
@@ -1261,16 +1302,12 @@ export default function ReceiptPage() {
     setBankCollectionAccountId("");
 
     const cash = accounts.find(
-      (account) => account.account_type === "cash"
+      (account) => account.is_active && accountType(account) === "cash"
     );
 
     setReceiveIntoAccountId(cash?.id || "");
 
-    const feeIncome = accounts.find(
-      (account) =>
-        account.account_type === "income" &&
-        account.name.toLowerCase() === "fee income"
-    );
+    const feeIncome = findStudentFeeIncomeAccount(accounts);
 
     setIncomeAccountId(feeIncome?.id || "");
 
@@ -1336,11 +1373,7 @@ export default function ReceiptPage() {
     setNotes("");
 
     if (type === "student_fee") {
-      const feeIncome = accounts.find(
-        (account) =>
-          account.account_type === "income" &&
-          account.name.toLowerCase() === "fee income"
-      );
+      const feeIncome = findStudentFeeIncomeAccount(accounts);
 
       setIncomeAccountId(feeIncome?.id || "");
     } else {
@@ -1384,7 +1417,7 @@ export default function ReceiptPage() {
 
     if (method === "cash") {
       const cash = accounts.find(
-        (account) => account.account_type === "cash"
+        (account) => account.is_active && accountType(account) === "cash"
       );
 
       if (cash) setReceiveIntoAccountId(cash.id);
@@ -1395,7 +1428,7 @@ export default function ReceiptPage() {
       ["bank_transfer", "upi", "card", "online"].includes(method)
     ) {
       const bank = accounts.find(
-        (account) => account.account_type === "bank"
+        (account) => account.is_active && accountType(account) === "bank"
       );
 
       if (bank) setReceiveIntoAccountId(bank.id);
@@ -1650,11 +1683,7 @@ export default function ReceiptPage() {
           setFeeBills([]);
         }
 
-        const feeIncome = accounts.find(
-          (account) =>
-            account.account_type === "income" &&
-            account.name.toLowerCase() === "fee income"
-        );
+        const feeIncome = findStudentFeeIncomeAccount(accounts);
 
         if (feeIncome) {
           setIncomeAccountId(feeIncome.id);
@@ -1880,17 +1909,12 @@ export default function ReceiptPage() {
       }
     }
 
-    const feeIncome = accounts.find(
-      (account) => account.id === incomeAccountId
-    );
+    const feeIncome = incomeAccountId
+      ? accounts.find((account) => account.id === incomeAccountId)
+      : findStudentFeeIncomeAccount(accounts);
 
-    if (!feeIncome) {
+    if (!feeIncome || !isStudentFeeIncomeAccount(feeIncome)) {
       setError("Fee Income account was not found.");
-      return false;
-    }
-
-    if (feeIncome.account_type !== "income") {
-      setError("Fee Income must be an Income account.");
       return false;
     }
 

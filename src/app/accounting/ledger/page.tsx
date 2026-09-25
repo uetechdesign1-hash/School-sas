@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import { createClient } from "@/lib/supabase/client";
+import { filterSelectableAccounts } from "@/lib/accounting/account-visibility";
 
 type Account = {
   id: string;
@@ -21,6 +22,7 @@ type Account = {
   name: string;
   account_type: string;
   is_active: boolean;
+  is_system: boolean;
 };
 
 type Transaction = {
@@ -171,6 +173,14 @@ export default function LedgerPage() {
   const [journalLines, setJournalLines] = useState<JournalLine[]>([]);
   const [openingBalances, setOpeningBalances] = useState<OpeningBalance[]>([]);
 
+  /*
+   * Legacy transaction ids the database already represents with a canonical
+   * journal entry (public.legacy_superseded_transactions). Used to keep the
+   * ledger free of duplicate rows. Empty when the bridge view is missing.
+   */
+  const [supersededTransactionIds, setSupersededTransactionIds] =
+    useState<Set<string>>(new Set());
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -263,9 +273,14 @@ export default function LedgerPage() {
 
       setAccounts((data || []) as Account[]);
 
-      // Keep the first active account selected after the initial load.
-      if (!selectedAccountId && data?.length) {
-        setSelectedAccountId(String(data[0].id));
+      // Only school-managed accounts (plus the common Cash/Bank/Fee/Payable
+      // accounts) are offered in the Account selector. Every account, hidden
+      // or not, is still displayed by the report pages.
+      const selectable = filterSelectableAccounts(data || []) as Account[];
+
+      // Keep the first selectable account selected after the initial load.
+      if (!selectedAccountId && selectable.length) {
+        setSelectedAccountId(String(selectable[0].id));
       }
     },
     [selectedAccountId, supabase],
@@ -418,6 +433,31 @@ export default function LedgerPage() {
         loadJournalData(currentSchoolId),
         loadOpeningBalances(currentSchoolId),
       ]);
+
+      /*
+       * Canonical bridge: legacy transactions the database already represents
+       * with a journal entry. Their legacy rows are not shown again in the
+       * ledger, so every accounting event appears exactly once. If the bridge
+       * view is not deployed yet the query fails quietly and the ledger keeps
+       * using the reference_id heuristic below.
+       */
+      const { data: supersededRows, error: supersededError } =
+        await supabase
+          .from("legacy_superseded_transactions")
+          .select("transaction_id")
+          .eq("school_id", currentSchoolId);
+
+      const superseded = new Set<string>();
+
+      if (!supersededError) {
+        for (const row of supersededRows || []) {
+          if (row.transaction_id) {
+            superseded.add(String(row.transaction_id));
+          }
+        }
+      }
+
+      setSupersededTransactionIds(superseded);
     } catch (err: any) {
       console.error("LEDGER ERROR:", err);
       setError(err?.message || "Unable to load Ledger.");
@@ -432,6 +472,7 @@ export default function LedgerPage() {
     loadSchool,
     loadTransactionEntries,
     loadTransactions,
+    supabase,
   ]);
 
   useEffect(() => {
@@ -447,6 +488,18 @@ export default function LedgerPage() {
 
     return map;
   }, [accounts]);
+
+  /*
+   * Accounts offered in the Account selector: accounts created by the school
+   * from Dashboard -> Accounting -> Accounts plus the common accounts every
+   * school needs (Cash, Bank, Student Fees, Student Fee Receivable and
+   * Salary Payable). Seeded default accounts are never deleted - they simply
+   * do not clutter the selector.
+   */
+  const selectableAccounts = useMemo(
+    () => filterSelectableAccounts(accounts),
+    [accounts],
+  );
 
   const transactionMap = useMemo(() => {
     const map = new Map<string, Transaction>();
@@ -513,13 +566,27 @@ export default function LedgerPage() {
       balance += debitNormal ? amount : amount;
     }
 
-    // Add all transaction activity before Date From.
+    // Add all legacy activity before Date From, skipping transactions that are
+    // already represented by a canonical journal entry.
+    const openingJournalReferenceIds = new Set(
+      journalEntries
+        .map((journal) => journal.reference_id)
+        .filter((referenceId): referenceId is string => Boolean(referenceId)),
+    );
+
     entries
       .filter((entry) => entry.account_id === selectedAccountId)
       .forEach((entry) => {
         const transaction = transactionMap.get(entry.transaction_id);
 
         if (!transaction) {
+          return;
+        }
+
+        if (
+          openingJournalReferenceIds.has(transaction.id) ||
+          supersededTransactionIds.has(transaction.id)
+        ) {
           return;
         }
 
@@ -533,13 +600,41 @@ export default function LedgerPage() {
         balance += signedMovement(debit, credit, debitNormal);
       });
 
+    // Add all canonical journal activity before Date From.
+    const openingJournalMap = new Map(
+      journalEntries.map((journal) => [journal.id, journal]),
+    );
+
+    journalLines
+      .filter((line) => line.account_id === selectedAccountId)
+      .forEach((line) => {
+        const journal = openingJournalMap.get(line.journal_entry_id);
+
+        if (!journal) {
+          return;
+        }
+
+        if (journal.entry_date >= dateFrom) {
+          return;
+        }
+
+        balance += signedMovement(
+          Number(line.debit || 0),
+          Number(line.credit || 0),
+          debitNormal,
+        );
+      });
+
     return balance;
   }, [
     accountMap,
     dateFrom,
     entries,
+    journalEntries,
+    journalLines,
     openingBalances,
     selectedAccountId,
+    supersededTransactionIds,
     transactionMap,
   ]);
 
@@ -566,6 +661,10 @@ export default function LedgerPage() {
         transaction: transactionMap.get(entry.transaction_id),
       }))
       .filter((item) => !journalReferenceIds.has(item.transaction?.id || ""))
+      .filter(
+        (item) =>
+          !supersededTransactionIds.has(item.transaction?.id || ""),
+      )
       .filter((item) => Boolean(item.transaction))
       .filter((item) => {
         const date = item.transaction!.transaction_date;
@@ -951,7 +1050,7 @@ export default function LedgerPage() {
                 >
                   <option value="">Select Account</option>
 
-                  {accounts.map((account) => (
+                  {selectableAccounts.map((account) => (
                     <option key={account.id} value={account.id}>
                       {account.name}
                       {account.code ? ` (${account.code})` : ""}

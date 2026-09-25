@@ -130,6 +130,15 @@ export default function ProfitLossPage() {
   const [journalLines, setJournalLines] =
     useState<JournalLine[]>([]);
 
+  /*
+   * Legacy transaction ids that the database has already represented with a
+   * canonical journal entry (public.legacy_superseded_transactions). Empty if
+   * the bridge migration has not been applied yet - the P&L then falls back to
+   * the reference_id heuristic only.
+   */
+  const [supersededTransactionIds, setSupersededTransactionIds] =
+    useState<Set<string>>(new Set());
+
   const [dateFrom, setDateFrom] =
     useState(
       firstDayOfFinancialYear()
@@ -424,6 +433,30 @@ export default function ProfitLossPage() {
         (journalLineResult.data ||
           []) as JournalLine[]
       );
+
+      /*
+       * Canonical bridge: legacy transactions that a journal entry already
+       * represents. Reports must not count them twice.
+       */
+      const {
+        data: supersededRows,
+        error: supersededError,
+      } = await supabase
+        .from("legacy_superseded_transactions")
+        .select("transaction_id")
+        .eq("school_id", currentSchoolId);
+
+      const superseded = new Set<string>();
+
+      if (!supersededError) {
+        for (const row of supersededRows || []) {
+          if (row.transaction_id) {
+            superseded.add(String(row.transaction_id));
+          }
+        }
+      }
+
+      setSupersededTransactionIds(superseded);
     } catch (err: any) {
       console.error(
         "PROFIT LOSS ERROR:",
@@ -485,13 +518,23 @@ export default function ProfitLossPage() {
       return ids;
     }, [journalEntries]);
 
+  /*
+   * Legacy transactions already represented by a canonical journal entry
+   * (resolved by the database through the canonical bridge view) are excluded
+   * so the same financial event is never counted twice in the P&L.
+   */
   const legacyTransactions =
     useMemo(() => {
       return transactions.filter(
         (transaction) =>
-          !journalReferenceIds.has(transaction.id)
+          !journalReferenceIds.has(transaction.id) &&
+          !supersededTransactionIds.has(transaction.id)
       );
-    }, [transactions, journalReferenceIds]);
+    }, [
+      transactions,
+      journalReferenceIds,
+      supersededTransactionIds,
+    ]);
 
   /*
    * =====================================================
