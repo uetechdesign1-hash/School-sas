@@ -1,8 +1,17 @@
 @import "tailwindcss";
 
 :root {
-  --background: #f8fafc;
+  --background: #eef2fb;
   --foreground: #0f172a;
+
+  /* iOS system palette */
+  --ios-blue: #0a84ff;
+  --ios-green: #30d158;
+  --ios-indigo: #5856d6;
+  --ios-purple: #af52de;
+  --ios-pink: #ff2d55;
+  --ios-orange: #ff9f0a;
+  --ios-red: #ff3b30;
 }
 
 * {
@@ -11,6 +20,7 @@
 
 html {
   scroll-behavior: smooth;
+  -webkit-text-size-adjust: 100%;
 }
 
 body {
@@ -18,6 +28,7 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 
 button,
@@ -31,7 +42,274 @@ button {
   cursor: pointer;
 }
 
-::selection {
-  background: #dbeafe;
-  color: #1e3a8a;
+a,
+button {
+  -webkit-tap-highlight-color: rgba(99, 102, 241, 0.25);
 }
+
+::selection {
+  background: #c7d2fe;
+  color: #1e1b4b;
+}
+
+/* ------------------------------------------------------------------
+   iOS GLOSS THEME
+   Colorful wallpaper + system font for every page EXCEPT the Report
+   page (/dashboard/reports). The Report page root carries the unique
+   class "bg-[#EAEEF6]", so these rules switch themselves off the moment
+   that page is mounted — the report keeps its exact current rendering
+   without its file being edited.
+   ------------------------------------------------------------------ */
+
+body:not(:has([class*="EAEEF6"])) {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "SF Pro Display", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background-color: #eef2fb;
+  background-image:
+    radial-gradient(1100px 700px at 8% -12%, rgba(10, 132, 255, 0.22), transparent 62%),
+    radial-gradient(1000px 650px at 108% -4%, rgba(191, 90, 242, 0.2), transparent 58%),
+    radial-gradient(900px 800px at 50% 115%, rgba(48, 209, 88, 0.16), transparent 60%),
+    radial-gradient(700px 550px at 92% 65%, rgba(255, 159, 10, 0.14), transparent 55%),
+    radial-gradient(650px 500px at 4% 78%, rgba(100, 210, 255, 0.18), transparent 55%),
+    linear-gradient(180deg, #eef4ff 0%, #f4efff 45%, #ecfaf3 100%);
+  background-attachment: fixed;
+}
+
+/* ------------------------------------------------------------------
+   Utility overrides live inside the utilities layer so every Tailwind
+   state variant (hover:, focus:, disabled:, group-hover:) keeps a higher
+   specificity and continues to win. The :where() wrapper adds zero
+   specificity, so these overrides beat plain utilities by source order.
+   ------------------------------------------------------------------ */
+
+@layer utilities {
+  /* ==================== page canvases ====================
+     Let the colorful wallpaper show through full-page backgrounds. */
+  :where(body:not(:has([class*="EAEEF6"]))) .min-h-screen.bg-slate-50,
+  :where(body:not(:has([class*="EAEEF6"]))) .min-h-screen.bg-slate-100 {
+    background-color: transparent;
+  }
+
+  /* ==================== frosted white surfaces ====================
+     Every white card / panel / list row becomes glossy frosted glass. */
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-white {
+    background-color: rgba(255, 255, 255, 0.86);
+    background-image: linear-gradient(
+      155deg,
+      rgba(255, 255, 255, 0.6),
+      rgba(255, 255, 255, 0.08) 55%,
+      rgba(255, 255, 255, 0.28)
+    );
+  }
+
+
+  /* ==================== glossy solid buttons / fills ====================
+     A translucent white sheen (background-image) sits above the solid
+     background-color, so hover:/disabled: color changes still show. */
+
+  /* blues / indigos / violets / purples / sky / cyan */
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-blue-600,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-blue-700,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-indigo-600,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-violet-600,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-purple-600,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-sky-600,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-cyan-600 {
+    background-image: linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.32),
+      rgba(255, 255, 255, 0.06) 48%,
+      rgba(0, 0, 0, 0.1)
+    );
+    box-shadow:
+      0 8px 20px -8px rgba(79, 70, 229, 0.55),
+      inset 0 1px 0 rgba(255, 255, 255, 0.45);
+  }
+
+  /* dark primaries (login / landing CTAs) */
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-slate-900,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-slate-950 {
+    background-image: linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.26),
+      rgba(255, 255, 255, 0.04) 50%,
+      rgba(0, 0, 0, 0.12)
+    );
+    box-shadow:
+      0 10px 24px -10px rgba(79, 70, 229, 0.45),
+      inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  }
+
+
+  /* greens / teals */
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-emerald-600,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-emerald-700,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-green-600,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-teal-600 {
+    background-image: linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.32),
+      rgba(255, 255, 255, 0.06) 48%,
+      rgba(0, 0, 0, 0.1)
+    );
+    box-shadow:
+      0 8px 20px -8px rgba(16, 185, 129, 0.5),
+      inset 0 1px 0 rgba(255, 255, 255, 0.45);
+  }
+
+  /* reds / roses / pinks */
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-red-600,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-red-700,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-rose-600,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-pink-600 {
+    background-image: linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.32),
+      rgba(255, 255, 255, 0.06) 48%,
+      rgba(0, 0, 0, 0.1)
+    );
+    box-shadow:
+      0 8px 20px -8px rgba(255, 59, 48, 0.45),
+      inset 0 1px 0 rgba(255, 255, 255, 0.45);
+  }
+
+  /* ambers / oranges / yellows */
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-amber-500,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-amber-600,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-orange-600,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-yellow-500 {
+    background-image: linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.35),
+      rgba(255, 255, 255, 0.06) 48%,
+      rgba(0, 0, 0, 0.1)
+    );
+    box-shadow:
+      0 8px 20px -8px rgba(255, 159, 10, 0.5),
+      inset 0 1px 0 rgba(255, 255, 255, 0.5);
+  }
+
+
+  /* ==================== pastel candy tints ====================
+     Soft diagonal sheen over every light tinted chip / badge / tile. */
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-blue-50,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-blue-100,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-indigo-50,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-indigo-100,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-violet-50,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-purple-50,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-emerald-50,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-emerald-100,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-green-50,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-green-100,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-red-50,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-red-100,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-rose-50,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-amber-50,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-amber-100,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-yellow-50,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-orange-50,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-sky-50,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-teal-50,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-pink-50,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-violet-100,
+  :where(body:not(:has([class*="EAEEF6"]))) .bg-purple-100 {
+    background-image: linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.75),
+      rgba(255, 255, 255, 0.05) 70%
+    );
+  }
+
+
+  /* ==================== table headers ==================== */
+  :where(body:not(:has([class*="EAEEF6"]))) thead {
+    background-image: linear-gradient(
+      180deg,
+      rgba(248, 250, 252, 0.95),
+      rgba(238, 242, 255, 0.9)
+    );
+  }
+
+  /* ==================== colorful focus (a11y) ==================== */
+  :where(body:not(:has([class*="EAEEF6"]))) a:focus-visible,
+  :where(body:not(:has([class*="EAEEF6"]))) button:focus-visible,
+  :where(body:not(:has([class*="EAEEF6"]))) [tabindex]:focus-visible {
+    outline: 2px solid rgba(10, 132, 255, 0.8);
+    outline-offset: 2px;
+  }
+
+  /* ==================== iOS checkboxes / radios ==================== */
+  input[type="checkbox"],
+  input[type="radio"] {
+    accent-color: var(--ios-blue);
+  }
+}
+
+
+/* ==================== iOS-style scrollbars ====================
+   Scoped to non-report pages the same way as the theme above. */
+
+html:not(:has([class*="EAEEF6"]))::-webkit-scrollbar,
+html:not(:has([class*="EAEEF6"])) *::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+html:not(:has([class*="EAEEF6"]))::-webkit-scrollbar-track,
+html:not(:has([class*="EAEEF6"])) *::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+html:not(:has([class*="EAEEF6"]))::-webkit-scrollbar-thumb,
+html:not(:has([class*="EAEEF6"])) *::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.35);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+  border-radius: 999px;
+}
+
+html:not(:has([class*="EAEEF6"]))::-webkit-scrollbar-thumb:hover,
+html:not(:has([class*="EAEEF6"])) *::-webkit-scrollbar-thumb:hover {
+  background: rgba(99, 102, 241, 0.55);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+}
+
+/* ==================== print (PDF exports stay clean) ==================== */
+
+@media print {
+  body {
+    background: #ffffff !important;
+    background-image: none !important;
+  }
+
+  .bg-white {
+    background-color: #ffffff !important;
+    background-image: none !important;
+  }
+
+  .min-h-screen.bg-slate-50,
+  .min-h-screen.bg-slate-100 {
+    background: #ffffff !important;
+  }
+
+  thead {
+    background: #f8fafc !important;
+    background-image: none !important;
+  }
+
+  *,
+  *::before,
+  *::after {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+}
+

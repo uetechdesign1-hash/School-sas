@@ -62,11 +62,11 @@ export function AccountingExportActions({
           }
         }
       `}</style>
-      <div className={`no-print fixed bottom-5 right-5 z-50 flex items-center gap-2 ${className}`}>
+      <div className={`no-print fixed bottom-5 right-5 z-50 flex items-center gap-1.5 rounded-full border border-white/70 bg-white/80 p-1.5 shadow-xl shadow-indigo-500/20 backdrop-blur-xl ${className}`}>
       <button
         type="button"
         onClick={printAccountingPdf}
-        className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-lg transition hover:bg-slate-50"
+        className="inline-flex items-center gap-2 rounded-full border border-white/70 bg-white/80 px-3.5 py-2 text-sm font-semibold text-slate-700 transition hover:bg-white hover:text-indigo-600"
         title="Download this accounting page as PDF using the browser print dialog"
       >
         <FileText size={16} />
@@ -76,7 +76,7 @@ export function AccountingExportActions({
       <button
         type="button"
         onClick={() => exportAccountingExcel(fileName)}
-        className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-3 py-2 text-sm font-semibold text-white shadow-lg transition hover:bg-slate-800"
+        className="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-emerald-500 to-teal-500 px-3.5 py-2 text-sm font-semibold text-white shadow-lg shadow-emerald-500/30 transition hover:from-emerald-600 hover:to-teal-600"
         title="Download the visible accounting tables as an Excel workbook"
       >
         <FileSpreadsheet size={16} />

@@ -57,7 +57,7 @@ function newId() {
 
 function BotAvatar() {
   return (
-    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-blue-600 to-blue-700 text-white">
+    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 to-blue-500 text-white shadow-md shadow-indigo-500/30">
       <Bot size={15} strokeWidth={2.5} />
     </span>
   );
@@ -66,7 +66,7 @@ function BotAvatar() {
 function UserBubble({ text }: { text: string }) {
   return (
     <div className="flex justify-end">
-      <div className="max-w-[85%] rounded-2xl bg-blue-600 px-3.5 py-2.5 text-[13.5px] leading-snug text-white shadow-sm">
+      <div className="max-w-[85%] rounded-2xl bg-gradient-to-br from-blue-500 to-indigo-500 px-3.5 py-2.5 text-[13.5px] leading-snug text-white shadow-sm">
         {text}
       </div>
     </div>
@@ -276,7 +276,7 @@ export default function EduNexaChat() {
         onClick={toggleOpen}
         aria-label={open ? "Close EduNexa assistant" : "Open EduNexa assistant"}
         title="Need help? Ask EduNexa Assistant"
-        className="fixed bottom-24 right-5 z-[90] flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-blue-600 to-blue-700 text-white shadow-xl ring-2 ring-white/80 transition hover:scale-105 hover:bg-blue-800 md:bottom-6"
+        className="fixed bottom-24 right-5 z-[90] flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 via-blue-500 to-cyan-400 text-white shadow-2xl shadow-indigo-500/40 ring-2 ring-white/80 transition hover:scale-105 hover:from-indigo-600 hover:via-blue-600 hover:to-cyan-500 md:bottom-6"
       >
         {open ? (
           <X size={26} strokeWidth={2.5} />
@@ -294,10 +294,10 @@ export default function EduNexaChat() {
       {open && (
         <section
           aria-label="EduNexa Assistant chat"
-          className="fixed bottom-24 right-4 z-[90] flex h-[min(38rem,calc(100vh-9rem))] w-[min(24rem,calc(100vw-2rem))] flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl md:bottom-6"
+          className="fixed bottom-24 right-4 z-[90] flex h-[min(38rem,calc(100vh-9rem))] w-[min(24rem,calc(100vw-2rem))] flex-col overflow-hidden rounded-3xl border border-white/70 bg-white/90 shadow-2xl shadow-indigo-500/20 backdrop-blur-2xl md:bottom-6"
         >
           {/* Header */}
-          <header className="flex items-center justify-between gap-3 border-b border-slate-200 bg-gradient-to-r from-blue-600 to-blue-700 px-4 py-3 text-white">
+          <header className="flex items-center justify-between gap-3 border-b border-white/20 bg-gradient-to-r from-indigo-500 via-blue-500 to-purple-500 px-4 py-3 text-white">
             <div className="flex min-w-0 items-center gap-3">
               <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/15 ring-2 ring-white/60">
                 <Bot size={22} strokeWidth={2} />
@@ -384,7 +384,7 @@ export default function EduNexaChat() {
               type="submit"
               disabled={!input.trim() || typing}
               aria-label="Send message"
-              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-blue-600 text-white shadow-sm transition hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400"
+              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-blue-500 to-indigo-500 text-white shadow-sm transition hover:from-blue-600 hover:to-indigo-600 disabled:opacity-40"
             >
               <Send size={19} strokeWidth={2.5} />
             </button>

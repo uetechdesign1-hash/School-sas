@@ -540,13 +540,17 @@ export default function DashboardLayout({
 
   if (loading) {
     return (
-      <main className="flex min-h-screen items-center justify-center bg-slate-50">
+      <main className="flex min-h-screen items-center justify-center bg-slate-50 px-4">
 
-        <div className="rounded-2xl border border-slate-200 bg-white px-8 py-6 text-center shadow-sm">
+        <div className="rounded-3xl border border-white/70 bg-white/80 px-8 py-7 text-center shadow-xl shadow-indigo-500/10 backdrop-blur-xl">
 
-          <div className="mx-auto mb-3 h-7 w-7 animate-spin rounded-full border-2 border-slate-200 border-t-blue-600" />
+          <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-500 via-indigo-500 to-purple-500 text-lg font-bold text-white shadow-lg shadow-indigo-500/40">
+            S
+          </div>
 
-          <p className="text-sm font-medium text-slate-600">
+          <div className="mx-auto mt-4 h-7 w-7 animate-spin rounded-full border-2 border-indigo-100 border-t-indigo-500" />
+
+          <p className="mt-3 text-sm font-medium text-slate-600">
             Loading dashboard...
           </p>
 
@@ -579,7 +583,7 @@ export default function DashboardLayout({
           TOP BAR
           ================================================= */}
 
-      <header className="sticky top-0 z-40 border-b border-slate-200 bg-white">
+      <header className="sticky top-0 z-40 border-b border-white/60 bg-white/80 backdrop-blur-xl">
 
         <div className="flex h-16 items-center justify-between px-4 md:px-6">
 
@@ -587,7 +591,7 @@ export default function DashboardLayout({
 
           <div className="flex items-center gap-3">
 
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-600 text-lg font-bold text-white">
+            <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-500 via-indigo-500 to-purple-500 text-lg font-bold text-white shadow-lg shadow-indigo-500/40">
               S
             </div>
 
@@ -611,15 +615,15 @@ export default function DashboardLayout({
 
           <div className="flex items-center gap-3">
 
-            <div className="hidden text-right sm:block">
+            <div className="hidden items-center gap-2 sm:flex">
 
-              <p className="text-xs font-medium text-slate-500">
+              <span className="text-xs font-medium text-slate-500">
                 Role
-              </p>
+              </span>
 
-              <p className="text-sm font-semibold capitalize text-slate-800">
-                {role}
-              </p>
+              <span className="rounded-full bg-gradient-to-r from-blue-500 via-indigo-500 to-purple-500 px-3 py-1 text-[11px] font-bold uppercase tracking-wide text-white shadow-md shadow-indigo-500/30">
+                {role || "member"}
+              </span>
 
             </div>
 
@@ -628,7 +632,7 @@ export default function DashboardLayout({
               onClick={
                 handleSignOut
               }
-              className="inline-flex items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+              className="inline-flex items-center gap-2 rounded-xl border border-white/70 bg-white/70 px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm backdrop-blur transition hover:border-indigo-200 hover:bg-white hover:text-indigo-600"
             >
               <LogOut
                 size={16}
@@ -651,7 +655,7 @@ export default function DashboardLayout({
             DESKTOP SIDEBAR
             ================================================= */}
 
-        <aside className="hidden min-h-[calc(100vh-4rem)] w-64 shrink-0 border-r border-slate-200 bg-white md:block">
+        <aside className="hidden min-h-[calc(100vh-4rem)] w-64 shrink-0 border-r border-white/60 bg-white/70 backdrop-blur-xl md:block">
 
           <nav className="space-y-1 p-4">
 
@@ -679,8 +683,8 @@ export default function DashboardLayout({
                     }
                     className={`flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-medium transition ${
                       active
-                        ? "bg-blue-600 text-white shadow-sm"
-                        : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+                        ? "bg-gradient-to-r from-blue-500 via-indigo-500 to-purple-500 text-white shadow-lg shadow-indigo-500/40"
+                        : "text-slate-600 hover:bg-white/80 hover:text-indigo-600"
                     }`}
                   >
 
@@ -705,9 +709,9 @@ export default function DashboardLayout({
 
           {/* SUPPORT */}
 
-          <div className="mx-4 mt-4 rounded-2xl bg-slate-50 p-4">
+          <div className="mx-4 mt-4 rounded-2xl border border-white/70 bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 p-4 shadow-sm">
 
-            <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+            <p className="text-xs font-semibold uppercase tracking-wide text-indigo-400">
               Need Help?
             </p>
 
@@ -717,7 +721,7 @@ export default function DashboardLayout({
 
             <a
               href="tel:7780670760"
-              className="mt-3 block text-sm font-semibold text-blue-600"
+              className="mt-3 block text-sm font-semibold text-indigo-600 hover:text-indigo-700"
             >
               7780670760
             </a>
@@ -730,7 +734,7 @@ export default function DashboardLayout({
             MOBILE NAVIGATION
             ================================================= */}
 
-        <div className="fixed bottom-0 left-0 right-0 z-50 border-t border-slate-200 bg-white md:hidden">
+        <div className="fixed bottom-0 left-0 right-0 z-50 border-t border-white/60 bg-white/85 pb-[env(safe-area-inset-bottom)] backdrop-blur-xl md:hidden">
 
           <div className="flex overflow-x-auto px-2 py-2">
 
@@ -758,8 +762,8 @@ export default function DashboardLayout({
                     }
                     className={`flex min-w-[100px] flex-1 flex-col items-center justify-center gap-1 rounded-xl px-2 py-2 text-center text-[11px] font-semibold ${
                       active
-                        ? "bg-blue-600 text-white"
-                        : "text-slate-500 hover:bg-slate-100"
+                        ? "bg-gradient-to-r from-blue-500 to-indigo-500 text-white shadow-lg shadow-indigo-500/40"
+                        : "text-slate-500 hover:bg-indigo-50 hover:text-indigo-600"
                     }`}
                   >
 

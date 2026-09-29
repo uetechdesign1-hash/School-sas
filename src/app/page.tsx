@@ -89,8 +89,12 @@ export default function HomePage() {
     <main className="min-h-screen bg-white text-slate-900">
       {/* Background */}
       <div className="pointer-events-none fixed inset-0 -z-10 overflow-hidden">
-        <div className="absolute left-[-180px] top-[-180px] h-[500px] w-[500px] rounded-full bg-blue-100/50 blur-3xl" />
-        <div className="absolute right-[-180px] top-[250px] h-[500px] w-[500px] rounded-full bg-indigo-100/40 blur-3xl" />
+        <div className="absolute left-[-180px] top-[-180px] h-[500px] w-[500px] rounded-full bg-blue-200/60 blur-3xl" />
+        <div className="absolute right-[-180px] top-[120px] h-[460px] w-[460px] rounded-full bg-violet-200/50 blur-3xl" />
+        <div className="absolute left-[10%] top-[520px] h-[420px] w-[420px] rounded-full bg-emerald-100/60 blur-3xl" />
+        <div className="absolute right-[8%] top-[760px] h-[400px] w-[400px] rounded-full bg-pink-200/50 blur-3xl" />
+        <div className="absolute left-[-140px] top-[980px] h-[420px] w-[420px] rounded-full bg-amber-100/60 blur-3xl" />
+        <div className="absolute right-[20%] top-[1320px] h-[400px] w-[400px] rounded-full bg-sky-200/50 blur-3xl" />
       </div>
 
       {/* Navbar */}
@@ -101,7 +105,7 @@ export default function HomePage() {
             className="flex items-center gap-3"
             onClick={closeMobileMenu}
           >
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-slate-950 text-white shadow-lg shadow-slate-900/20">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 via-indigo-500 to-purple-500 text-white shadow-lg shadow-indigo-500/40">
               <GraduationCap className="h-5 w-5" />
             </div>
 
@@ -156,7 +160,7 @@ export default function HomePage() {
 
             <Link
               href="/login"
-              className="group inline-flex items-center gap-2 rounded-xl bg-slate-950 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-slate-900/20 transition hover:-translate-y-0.5 hover:bg-slate-800"
+              className="group inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-indigo-500/40 transition hover:-translate-y-0.5 hover:from-blue-700 hover:via-indigo-700 hover:to-purple-700"
             >
               Get Started
               <ArrowRight className="h-4 w-4 transition group-hover:translate-x-0.5" />
@@ -225,7 +229,7 @@ export default function HomePage() {
                 <Link
                   href="/login"
                   onClick={closeMobileMenu}
-                  className="rounded-xl bg-slate-950 px-4 py-3 text-center text-sm font-semibold text-white"
+                  className="rounded-xl bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 px-4 py-3 text-center text-sm font-semibold text-white shadow-lg shadow-indigo-500/40"
                 >
                   Get Started
                 </Link>
@@ -241,14 +245,14 @@ export default function HomePage() {
           <div className="grid items-center gap-14 lg:grid-cols-[1.05fr_0.95fr]">
             {/* Hero Text */}
             <div>
-              <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 shadow-sm">
-                <Sparkles className="h-3.5 w-3.5" />
+              <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-white/70 bg-white/70 px-3.5 py-2 text-xs font-semibold text-indigo-700 shadow-sm backdrop-blur">
+                <Sparkles className="h-3.5 w-3.5 text-indigo-500" />
                 Complete School Management Platform
               </div>
 
               <h1 className="max-w-4xl text-5xl font-bold tracking-[-0.04em] text-slate-950 sm:text-6xl lg:text-7xl">
                 Run your entire school
-                <span className="block text-slate-500">
+                <span className="block bg-gradient-to-r from-blue-600 via-indigo-500 to-purple-500 bg-clip-text text-transparent">
                   from one platform.
                 </span>
               </h1>
@@ -262,7 +266,7 @@ export default function HomePage() {
               <div className="mt-9 flex flex-col gap-3 sm:flex-row">
                 <Link
                   href="/login"
-                  className="group inline-flex items-center justify-center gap-2 rounded-xl bg-slate-950 px-6 py-3.5 text-sm font-semibold text-white shadow-xl shadow-slate-900/20 transition hover:-translate-y-0.5 hover:bg-slate-800"
+                  className="group inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 px-6 py-3.5 text-sm font-semibold text-white shadow-xl shadow-indigo-500/40 transition hover:-translate-y-0.5 hover:from-blue-700 hover:via-indigo-700 hover:to-purple-700"
                 >
                   Login to EduNexa
                   <ArrowRight className="h-4 w-4 transition group-hover:translate-x-1" />
@@ -471,7 +475,7 @@ export default function HomePage() {
                   key={feature.title}
                   className="group rounded-2xl border border-slate-200 bg-white p-6 transition duration-300 hover:-translate-y-1 hover:border-slate-300 hover:shadow-xl hover:shadow-slate-900/5"
                 >
-                  <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-slate-100 text-slate-900 transition group-hover:bg-slate-950 group-hover:text-white">
+                  <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-gradient-to-br from-blue-100 via-indigo-100 to-purple-100 text-indigo-600 transition group-hover:from-blue-500 group-hover:via-indigo-500 group-hover:to-purple-500 group-hover:text-white">
                     <Icon className="h-5 w-5" />
                   </div>
 
@@ -600,7 +604,7 @@ export default function HomePage() {
                   key={item}
                   className="flex items-center gap-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
                 >
-                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-slate-950 text-sm font-bold text-white">
+                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-blue-500 via-indigo-500 to-purple-500 text-sm font-bold text-white shadow-md shadow-indigo-500/30">
                     {index + 1}
                   </div>
 
@@ -621,7 +625,7 @@ export default function HomePage() {
             <div className="absolute left-1/2 top-0 h-64 w-64 -translate-x-1/2 rounded-full bg-white blur-3xl" />
 
             <div className="relative">
-              <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-950 text-white">
+              <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-500 via-indigo-500 to-purple-500 text-white shadow-lg shadow-indigo-500/40">
                 <GraduationCap className="h-6 w-6" />
               </div>
 
@@ -637,7 +641,7 @@ export default function HomePage() {
               <div className="mt-8 flex flex-col justify-center gap-3 sm:flex-row">
                 <Link
                   href="/login"
-                  className="group inline-flex items-center justify-center gap-2 rounded-xl bg-slate-950 px-7 py-3.5 text-sm font-semibold text-white shadow-xl shadow-slate-900/20 transition hover:-translate-y-0.5 hover:bg-slate-800"
+                  className="group inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 px-7 py-3.5 text-sm font-semibold text-white shadow-xl shadow-indigo-500/40 transition hover:-translate-y-0.5 hover:from-blue-700 hover:via-indigo-700 hover:to-purple-700"
                 >
                   Login to EduNexa
                   <ArrowRight className="h-4 w-4 transition group-hover:translate-x-1" />
@@ -677,7 +681,7 @@ export default function HomePage() {
           <div className="flex flex-col gap-8 md:flex-row md:items-center md:justify-between">
             <div>
               <div className="flex items-center gap-3">
-                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-slate-950 text-white">
+                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 via-indigo-500 to-purple-500 text-white">
                   <GraduationCap className="h-5 w-5" />
                 </div>
 

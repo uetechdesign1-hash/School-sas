@@ -274,11 +274,11 @@ export default function LoginPage() {
 
           <div className="mb-8 text-center">
 
-            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-slate-900 text-white shadow-lg">
+            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-500 via-indigo-500 to-purple-500 text-white shadow-lg shadow-indigo-500/40">
               <ShieldCheck className="h-7 w-7" />
             </div>
 
-            <h1 className="mt-5 text-2xl font-bold text-slate-900">
+            <h1 className="mt-5 bg-gradient-to-r from-blue-600 via-indigo-500 to-purple-500 bg-clip-text text-2xl font-bold text-transparent">
               School Management
             </h1>
 
@@ -290,7 +290,7 @@ export default function LoginPage() {
 
           {/* LOGIN CARD */}
 
-          <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
+          <div className="rounded-3xl border border-white/70 bg-white/85 p-6 shadow-xl shadow-indigo-500/10 backdrop-blur-xl sm:p-8">
 
             <form
               onSubmit={login}
@@ -395,7 +395,7 @@ export default function LoginPage() {
                   !email.trim() ||
                   !password
                 }
-                className="flex w-full items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-3.5 text-sm font-bold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 px-4 py-3.5 text-sm font-bold text-white shadow-lg shadow-indigo-500/40 transition hover:from-blue-700 hover:via-indigo-700 hover:to-purple-700 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {loading ? (
                   <>
