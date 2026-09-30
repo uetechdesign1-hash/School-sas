@@ -279,6 +279,11 @@ html:not(:has([class*="EAEEF6"])) *::-webkit-scrollbar-thumb:hover {
 /* ==================== print (PDF exports stay clean) ==================== */
 
 @media print {
+  .dashboard-chrome,
+  .no-print {
+    display: none !important;
+  }
+
   body {
     background: #ffffff !important;
     background-image: none !important;
@@ -312,4 +317,3 @@ html:not(:has([class*="EAEEF6"])) *::-webkit-scrollbar-thumb:hover {
     scroll-behavior: auto;
   }
 }
-

@@ -7,12 +7,14 @@ import {
   CalendarDays,
   ChevronRight,
   Filter,
+  KeyRound,
   Mail,
   MapPin,
   Navigation,
   Phone,
   Plus,
   Search,
+  Save,
   Settings,
   ShieldCheck,
   UserCheck,
@@ -52,6 +54,12 @@ type SchoolMembership = {
   school_id: string;
   role: string;
   is_active: boolean;
+};
+
+type AdminAccount = {
+  user_id: string;
+  full_name: string;
+  email: string;
 };
 
 function staffName(staff: Staff) {
@@ -158,9 +166,103 @@ export default function StaffPage() {
   const [showFilters, setShowFilters] =
     useState(false);
 
-  useEffect(() => {
-    void loadStaff();
-  }, []);
+  const [adminAccounts, setAdminAccounts] = useState<AdminAccount[]>([]);
+  const [adminAccountsError, setAdminAccountsError] = useState("");
+  const [editingAdminId, setEditingAdminId] = useState("");
+  const [adminEmail, setAdminEmail] = useState("");
+  const [adminPassword, setAdminPassword] = useState("");
+  const [savingAdmin, setSavingAdmin] = useState(false);
+  const [adminAccountMessage, setAdminAccountMessage] = useState("");
+
+  async function loadAdminAccounts() {
+    setAdminAccountsError("");
+    const {
+      data: { session },
+      error: sessionError,
+    } = await supabase.auth.getSession();
+
+    if (sessionError) throw sessionError;
+    if (!session?.access_token) {
+      throw new Error("Your login session expired. Please sign in again.");
+    }
+
+    const response = await fetch("/api/admins/manage-login", {
+      headers: {
+        Authorization: `Bearer ${session.access_token}`,
+      },
+    });
+    const result = (await response.json()) as {
+      success?: boolean;
+      error?: string;
+      admins?: AdminAccount[];
+    };
+
+    if (!response.ok || !result.success) {
+      throw new Error(result.error || "Unable to load Admin accounts.");
+    }
+
+    setAdminAccounts(result.admins || []);
+  }
+
+  function startEditingAdmin(account: AdminAccount) {
+    setAdminAccountMessage("");
+    setEditingAdminId(account.user_id);
+    setAdminEmail(account.email);
+    setAdminPassword("");
+  }
+
+  async function saveAdminAccount(userId: string) {
+    try {
+      setSavingAdmin(true);
+      setAdminAccountsError("");
+      setAdminAccountMessage("");
+
+      const {
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession();
+      if (sessionError) throw sessionError;
+      if (!session?.access_token) {
+        throw new Error("Your login session expired. Please sign in again.");
+      }
+
+      const response = await fetch("/api/admins/manage-login", {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({
+          user_id: userId,
+          email: adminEmail,
+          password: adminPassword,
+        }),
+      });
+      const result = (await response.json()) as {
+        success?: boolean;
+        error?: string;
+      };
+
+      if (!response.ok || !result.success) {
+        throw new Error(result.error || "Unable to update Admin account.");
+      }
+
+      await loadAdminAccounts();
+      setEditingAdminId("");
+      setAdminPassword("");
+      setAdminAccountMessage(
+        "Admin login updated. Share any new credentials securely.",
+      );
+    } catch (saveError) {
+      setAdminAccountsError(
+        saveError instanceof Error
+          ? saveError.message
+          : "Unable to update Admin account.",
+      );
+    } finally {
+      setSavingAdmin(false);
+    }
+  }
 
   async function loadStaff() {
     try {
@@ -202,6 +304,10 @@ export default function StaffPage() {
       setMembership(
         membershipData as SchoolMembership
       );
+
+      if (String(membershipData.role).toLowerCase() === "owner") {
+        await loadAdminAccounts();
+      }
 
       const {
         data: schoolData,
@@ -335,6 +441,10 @@ export default function StaffPage() {
       setLoading(false);
     }
   }
+
+  useEffect(() => {
+    void loadStaff();
+  }, []);
 
   const departments = useMemo(() => {
     return Array.from(
@@ -482,12 +592,22 @@ export default function StaffPage() {
           <div className="flex flex-wrap gap-2">
 
             <Link
-              href="/dashboard/staff/add"
+              href="/dashboard/staff/new"
               className="inline-flex items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-bold text-white shadow-sm transition hover:bg-blue-700"
             >
               <Plus size={17} />
               Add Staff
             </Link>
+
+            {membership?.role === "owner" && (
+              <Link
+                href="/dashboard/admins/new"
+                className="inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-indigo-600 via-violet-600 to-fuchsia-600 px-4 py-2.5 text-sm font-bold text-white shadow-md shadow-indigo-500/20 transition hover:brightness-105"
+              >
+                <ShieldCheck size={17} />
+                Add Admin
+              </Link>
+            )}
 
           </div>
 
@@ -781,7 +901,7 @@ export default function StaffPage() {
                 </button>
               ) : (
                 <Link
-                  href="/dashboard/staff/add"
+                  href="/dashboard/staff/new"
                   className="mt-5 inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-blue-700"
                 >
                   <Plus size={17} />
@@ -1084,6 +1204,155 @@ export default function StaffPage() {
           )}
 
         </section>
+
+        {membership?.role === "owner" && (
+          <section className="mt-6 overflow-hidden rounded-3xl border border-indigo-100 bg-white shadow-lg shadow-indigo-900/[0.04]">
+            <div className="flex flex-col gap-4 border-b border-indigo-100 bg-gradient-to-r from-indigo-50 via-violet-50 to-fuchsia-50 p-5 sm:flex-row sm:items-center sm:justify-between sm:p-6">
+              <div className="flex items-center gap-3">
+                <span className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-600 to-fuchsia-600 text-white shadow-md">
+                  <ShieldCheck size={21} />
+                </span>
+                <div>
+                  <h2 className="text-lg font-black text-slate-900">
+                    Admin Accounts
+                  </h2>
+                  <p className="mt-0.5 text-sm text-slate-600">
+                    View login emails and update an email or reset a forgotten password.
+                  </p>
+                </div>
+              </div>
+              <Link
+                href="/dashboard/admins/new"
+                className="inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-indigo-600 to-fuchsia-600 px-4 py-2.5 text-sm font-bold text-white shadow-md transition hover:brightness-105"
+              >
+                <Plus size={16} />
+                Add Admin
+              </Link>
+            </div>
+
+            <div className="space-y-4 p-4 sm:p-6">
+              {adminAccountsError && (
+                <div
+                  role="alert"
+                  className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700"
+                >
+                  {adminAccountsError}
+                </div>
+              )}
+              {adminAccountMessage && (
+                <div
+                  role="status"
+                  className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-800"
+                >
+                  {adminAccountMessage}
+                </div>
+              )}
+              {adminAccounts.length === 0 ? (
+                <div className="rounded-2xl border border-dashed border-indigo-200 bg-indigo-50/40 p-6 text-center">
+                  <p className="font-bold text-slate-800">No Admin accounts yet</p>
+                  <p className="mt-1 text-sm text-slate-500">
+                    Create an Admin login to allow fee collection and daily payment entry.
+                  </p>
+                </div>
+              ) : (
+                adminAccounts.map((account) => {
+                  const isEditing = editingAdminId === account.user_id;
+                  return (
+                    <article
+                      key={account.user_id}
+                      className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5"
+                    >
+                      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                        <div className="flex min-w-0 items-center gap-3">
+                          <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-indigo-100 font-black text-indigo-700">
+                            {account.full_name
+                              .split(/\s+/)
+                              .slice(0, 2)
+                              .map((part) => part[0] || "")
+                              .join("")
+                              .toUpperCase()}
+                          </span>
+                          <div className="min-w-0">
+                            <p className="truncate font-bold text-slate-900">
+                              {account.full_name}
+                            </p>
+                            <p className="mt-0.5 flex items-center gap-1.5 truncate text-sm text-slate-500">
+                              <Mail size={14} />
+                              {account.email}
+                            </p>
+                          </div>
+                        </div>
+                        {!isEditing && (
+                          <button
+                            type="button"
+                            onClick={() => startEditingAdmin(account)}
+                            className="inline-flex items-center justify-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-2.5 text-sm font-bold text-indigo-700 transition hover:bg-indigo-100"
+                          >
+                            <KeyRound size={16} />
+                            Edit login / reset password
+                          </button>
+                        )}
+                      </div>
+
+                      {isEditing && (
+                        <div className="mt-5 grid gap-4 border-t border-slate-100 pt-5 md:grid-cols-2">
+                          <label className="block">
+                            <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-slate-500">
+                              Login email
+                            </span>
+                            <input
+                              required
+                              type="email"
+                              value={adminEmail}
+                              onChange={(event) => setAdminEmail(event.target.value)}
+                              className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
+                            />
+                          </label>
+                          <label className="block">
+                            <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-slate-500">
+                              New password (optional)
+                            </span>
+                            <input
+                              type="password"
+                              minLength={8}
+                              autoComplete="new-password"
+                              value={adminPassword}
+                              onChange={(event) => setAdminPassword(event.target.value)}
+                              placeholder="Enter a new password to reset"
+                              className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100"
+                            />
+                            <span className="mt-1 block text-xs text-slate-500">
+                              Existing passwords cannot be viewed. Set a new one here.
+                            </span>
+                          </label>
+                          <div className="flex flex-wrap justify-end gap-2 md:col-span-2">
+                            <button
+                              type="button"
+                              onClick={() => setEditingAdminId("")}
+                              disabled={savingAdmin}
+                              className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-bold text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void saveAdminAccount(account.user_id)}
+                              disabled={savingAdmin}
+                              className="inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-bold text-white shadow-sm hover:bg-indigo-700 disabled:opacity-50"
+                            >
+                              <Save size={16} />
+                              {savingAdmin ? "Saving..." : "Save login details"}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </article>
+                  );
+                })
+              )}
+            </div>
+          </section>
+        )}
 
         {/* FOOTER */}
 

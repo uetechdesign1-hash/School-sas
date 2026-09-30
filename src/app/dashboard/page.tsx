@@ -14,9 +14,11 @@ import {
   CalendarDays,
   Check,
   ChevronRight,
+  Download,
   GraduationCap,
   IndianRupee,
   Landmark,
+  Printer,
   ReceiptText,
   School,
   Settings2,
@@ -396,7 +398,9 @@ export default function DashboardPage() {
     }
   }
 
-  const displayName = profile?.full_name || "School Owner";
+  const displayName =
+    profile?.full_name ||
+    (role === "admin" ? "School Administrator" : "School Principal");
 
   const studentLimit = school?.student_limit || 0;
 
@@ -461,6 +465,202 @@ export default function DashboardPage() {
 
   if (!school) {
     return null;
+  }
+
+  if (role === "admin") {
+    const adminSchoolName = school.name;
+    const adminActions = [
+      {
+        title: "Students",
+        description: "Find students and check fee balances.",
+        href: "/dashboard/students",
+        icon: <GraduationCap size={22} />,
+        color: "from-sky-500 to-blue-600",
+      },
+      {
+        title: "Collect Fees",
+        description: "Record a student fee and print its receipt.",
+        href: ACCOUNTING_ROUTES.receipt,
+        icon: <IndianRupee size={22} />,
+        color: "from-emerald-500 to-teal-600",
+      },
+      {
+        title: "Add Payment",
+        description: "Record a new school payment.",
+        href: ACCOUNTING_ROUTES.payment,
+        icon: <Wallet size={22} />,
+        color: "from-violet-500 to-indigo-600",
+      },
+      {
+        title: "Add Expense",
+        description: "Record a new school expense.",
+        href: "/dashboard/expenses",
+        icon: <ReceiptText size={22} />,
+        color: "from-orange-500 to-rose-500",
+      },
+    ];
+
+    function downloadSummary() {
+      const rows = [
+        ["School Admin Summary", adminSchoolName],
+        ["Generated", new Date().toLocaleString("en-IN")],
+        ["Students", String(stats.studentCount)],
+        ["Classes", String(stats.classCount)],
+        ["Fee collection this month", String(stats.feeCollection)],
+        ["Expenses this month", String(stats.expenses)],
+        ["Attendance today", `${stats.attendancePercentage}%`],
+      ];
+      const csv = rows
+        .map((row) =>
+          row
+            .map((value) => `"${value.replace(/"/g, '""')}"`)
+            .join(","),
+        )
+        .join("\r\n");
+      const url = URL.createObjectURL(
+        new Blob([csv], { type: "text/csv;charset=utf-8" }),
+      );
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = "school-admin-summary.csv";
+      anchor.click();
+      URL.revokeObjectURL(url);
+    }
+
+    return (
+      <div className="min-h-full bg-gradient-to-br from-slate-50 via-indigo-50/40 to-sky-50/50 p-4 sm:p-6 lg:p-8">
+        <div className="mx-auto max-w-7xl">
+          <header className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-xs font-black uppercase tracking-[0.18em] text-indigo-600">
+                School Admin Desk
+              </p>
+              <h1 className="mt-1 text-3xl font-black tracking-tight text-slate-900">
+                Welcome, {displayName}
+              </h1>
+              <p className="mt-1 text-sm text-slate-600">{school.name}</p>
+            </div>
+            <div className="no-print flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => window.print()}
+                className="inline-flex items-center gap-2 rounded-xl border border-white bg-white/90 px-4 py-2.5 text-sm font-bold text-slate-700 shadow-sm transition hover:bg-white"
+              >
+                <Printer size={17} />
+                Print
+              </button>
+              <button
+                type="button"
+                onClick={downloadSummary}
+                className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-bold text-white shadow-lg shadow-slate-900/15 transition hover:bg-slate-800"
+              >
+                <Download size={17} />
+                Download summary
+              </button>
+            </div>
+          </header>
+
+          <section className="overflow-hidden rounded-[2rem] bg-gradient-to-br from-indigo-600 via-violet-600 to-fuchsia-600 p-6 text-white shadow-2xl shadow-indigo-500/20 sm:p-8">
+            <div className="flex flex-col justify-between gap-6 sm:flex-row sm:items-end">
+              <div>
+                <span className="inline-flex rounded-full border border-white/20 bg-white/15 px-3 py-1 text-xs font-bold uppercase tracking-wide text-white/90">
+                  Admin access
+                </span>
+                <h2 className="mt-4 text-2xl font-black sm:text-3xl">
+                  Your school, at a glance
+                </h2>
+                <p className="mt-2 max-w-xl text-sm leading-6 text-indigo-50">
+                  Collect fees and record new payments or expenses. Existing
+                  transactions are view-only; editing and deletion are reserved
+                  for the Principal.
+                </p>
+              </div>
+              <div className="rounded-2xl border border-white/15 bg-white/10 px-5 py-4 backdrop-blur-sm">
+                <p className="text-xs font-semibold uppercase tracking-wide text-indigo-100">
+                  School status
+                </p>
+                <p className="mt-1 text-xl font-black capitalize">
+                  {school.status || "Active"}
+                </p>
+              </div>
+            </div>
+          </section>
+
+          <section className="mt-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <AdminStatCard
+              title="Students"
+              value={String(stats.studentCount)}
+              note="Registered"
+              color="text-sky-700"
+              background="bg-sky-100"
+              icon={<GraduationCap size={20} />}
+            />
+            <AdminStatCard
+              title="Fees collected"
+              value={formatINR(stats.feeCollection)}
+              note="This month"
+              color="text-emerald-700"
+              background="bg-emerald-100"
+              icon={<IndianRupee size={20} />}
+            />
+            <AdminStatCard
+              title="Expenses"
+              value={formatINR(stats.expenses)}
+              note="This month"
+              color="text-orange-700"
+              background="bg-orange-100"
+              icon={<ReceiptText size={20} />}
+            />
+            <AdminStatCard
+              title="Attendance"
+              value={`${stats.attendancePercentage}%`}
+              note="Today"
+              color="text-violet-700"
+              background="bg-violet-100"
+              icon={<Check size={20} />}
+            />
+          </section>
+
+          <section className="mt-8">
+            <div className="mb-4">
+              <h2 className="text-xl font-black text-slate-900">
+                Everyday tasks
+              </h2>
+              <p className="mt-1 text-sm text-slate-600">
+                Quick access to the pages you use most.
+              </p>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+              {adminActions.map((action) => (
+                <Link
+                  key={action.title}
+                  href={action.href}
+                  className="group rounded-3xl border border-white bg-white/90 p-5 shadow-lg shadow-slate-900/[0.04] transition duration-200 hover:-translate-y-1 hover:shadow-xl hover:shadow-indigo-900/10"
+                >
+                  <span
+                    className={`flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br ${action.color} text-white shadow-lg`}
+                  >
+                    {action.icon}
+                  </span>
+                  <span className="mt-4 flex items-center justify-between gap-2">
+                    <span className="text-base font-black text-slate-900">
+                      {action.title}
+                    </span>
+                    <ChevronRight
+                      size={17}
+                      className="text-slate-400 transition group-hover:translate-x-1 group-hover:text-indigo-600"
+                    />
+                  </span>
+                  <span className="mt-1 block text-sm leading-5 text-slate-500">
+                    {action.description}
+                  </span>
+                </Link>
+              ))}
+            </div>
+          </section>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -932,6 +1132,41 @@ function DashboardBadge({
     <span className="rounded-full bg-white/15 px-4 py-2 text-xs font-semibold backdrop-blur-sm">
       {label}: {value}
     </span>
+  );
+}
+
+function AdminStatCard({
+  title,
+  value,
+  note,
+  icon,
+  color,
+  background,
+}: {
+  title: string;
+  value: string;
+  note: string;
+  icon: React.ReactNode;
+  color: string;
+  background: string;
+}) {
+  return (
+    <div className="rounded-3xl border border-white bg-white/90 p-5 shadow-lg shadow-slate-900/[0.04]">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-sm font-semibold text-slate-500">{title}</p>
+          <p className="mt-2 truncate text-2xl font-black tracking-tight text-slate-900">
+            {value}
+          </p>
+          <p className="mt-1 text-xs font-medium text-slate-400">{note}</p>
+        </div>
+        <span
+          className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl ${background} ${color}`}
+        >
+          {icon}
+        </span>
+      </div>
+    </div>
   );
 }
 

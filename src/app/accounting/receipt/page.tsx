@@ -259,6 +259,7 @@ export default function ReceiptPage() {
   const supabase = useMemo(() => createClient(), []);
 
   const [schoolId, setSchoolId] = useState<string | null>(null);
+  const [schoolRole, setSchoolRole] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [loadingBills, setLoadingBills] = useState(false);
@@ -1265,6 +1266,29 @@ export default function ReceiptPage() {
       setLoading(true);
       setError("");
 
+      const {
+        data: { user },
+        error: userError,
+      } = await supabase.auth.getUser();
+
+      if (userError) throw userError;
+      if (!user) throw new Error("Please sign in again.");
+
+      const { data: membership, error: membershipError } =
+        await supabase
+          .from("school_users")
+          .select("role")
+          .eq("user_id", user.id)
+          .eq("is_active", true)
+          .order("created_at", { ascending: true })
+          .limit(1)
+          .maybeSingle();
+
+      if (membershipError) throw membershipError;
+      if (!membership) throw new Error("No active school membership found.");
+
+      setSchoolRole(String(membership.role || "").toLowerCase());
+
       const currentSchoolId = await getCurrentSchoolId();
 
       setSchoolId(currentSchoolId);
@@ -1551,6 +1575,11 @@ export default function ReceiptPage() {
   }
 
   async function openEdit(row: ReceiptHistoryRow) {
+    if (schoolRole !== "owner") {
+      setError("Only the Principal can edit existing receipts.");
+      return;
+    }
+
     try {
       setError("");
       setSuccess("");
@@ -1965,6 +1994,11 @@ export default function ReceiptPage() {
     setError("");
     setSuccess("");
 
+    if (schoolRole === "admin" && receiptType !== "student_fee") {
+      setError("Admins can create student fee receipts only.");
+      return;
+    }
+
     if (!validateCommon()) return;
 
     if (receiptType === "student_fee") {
@@ -2265,6 +2299,11 @@ export default function ReceiptPage() {
   async function updateReceipt(event: FormEvent) {
     event.preventDefault();
 
+    if (schoolRole !== "owner") {
+      setError("Only the Principal can edit existing receipts.");
+      return;
+    }
+
     setError("");
     setSuccess("");
 
@@ -2510,6 +2549,11 @@ export default function ReceiptPage() {
   }
 
   async function deleteReceipt() {
+    if (schoolRole !== "owner") {
+      setError("Only the Principal can delete existing receipts.");
+      return;
+    }
+
     if (!deleteTarget || !schoolId) return;
 
     const row = deleteTarget;
@@ -2747,39 +2791,33 @@ export default function ReceiptPage() {
                         </div>
                       </button>
 
-                      <button
-                        type="button"
-                        disabled={!!editingId}
-                        onClick={() =>
-                          changeReceiptType("other_income")
-                        }
-                        className={`rounded-xl border p-4 text-left ${
-                          receiptType === "other_income"
-                            ? "border-emerald-500 bg-emerald-50 ring-1 ring-emerald-500"
-                            : "border-slate-200"
-                        } ${
-                          editingId
-                            ? "cursor-not-allowed opacity-70"
-                            : ""
-                        }`}
-                      >
-                        <div className="flex items-center gap-3">
-                          <Wallet
-                            size={20}
-                            className="text-emerald-600"
-                          />
-
-                          <div>
-                            <div className="font-semibold">
-                              Other Income
-                            </div>
-
-                            <div className="text-xs text-slate-500">
-                              Donation, rent, interest, miscellaneous income
+                      {schoolRole !== "admin" && (
+                        <button
+                          type="button"
+                          disabled={!!editingId}
+                          onClick={() => changeReceiptType("other_income")}
+                          className={`rounded-xl border p-4 text-left ${
+                            receiptType === "other_income"
+                              ? "border-emerald-500 bg-emerald-50 ring-1 ring-emerald-500"
+                              : "border-slate-200"
+                          } ${
+                            editingId ? "cursor-not-allowed opacity-70" : ""
+                          }`}
+                        >
+                          <div className="flex items-center gap-3">
+                            <Wallet
+                              size={20}
+                              className="text-emerald-600"
+                            />
+                            <div>
+                              <div className="font-semibold">Other Income</div>
+                              <div className="text-xs text-slate-500">
+                                Donation, rent, interest, miscellaneous income
+                              </div>
                             </div>
                           </div>
-                        </div>
-                      </button>
+                        </button>
+                      )}
                     </div>
                   </div>
 
@@ -3641,27 +3679,26 @@ export default function ReceiptPage() {
                                   View
                                 </button>
 
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    openEdit(row)
-                                  }
-                                  className="inline-flex items-center gap-1.5 rounded-lg border border-blue-200 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-50"
-                                >
-                                  <Pencil size={14} />
-                                  Edit
-                                </button>
-
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    setDeleteTarget(row)
-                                  }
-                                  className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 px-3 py-2 text-xs font-semibold text-red-700 hover:bg-red-50"
-                                >
-                                  <Trash2 size={14} />
-                                  Delete
-                                </button>
+                                {schoolRole === "owner" && (
+                                  <>
+                                    <button
+                                      type="button"
+                                      onClick={() => openEdit(row)}
+                                      className="inline-flex items-center gap-1.5 rounded-lg border border-blue-200 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-50"
+                                    >
+                                      <Pencil size={14} />
+                                      Edit
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setDeleteTarget(row)}
+                                      className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 px-3 py-2 text-xs font-semibold text-red-700 hover:bg-red-50"
+                                    >
+                                      <Trash2 size={14} />
+                                      Delete
+                                    </button>
+                                  </>
+                                )}
                               </div>
                             </td>
                           </tr>

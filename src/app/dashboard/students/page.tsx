@@ -74,6 +74,7 @@ export default function StudentsPage() {
   const [classes, setClasses] = useState<SchoolClass[]>([]);
   const [sections, setSections] = useState<Section[]>([]);
   const [academicYears, setAcademicYears] = useState<AcademicYear[]>([]);
+  const [role, setRole] = useState("");
 
   const [outstandingFees, setOutstandingFees] = useState<Record<string, number>>(
     {},
@@ -145,6 +146,7 @@ export default function StudentsPage() {
       }
 
       const schoolId = membership.school_id;
+      setRole(String(membership.role || "").toLowerCase());
 
       const [
         studentsResult,
@@ -580,6 +582,8 @@ export default function StudentsPage() {
   }
 
   function openPromotion(studentIds: string[]) {
+    if (!isPrincipal) return;
+
     if (studentIds.length === 0) {
       return;
     }
@@ -606,6 +610,11 @@ export default function StudentsPage() {
   }
 
   async function promoteStudents() {
+    if (!isPrincipal) {
+      setPromotionError("Only the Principal can promote students.");
+      return;
+    }
+
     if (promotionStudentIds.length === 0) {
       return;
     }
@@ -715,6 +724,11 @@ export default function StudentsPage() {
   }
 
   async function deleteStudent(student: Student) {
+    if (!isPrincipal) {
+      alert("Only the Principal can delete students.");
+      return;
+    }
+
     const confirmed = window.confirm(
       `Delete ${getStudentName(student)}? This action cannot be undone.`,
     );
@@ -761,6 +775,8 @@ export default function StudentsPage() {
     setSectionId("all");
   }
 
+  const isPrincipal = role === "owner";
+
   return (
     <div className="p-4 md:p-6">
       <div className="mx-auto max-w-7xl">
@@ -773,38 +789,42 @@ export default function StudentsPage() {
             </h1>
 
             <p className="mt-1 text-sm text-slate-500">
-              Manage students, outstanding fees and academic promotion.
+              {isPrincipal
+                ? "Manage students, outstanding fees and academic promotion."
+                : "Find students, review fee balances and collect fees."}
             </p>
           </div>
 
-          <div className="flex flex-wrap gap-2">
-            {selectedStudentIds.length > 0 && (
-              <button
-                type="button"
-                onClick={() => openPromotion(selectedStudentIds)}
-                className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700"
+          {isPrincipal && (
+            <div className="flex flex-wrap gap-2">
+              {isPrincipal && selectedStudentIds.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => openPromotion(selectedStudentIds)}
+                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700"
+                >
+                  <ArrowRight size={17} />
+                  Promote {selectedStudentIds.length} Student
+                  {selectedStudentIds.length === 1 ? "" : "s"}
+                </button>
+              )}
+
+              <Link
+                href="/dashboard/students/import"
+                className="inline-flex items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-5 py-3 text-sm font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-100"
               >
-                <ArrowRight size={17} />
-                Promote {selectedStudentIds.length} Student
-                {selectedStudentIds.length === 1 ? "" : "s"}
-              </button>
-            )}
+                <FileSpreadsheet size={17} />
+                Import from Excel
+              </Link>
 
-            <Link
-              href="/dashboard/students/import"
-              className="inline-flex items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-5 py-3 text-sm font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-100"
-            >
-              <FileSpreadsheet size={17} />
-              Import from Excel
-            </Link>
-
-            <Link
-              href="/dashboard/students/new"
-              className="inline-flex items-center justify-center rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700"
-            >
-              + Add Student
-            </Link>
-          </div>
+              <Link
+                href="/dashboard/students/new"
+                className="inline-flex items-center justify-center rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700"
+              >
+                + Add Student
+              </Link>
+            </div>
+          )}
         </div>
 
         <div className="mt-6 grid gap-4 sm:grid-cols-3">
@@ -988,11 +1008,13 @@ export default function StudentsPage() {
 
               <p className="mt-1 text-sm text-slate-500">
                 {students.length === 0
-                  ? "Add your first student to get started."
+                  ? isPrincipal
+                    ? "Add your first student to get started."
+                    : "Ask the Principal to add the first student."
                   : "Try changing your search or filters."}
               </p>
 
-              {students.length === 0 ? (
+              {students.length === 0 && isPrincipal ? (
                 <Link
                   href="/dashboard/students/new"
                   className="mt-5 inline-block rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white"
@@ -1014,24 +1036,26 @@ export default function StudentsPage() {
               <table className="min-w-full">
                 <thead className="border-b border-slate-200 bg-slate-50">
                   <tr>
-                    <th className="w-12 px-4 py-4 text-center">
-                      <button
-                        type="button"
-                        onClick={toggleSelectAllFiltered}
-                        title={
-                          allFilteredSelected
-                            ? "Clear visible selection"
-                            : "Select all visible students"
-                        }
-                        className="inline-flex items-center justify-center rounded-lg p-1 text-slate-500 hover:bg-slate-200 hover:text-blue-600"
-                      >
-                        {allFilteredSelected ? (
-                          <CheckSquare size={19} />
-                        ) : (
-                          <Square size={19} />
-                        )}
-                      </button>
-                    </th>
+                    {isPrincipal && (
+                      <th className="w-12 px-4 py-4 text-center">
+                        <button
+                          type="button"
+                          onClick={toggleSelectAllFiltered}
+                          title={
+                            allFilteredSelected
+                              ? "Clear visible selection"
+                              : "Select all visible students"
+                          }
+                          className="inline-flex items-center justify-center rounded-lg p-1 text-slate-500 hover:bg-slate-200 hover:text-blue-600"
+                        >
+                          {allFilteredSelected ? (
+                            <CheckSquare size={19} />
+                          ) : (
+                            <Square size={19} />
+                          )}
+                        </button>
+                      </th>
+                    )}
 
                     <th className="px-5 py-4 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
                       Student
@@ -1065,9 +1089,11 @@ export default function StudentsPage() {
                       Outstanding Fee
                     </th>
 
-                    <th className="px-5 py-4 text-right text-xs font-semibold uppercase tracking-wide text-slate-500">
-                      Actions
-                    </th>
+                    {isPrincipal && (
+                      <th className="px-5 py-4 text-right text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        Actions
+                      </th>
+                    )}
                   </tr>
                 </thead>
 
@@ -1093,29 +1119,28 @@ export default function StudentsPage() {
                             : "transition hover:bg-slate-50"
                         }
                       >
-                        <td className="px-4 py-4 text-center">
-                          <button
-                            type="button"
-                            onClick={() => toggleStudentSelection(student.id)}
-                            title={selected ? "Unselect student" : "Select student"}
-                            className="inline-flex items-center justify-center rounded-lg p-1 text-slate-500 hover:bg-slate-200 hover:text-blue-600"
-                          >
-                            {selected ? (
-                              <CheckSquare
-                                size={19}
-                                className="text-emerald-600"
-                              />
-                            ) : (
-                              <Square size={19} />
-                            )}
-                          </button>
-                        </td>
+                        {isPrincipal && (
+                          <td className="px-4 py-4 text-center">
+                            <button
+                              type="button"
+                              onClick={() => toggleStudentSelection(student.id)}
+                              title={selected ? "Unselect student" : "Select student"}
+                              className="inline-flex items-center justify-center rounded-lg p-1 text-slate-500 hover:bg-slate-200 hover:text-blue-600"
+                            >
+                              {selected ? (
+                                <CheckSquare
+                                  size={19}
+                                  className="text-emerald-600"
+                                />
+                              ) : (
+                                <Square size={19} />
+                              )}
+                            </button>
+                          </td>
+                        )}
 
                         <td className="px-5 py-4">
-                          <Link
-                            href={`/dashboard/students/${student.id}`}
-                            className="flex items-center gap-3"
-                          >
+                          <div className="flex items-center gap-3">
                             {student.photo_url ? (
                               <img
                                 src={student.photo_url}
@@ -1129,15 +1154,24 @@ export default function StudentsPage() {
                             )}
 
                             <div>
-                              <p className="font-semibold text-slate-900">
-                                {getStudentName(student)}
-                              </p>
+                              {isPrincipal ? (
+                                <Link
+                                  href={`/dashboard/students/${student.id}`}
+                                  className="font-semibold text-slate-900 hover:text-blue-700"
+                                >
+                                  {getStudentName(student)}
+                                </Link>
+                              ) : (
+                                <p className="font-semibold text-slate-900">
+                                  {getStudentName(student)}
+                                </p>
+                              )}
 
                               <p className="text-xs text-slate-500">
                                 {student.city || "No city"}
                               </p>
                             </div>
-                          </Link>
+                          </div>
                         </td>
 
                         <td className="px-5 py-4 text-sm font-medium text-slate-700">
@@ -1165,7 +1199,7 @@ export default function StudentsPage() {
                         </td>
 
                         <td className="px-5 py-4">
-                          {outstanding > 0 ? (
+                          {outstanding > 0 && isPrincipal ? (
                             <Link
                               href={`/dashboard/students/${student.id}/fees`}
                               className="inline-flex items-center gap-1.5 rounded-lg bg-red-50 px-3 py-1.5 text-sm font-bold text-red-700 hover:bg-red-100"
@@ -1174,6 +1208,11 @@ export default function StudentsPage() {
                               <IndianRupee size={14} />
                               {formatINR(outstanding)}
                             </Link>
+                          ) : outstanding > 0 ? (
+                            <span className="inline-flex items-center gap-1.5 rounded-lg bg-red-50 px-3 py-1.5 text-sm font-bold text-red-700">
+                              <IndianRupee size={14} />
+                              {formatINR(outstanding)}
+                            </span>
                           ) : (
                             <span className="inline-flex items-center gap-1.5 rounded-lg bg-green-50 px-3 py-1.5 text-sm font-bold text-green-700">
                               <Check size={14} />
@@ -1182,53 +1221,60 @@ export default function StudentsPage() {
                           )}
                         </td>
 
-                        <td className="px-5 py-4">
-                          <div className="flex justify-end gap-2">
-                            <button
-                              type="button"
-                              onClick={() => openPromotion([student.id])}
-                              disabled={
-                                student.status !== "active" ||
-                                !currentAcademicYear ||
-                                student.academic_year_id !== currentAcademicYear.id
-                              }
-                              className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 px-3 py-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-40"
-                              title={
-                                student.status !== "active"
-                                  ? "Only active students can be promoted"
-                                  : student.academic_year_id !==
-                                      currentAcademicYear?.id
-                                    ? "Student is not in the current academic year"
-                                    : "Promote student"
-                              }
-                            >
-                              <ArrowRight size={14} />
-                              Promote
-                            </button>
+                        {isPrincipal && (
+                          <td className="px-5 py-4">
+                            <div className="flex justify-end gap-2">
+                            {isPrincipal && (
+                              <button
+                                type="button"
+                                onClick={() => openPromotion([student.id])}
+                                disabled={
+                                  student.status !== "active" ||
+                                  !currentAcademicYear ||
+                                  student.academic_year_id !== currentAcademicYear.id
+                                }
+                                className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 px-3 py-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-40"
+                                title={
+                                  student.status !== "active"
+                                    ? "Only active students can be promoted"
+                                    : student.academic_year_id !==
+                                        currentAcademicYear?.id
+                                      ? "Student is not in the current academic year"
+                                      : "Promote student"
+                                }
+                              >
+                                <ArrowRight size={14} />
+                                Promote
+                              </button>
+                            )}
 
-                            <Link
-                              href={`/dashboard/students/${student.id}`}
-                              className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
-                            >
-                              View
-                            </Link>
+                            {isPrincipal && (
+                              <>
+                                <Link
+                                  href={`/dashboard/students/${student.id}`}
+                                  className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                                >
+                                  View
+                                </Link>
+                                <Link
+                                  href={`/dashboard/students/${student.id}`}
+                                  className="rounded-lg border border-blue-200 px-3 py-2 text-xs font-semibold text-blue-600 hover:bg-blue-50"
+                                >
+                                  Edit
+                                </Link>
 
-                            <Link
-                              href={`/dashboard/students/${student.id}`}
-                              className="rounded-lg border border-blue-200 px-3 py-2 text-xs font-semibold text-blue-600 hover:bg-blue-50"
-                            >
-                              Edit
-                            </Link>
-
-                            <button
-                              type="button"
-                              onClick={() => void deleteStudent(student)}
-                              className="rounded-lg border border-red-200 px-3 py-2 text-xs font-semibold text-red-600 hover:bg-red-50"
-                            >
-                              Delete
-                            </button>
-                          </div>
-                        </td>
+                                <button
+                                  type="button"
+                                  onClick={() => void deleteStudent(student)}
+                                  className="rounded-lg border border-red-200 px-3 py-2 text-xs font-semibold text-red-600 hover:bg-red-50"
+                                >
+                                  Delete
+                                </button>
+                              </>
+                            )}
+                            </div>
+                          </td>
+                        )}
                       </tr>
                     );
                   })}

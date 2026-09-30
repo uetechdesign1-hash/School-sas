@@ -21,6 +21,7 @@ import {
   GraduationCap,
   IndianRupee,
   ReceiptText,
+  Receipt,
   Wallet,
   Landmark,
   BarChart3,
@@ -133,6 +134,34 @@ const STAFF_MENU: MenuItem[] = [
   },
 ];
 
+const SCHOOL_ADMIN_MENU: MenuItem[] = [
+  {
+    name: "Dashboard",
+    href: "/dashboard",
+    icon: <LayoutDashboard size={18} />,
+  },
+  {
+    name: "Students",
+    href: "/dashboard/students",
+    icon: <GraduationCap size={18} />,
+  },
+  {
+    name: "Fee Receipts",
+    href: "/accounting/receipt",
+    icon: <Receipt size={18} />,
+  },
+  {
+    name: "Payments",
+    href: "/accounting/payment",
+    icon: <WalletCards size={18} />,
+  },
+  {
+    name: "Expenses",
+    href: "/dashboard/expenses",
+    icon: <ReceiptText size={18} />,
+  },
+];
+
 /* =========================================================
    STAFF ALLOWED ROUTES
    ========================================================= */
@@ -161,6 +190,16 @@ function isStaffRouteAllowed(pathname: string) {
     (route) =>
       pathname === route ||
       pathname.startsWith(`${route}/`)
+  );
+}
+
+function isSchoolAdminRouteAllowed(pathname: string) {
+  return (
+    pathname === "/dashboard" ||
+    pathname === "/dashboard/students" ||
+    pathname === "/accounting/receipt" ||
+    pathname === "/accounting/payment" ||
+    pathname === "/dashboard/expenses"
   );
 }
 
@@ -305,6 +344,14 @@ export default function DashboardLayout({
             "/dashboard/staff/home"
           );
 
+          return;
+        }
+
+        if (
+          currentRole === "admin" &&
+          !isSchoolAdminRouteAllowed(pathname)
+        ) {
+          router.replace("/dashboard");
           return;
         }
 
@@ -570,7 +617,9 @@ export default function DashboardLayout({
   const menu =
     isStaff
       ? STAFF_MENU
-      : PRINCIPAL_MENU;
+      : role === "admin"
+        ? SCHOOL_ADMIN_MENU
+        : PRINCIPAL_MENU;
 
   /* =======================================================
      RENDER
@@ -583,7 +632,7 @@ export default function DashboardLayout({
           TOP BAR
           ================================================= */}
 
-      <header className="sticky top-0 z-40 border-b border-white/60 bg-white/80 backdrop-blur-xl">
+      <header className="dashboard-chrome sticky top-0 z-40 border-b border-white/60 bg-white/80 backdrop-blur-xl">
 
         <div className="flex h-16 items-center justify-between px-4 md:px-6">
 
@@ -655,7 +704,7 @@ export default function DashboardLayout({
             DESKTOP SIDEBAR
             ================================================= */}
 
-        <aside className="hidden min-h-[calc(100vh-4rem)] w-64 shrink-0 border-r border-white/60 bg-white/70 backdrop-blur-xl md:block">
+        <aside className="dashboard-chrome hidden min-h-[calc(100vh-4rem)] w-64 shrink-0 border-r border-white/60 bg-white/70 backdrop-blur-xl md:block">
 
           <nav className="space-y-1 p-4">
 
@@ -734,7 +783,7 @@ export default function DashboardLayout({
             MOBILE NAVIGATION
             ================================================= */}
 
-        <div className="fixed bottom-0 left-0 right-0 z-50 border-t border-white/60 bg-white/85 pb-[env(safe-area-inset-bottom)] backdrop-blur-xl md:hidden">
+        <div className="dashboard-chrome fixed bottom-0 left-0 right-0 z-50 border-t border-white/60 bg-white/85 pb-[env(safe-area-inset-bottom)] backdrop-blur-xl md:hidden">
 
           <div className="flex overflow-x-auto px-2 py-2">
 

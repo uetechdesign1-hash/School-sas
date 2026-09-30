@@ -13,7 +13,6 @@ import {
   Plus,
   RefreshCw,
   Trash2,
-  Wallet,
   X,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
@@ -174,6 +173,8 @@ export default function PaymentPage() {
   const [schoolId, setSchoolId] =
     useState<string | null>(null);
 
+  const [schoolRole, setSchoolRole] = useState("");
+
   const [accounts, setAccounts] =
     useState<Account[]>([]);
 
@@ -277,6 +278,27 @@ export default function PaymentPage() {
         "No authenticated user found. Please log in again."
       );
     }
+
+    const { data: membership, error: membershipError } = await supabase
+      .from("school_users")
+      .select("school_id, role")
+      .eq("user_id", userData.user.id)
+      .eq("is_active", true)
+      .order("created_at", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+
+    if (membershipError) {
+      throw new Error(
+        `Unable to determine school role: ${membershipError.message}`,
+      );
+    }
+
+    if (!membership?.school_id) {
+      throw new Error("No active school membership found.");
+    }
+
+    setSchoolRole(String(membership.role || "").toLowerCase());
 
     const {
       data: rpcSchoolId,
@@ -1071,6 +1093,11 @@ export default function PaymentPage() {
   ) {
     event.preventDefault();
 
+    if (editingId && schoolRole !== "owner") {
+      setError("Only the Principal can edit existing payments.");
+      return;
+    }
+
     setError("");
     setSuccess("");
 
@@ -1534,6 +1561,11 @@ export default function PaymentPage() {
   function startEdit(
     payment: PaymentRow
   ) {
+    if (schoolRole !== "owner") {
+      setError("Only the Principal can edit existing payments.");
+      return;
+    }
+
     const debitEntry =
       payment.entries.find(
         (entry) =>
@@ -1651,6 +1683,11 @@ export default function PaymentPage() {
    */
 
   async function confirmDeletePayment() {
+    if (schoolRole !== "owner") {
+      setError("Only the Principal can delete existing payments.");
+      return;
+    }
+
     if (
       !deletePayment ||
       !schoolId
@@ -2629,39 +2666,26 @@ export default function PaymentPage() {
                                 />
                               </button>
 
-                              {/* EDIT */}
-
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  startEdit(
-                                    payment
-                                  )
-                                }
-                                title="Edit Payment"
-                                className="inline-flex h-9 w-9 items-center justify-center rounded-lg border text-slate-600 hover:bg-slate-50 hover:text-amber-600"
-                              >
-                                <Pencil
-                                  size={16}
-                                />
-                              </button>
-
-                              {/* DELETE */}
-
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setDeletePayment(
-                                    payment
-                                  )
-                                }
-                                title="Delete Payment"
-                                className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-red-200 text-red-600 hover:bg-red-50"
-                              >
-                                <Trash2
-                                  size={16}
-                                />
-                              </button>
+                              {schoolRole === "owner" && (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() => startEdit(payment)}
+                                    title="Edit Payment"
+                                    className="inline-flex h-9 w-9 items-center justify-center rounded-lg border text-slate-600 hover:bg-slate-50 hover:text-amber-600"
+                                  >
+                                    <Pencil size={16} />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setDeletePayment(payment)}
+                                    title="Delete Payment"
+                                    className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-red-200 text-red-600 hover:bg-red-50"
+                                  >
+                                    <Trash2 size={16} />
+                                  </button>
+                                </>
+                              )}
                             </div>
                           </td>
                         </tr>

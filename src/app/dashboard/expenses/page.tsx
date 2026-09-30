@@ -216,6 +216,7 @@ export default function ExpensesPage() {
 
   const [schoolId, setSchoolId] = useState<string | null>(null);
   const [schoolName, setSchoolName] = useState("School");
+  const [schoolRole, setSchoolRole] = useState("");
 
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [vendors, setVendors] = useState<Vendor[]>([]);
@@ -290,6 +291,20 @@ export default function ExpensesPage() {
       window.location.assign("/login");
       throw new Error("Please log in again.");
     }
+
+    const { data: membership, error: membershipError } = await supabase
+      .from("school_users")
+      .select("role")
+      .eq("user_id", auth.user.id)
+      .eq("is_active", true)
+      .order("created_at", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+
+    if (membershipError) throw membershipError;
+    if (!membership) throw new Error("No active school membership found.");
+
+    setSchoolRole(String(membership.role || "").toLowerCase());
 
     const { data: rpcId, error: rpcError } =
       await supabase.rpc("get_my_school_id");
@@ -858,6 +873,11 @@ export default function ExpensesPage() {
   }
 
   function openEditVendorPayment(payment: VendorPayment) {
+    if (schoolRole !== "owner") {
+      setError("Only the Principal can edit existing payments.");
+      return;
+    }
+
     setEditVendorPayment(payment);
     setVpVendorId(payment.vendor_id);
     setVpDate(payment.payment_date);
@@ -871,6 +891,10 @@ export default function ExpensesPage() {
 
   async function saveVendorPayment() {
     if (!schoolId) return;
+    if (editVendorPayment && schoolRole !== "owner") {
+      setError("Only the Principal can edit existing payments.");
+      return;
+    }
 
     try {
       setSavingVendorPayment(true);
@@ -1073,6 +1097,10 @@ export default function ExpensesPage() {
    */
   async function deleteVendorPayment() {
     if (!schoolId || !deleteVendorTarget) return;
+    if (schoolRole !== "owner") {
+      setError("Only the Principal can delete existing payments.");
+      return;
+    }
 
     try {
       setDeletingVendor(true);
@@ -1430,6 +1458,11 @@ export default function ExpensesPage() {
   async function openEdit(
     expense: Expense,
   ) {
+    if (schoolRole !== "owner") {
+      setError("Only the Principal can edit existing expenses.");
+      return;
+    }
+
     setEditExpense(expense);
     setEditPaidFrom(
       expense.paid_from_account_id ||
@@ -1537,6 +1570,11 @@ export default function ExpensesPage() {
   }
 
   async function saveEdit() {
+    if (schoolRole !== "owner") {
+      setError("Only the Principal can edit existing expenses.");
+      return;
+    }
+
     if (
       !schoolId ||
       !editExpense
@@ -1873,6 +1911,10 @@ export default function ExpensesPage() {
       !schoolId ||
       !deleteTarget
     ) {
+      return;
+    }
+    if (schoolRole !== "owner") {
+      setError("Only the Principal can delete existing expenses.");
       return;
     }
 
@@ -2454,27 +2496,24 @@ export default function ExpensesPage() {
                               <Eye size={16} />
                             </button>
 
-                            <button
-                              onClick={() =>
-                                void openEdit(e)
-                              }
-                              className="rounded-lg border p-2 hover:bg-blue-50 hover:text-blue-600"
-                              title="Edit"
-                            >
-                              <Edit3 size={16} />
-                            </button>
-
-                            <button
-                              onClick={() =>
-                                setDeleteTarget(e)
-                              }
-                              className="rounded-lg border p-2 hover:bg-red-50 hover:text-red-600"
-                              title="Delete"
-                            >
-                              <Trash2
-                                size={16}
-                              />
-                            </button>
+                            {schoolRole === "owner" && (
+                              <>
+                                <button
+                                  onClick={() => void openEdit(e)}
+                                  className="rounded-lg border p-2 hover:bg-blue-50 hover:text-blue-600"
+                                  title="Edit"
+                                >
+                                  <Edit3 size={16} />
+                                </button>
+                                <button
+                                  onClick={() => setDeleteTarget(e)}
+                                  className="rounded-lg border p-2 hover:bg-red-50 hover:text-red-600"
+                                  title="Delete"
+                                >
+                                  <Trash2 size={16} />
+                                </button>
+                              </>
+                            )}
                           </div>
                         </td>
                       </tr>
@@ -2648,26 +2687,27 @@ export default function ExpensesPage() {
                               <Eye size={16} />
                             </button>
 
-                            <button
-                              onClick={() => {
-                                openEditVendorPayment(p);
-                                setShowVendorPaymentModal(true);
-                              }}
-                              className="rounded-lg border p-2 hover:bg-blue-50 hover:text-blue-600"
-                              title="Edit"
-                            >
-                              <Edit3 size={16} />
-                            </button>
-
-                            <button
-                              onClick={() =>
-                                setDeleteVendorTarget(p)
-                              }
-                              className="rounded-lg border p-2 hover:bg-red-50 hover:text-red-600"
-                              title="Delete"
-                            >
-                              <Trash2 size={16} />
-                            </button>
+                            {schoolRole === "owner" && (
+                              <>
+                                <button
+                                  onClick={() => {
+                                    openEditVendorPayment(p);
+                                    setShowVendorPaymentModal(true);
+                                  }}
+                                  className="rounded-lg border p-2 hover:bg-blue-50 hover:text-blue-600"
+                                  title="Edit"
+                                >
+                                  <Edit3 size={16} />
+                                </button>
+                                <button
+                                  onClick={() => setDeleteVendorTarget(p)}
+                                  className="rounded-lg border p-2 hover:bg-red-50 hover:text-red-600"
+                                  title="Delete"
+                                >
+                                  <Trash2 size={16} />
+                                </button>
+                              </>
+                            )}
                           </div>
                         </td>
                       </tr>
