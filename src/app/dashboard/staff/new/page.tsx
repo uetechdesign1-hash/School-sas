@@ -12,6 +12,28 @@ type EmploymentType =
 
 type Gender = "male" | "female" | "other";
 
+function isMissingAttendanceModeColumn(error: unknown) {
+  if (typeof error !== "object" || error === null) return false;
+  const details = error as Record<string, unknown>;
+  const code = typeof details.code === "string" ? details.code : "";
+  const message = [
+    details.message,
+    details.details,
+    details.hint,
+  ]
+    .filter((value): value is string => typeof value === "string")
+    .join(" ")
+    .toLowerCase();
+
+  return (
+    message.includes("attendance_mode") &&
+    (code === "42703" ||
+      code === "PGRST204" ||
+      message.includes("column") ||
+      message.includes("schema cache"))
+  );
+}
+
 export default function NewStaffPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -32,6 +54,7 @@ export default function NewStaffPage() {
     department: "",
     designation: "",
     employment_type: "full_time" as EmploymentType,
+    attendance_mode: "online" as "online" | "offline",
     status: "active",
     photo_url: "",
   });
@@ -129,10 +152,7 @@ export default function NewStaffPage() {
         );
       }
 
-      const { data, error: insertError } =
-        await supabase
-          .from("staff")
-          .insert({
+      const staffInsert = {
             school_id: membership.school_id,
 
             employee_no: form.employee_no.trim(),
@@ -173,20 +193,57 @@ export default function NewStaffPage() {
             employment_type:
               form.employment_type,
 
+            attendance_mode: form.attendance_mode,
+
             status: form.status,
 
             photo_url:
               form.photo_url.trim() || null,
-          })
+          };
+
+      let { data, error: insertError } = await supabase
+        .from("staff")
+        .insert(staffInsert)
+        .select("id")
+        .single();
+
+      let attendanceModeSaved = true;
+      if (
+        insertError &&
+        isMissingAttendanceModeColumn(insertError) &&
+        form.attendance_mode === "online"
+      ) {
+        const { attendance_mode: _attendanceMode, ...legacyStaffInsert } =
+          staffInsert;
+        void _attendanceMode;
+        const retry = await supabase
+          .from("staff")
+          .insert(legacyStaffInsert)
           .select("id")
           .single();
+        data = retry.data;
+        insertError = retry.error;
+        attendanceModeSaved = false;
+      }
+
+      if (
+        insertError &&
+        isMissingAttendanceModeColumn(insertError) &&
+        form.attendance_mode === "offline"
+      ) {
+        throw new Error(
+          "Offline attendance cannot be enabled yet because its Supabase migration has not been applied. Apply the offline attendance migration, then try again.",
+        );
+      }
 
       if (insertError) {
         throw insertError;
       }
 
       setSuccess(
-        "Staff member created successfully.",
+        attendanceModeSaved
+          ? "Staff member created successfully."
+          : "Staff member created. Attendance mode was not saved because the Supabase migration has not been applied.",
       );
 
       if (data?.id) {
@@ -429,6 +486,21 @@ export default function NewStaffPage() {
                 </option>
                 <option value="temporary">
                   Temporary
+                </option>
+              </SelectField>
+
+              <SelectField
+                label="Attendance Check-in Mode"
+                value={form.attendance_mode}
+                onChange={(value) =>
+                  updateField("attendance_mode", value)
+                }
+              >
+                <option value="online">
+                  Online — check in with live connection
+                </option>
+                <option value="offline">
+                  Offline — save GPS locally and sync later
                 </option>
               </SelectField>
 

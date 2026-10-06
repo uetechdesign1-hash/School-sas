@@ -1,7 +1,7 @@
 ﻿"use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
@@ -22,9 +22,68 @@ type FormState = {
   department: string;
   designation: string;
   employment_type: string;
+  attendance_mode: "online" | "offline";
   status: string;
   photo_url: string;
 };
+
+type StaffEditRow = {
+  employee_no: string | null;
+  first_name: string | null;
+  middle_name: string | null;
+  last_name: string | null;
+  gender: string | null;
+  date_of_birth: string | null;
+  phone: string | null;
+  email: string | null;
+  address: string | null;
+  city: string | null;
+  joining_date: string | null;
+  department: string | null;
+  designation: string | null;
+  employment_type: string | null;
+  attendance_mode?: "online" | "offline" | null;
+  status: string | null;
+  photo_url: string | null;
+};
+
+function getStaffErrorMessage(error: unknown, fallback: string) {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  if (typeof error !== "object" || error === null) return fallback;
+
+  const details = error as Record<string, unknown>;
+  const message =
+    typeof details.message === "string" ? details.message : "";
+  const code = typeof details.code === "string" ? details.code : "";
+  const detail =
+    typeof details.details === "string" ? details.details : "";
+  const hint = typeof details.hint === "string" ? details.hint : "";
+
+  return [message, detail, hint, code].filter(Boolean).join(" ") || fallback;
+}
+
+function isMissingAttendanceModeColumn(error: unknown) {
+  if (typeof error !== "object" || error === null) return false;
+  const details = error as Record<string, unknown>;
+  const code = typeof details.code === "string" ? details.code : "";
+  const message = [
+    details.message,
+    details.details,
+    details.hint,
+  ]
+    .filter((value): value is string => typeof value === "string")
+    .join(" ")
+    .toLowerCase();
+
+  return (
+    message.includes("attendance_mode") &&
+    (code === "42703" ||
+      code === "PGRST204" ||
+      message.includes("column") ||
+      message.includes("schema cache"))
+  );
+}
 
 export default function StaffEditPage() {
   const params = useParams();
@@ -49,6 +108,7 @@ export default function StaffEditPage() {
     department: "",
     designation: "",
     employment_type: "full_time",
+    attendance_mode: "online",
     status: "active",
     photo_url: "",
   });
@@ -57,17 +117,15 @@ export default function StaffEditPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [attendanceModeAvailable, setAttendanceModeAvailable] =
+    useState(true);
 
-  useEffect(() => {
-    if (staffId) {
-      void loadStaff();
-    }
-  }, [staffId]);
-
-  async function loadStaff() {
+  const loadStaff = useCallback(async () => {
     try {
       setLoading(true);
       setError("");
+      setAttendanceModeAvailable(true);
+      setSuccess("");
 
       const supabase = createClient();
 
@@ -108,8 +166,39 @@ export default function StaffEditPage() {
         );
       }
 
-      const { data: staff, error: staffError } =
+      const staffResult =
         await supabase
+          .from("staff")
+          .select(`
+            id,
+            school_id,
+            employee_no,
+            first_name,
+            middle_name,
+            last_name,
+            gender,
+            date_of_birth,
+            phone,
+            email,
+            address,
+            city,
+            joining_date,
+            department,
+            designation,
+            employment_type,
+            status,
+            photo_url,
+            attendance_mode
+          `)
+          .eq("id", staffId)
+          .eq("school_id", membership.school_id)
+          .maybeSingle();
+      let staff: StaffEditRow | null = staffResult.data;
+      let staffError = staffResult.error;
+
+      if (staffError && isMissingAttendanceModeColumn(staffError)) {
+        setAttendanceModeAvailable(false);
+        const legacyResult = await supabase
           .from("staff")
           .select(`
             id,
@@ -134,6 +223,9 @@ export default function StaffEditPage() {
           .eq("id", staffId)
           .eq("school_id", membership.school_id)
           .maybeSingle();
+        staff = legacyResult.data;
+        staffError = legacyResult.error;
+      }
 
       if (staffError) {
         throw staffError;
@@ -158,21 +250,25 @@ export default function StaffEditPage() {
         department: staff.department || "",
         designation: staff.designation || "",
         employment_type: staff.employment_type || "full_time",
+        attendance_mode: staff.attendance_mode || "online",
         status: staff.status || "active",
         photo_url: staff.photo_url || "",
       });
     } catch (err) {
       console.error("EDIT STAFF LOAD ERROR:", err);
 
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Unable to load staff."
-      );
+      setError(getStaffErrorMessage(err, "Unable to load staff."));
     } finally {
       setLoading(false);
     }
-  }
+  }, [staffId]);
+
+  useEffect(() => {
+    async function loadStaffForRoute() {
+      if (staffId) await loadStaff();
+    }
+    void loadStaffForRoute();
+  }, [loadStaff, staffId]);
 
   function updateField(
     field: keyof FormState,
@@ -263,37 +359,33 @@ export default function StaffEditPage() {
         );
       }
 
+      const updatePayload = {
+        employee_no: form.employee_no.trim(),
+        first_name: form.first_name.trim(),
+        middle_name: form.middle_name.trim() || null,
+        last_name: form.last_name.trim() || null,
+        gender: form.gender || null,
+        date_of_birth: form.date_of_birth || null,
+        phone: form.phone.trim() || null,
+        email: form.email.trim() || null,
+        address: form.address.trim() || null,
+        city: form.city.trim() || null,
+        joining_date: form.joining_date,
+        department: form.department.trim() || null,
+        designation: form.designation.trim() || null,
+        employment_type: form.employment_type,
+        ...(attendanceModeAvailable
+          ? { attendance_mode: form.attendance_mode }
+          : {}),
+        status: form.status,
+        photo_url: form.photo_url.trim() || null,
+        updated_at: new Date().toISOString(),
+      };
+
       const { error: updateError } =
         await supabase
           .from("staff")
-          .update({
-            employee_no: form.employee_no.trim(),
-            first_name: form.first_name.trim(),
-            middle_name:
-              form.middle_name.trim() || null,
-            last_name:
-              form.last_name.trim() || null,
-            gender: form.gender || null,
-            date_of_birth:
-              form.date_of_birth || null,
-            phone: form.phone.trim() || null,
-            email: form.email.trim() || null,
-            address:
-              form.address.trim() || null,
-            city: form.city.trim() || null,
-            joining_date: form.joining_date,
-            department:
-              form.department.trim() || null,
-            designation:
-              form.designation.trim() || null,
-            employment_type:
-              form.employment_type,
-            status: form.status,
-            photo_url:
-              form.photo_url.trim() || null,
-            updated_at:
-              new Date().toISOString(),
-          })
+          .update(updatePayload)
           .eq("id", staffId)
           .eq(
             "school_id",
@@ -316,11 +408,7 @@ export default function StaffEditPage() {
     } catch (err) {
       console.error("SAVE STAFF ERROR:", err);
 
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Unable to update staff."
-      );
+      setError(getStaffErrorMessage(err, "Unable to update staff."));
     } finally {
       setSaving(false);
     }
@@ -371,11 +459,43 @@ export default function StaffEditPage() {
             </div>
           )}
 
+          {!attendanceModeAvailable && (
+            <div className="mx-6 mt-6 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+              Attendance mode is unavailable until the offline attendance Supabase migration is applied. Other staff details can still be edited.
+            </div>
+          )}
+
           {success && (
             <div className="m-6 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-700">
               {success}
             </div>
           )}
+
+          <section className="mx-6 mt-6 rounded-2xl border border-violet-200 bg-violet-50 p-5">
+            <h2 className="text-base font-bold text-violet-950">
+              Staff Attendance Mode
+            </h2>
+            <p className="mt-1 text-sm text-violet-800">
+              Choose whether this staff member checks in online or can save GPS attendance offline.
+            </p>
+            <div className="mt-4 max-w-xl">
+              <SelectField
+                label="Online or Offline"
+                value={form.attendance_mode}
+                disabled={!attendanceModeAvailable}
+                onChange={(value) =>
+                  updateField("attendance_mode", value)
+                }
+              >
+                <option value="online">
+                  Online — check in with live connection
+                </option>
+                <option value="offline">
+                  Offline — save GPS locally and sync later
+                </option>
+              </SelectField>
+            </div>
+          </section>
 
           <div className="grid gap-5 p-6 md:grid-cols-2">
             <Field
@@ -625,11 +745,13 @@ function SelectField({
   label,
   value,
   onChange,
+  disabled = false,
   children,
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
+  disabled?: boolean;
   children: ReactNode;
 }) {
   return (
@@ -640,10 +762,11 @@ function SelectField({
 
       <select
         value={value}
+        disabled={disabled}
         onChange={(e) =>
           onChange(e.target.value)
         }
-        className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm text-slate-900 outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+        className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm text-slate-900 outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500"
       >
         {children}
       </select>

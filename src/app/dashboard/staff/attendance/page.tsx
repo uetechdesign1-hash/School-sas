@@ -16,6 +16,15 @@ import {
 } from "lucide-react";
 
 import { createClient } from "@/lib/supabase/client";
+import {
+  deleteOfflineAttendanceEvent,
+  getOfflineAttendanceProfile,
+  listOfflineAttendanceEvents,
+  saveOfflineAttendanceEvent,
+  saveOfflineAttendanceProfile,
+  updateOfflineAttendanceEvent,
+  type OfflineAttendanceEvent,
+} from "@/lib/staff/offline-attendance";
 
 type Staff = {
   id: string;
@@ -26,6 +35,7 @@ type Staff = {
   last_name: string | null;
   designation: string | null;
   email: string | null;
+  attendance_mode: "online" | "offline";
 };
 
 type Attendance = {
@@ -81,6 +91,15 @@ function today() {
   ).padStart(2, "0");
 
   return `${year}-${month}-${day}`;
+}
+
+function isToday(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return false;
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}` === today();
 }
 
 function formatTime(
@@ -159,9 +178,6 @@ export default function StaffAttendancePage() {
     []
   );
 
-  const [schoolId, setSchoolId] =
-    useState<string | null>(null);
-
   const [staff, setStaff] =
     useState<Staff | null>(null);
 
@@ -187,6 +203,12 @@ export default function StaffAttendancePage() {
 
   const [success, setSuccess] =
     useState("");
+
+  const [offlineEvents, setOfflineEvents] =
+    useState<OfflineAttendanceEvent[]>([]);
+
+  const [currentUserId, setCurrentUserId] =
+    useState<string | null>(null);
 
   const [message, setMessage] =
     useState(
@@ -215,6 +237,7 @@ export default function StaffAttendancePage() {
             "/login";
           return;
         }
+        setCurrentUserId(user.id);
 
         const activeSchoolId =
          (await supabase.rpc("get_my_school_id")).data ||
@@ -235,8 +258,6 @@ export default function StaffAttendancePage() {
          );
         }
 
-        setSchoolId(activeSchoolId as string);
-
         const staffSelect = `
           id,
           school_id,
@@ -245,7 +266,8 @@ export default function StaffAttendancePage() {
           middle_name,
           last_name,
           designation,
-          email
+          email,
+          attendance_mode
         `;
 
         const {
@@ -290,9 +312,8 @@ export default function StaffAttendancePage() {
           );
         }
 
-        setStaff(
-          staffRow as Staff
-        );
+        const staffProfile = staffRow as Staff;
+        setStaff(staffProfile);
 
         const {
           data: attendanceRow,
@@ -337,27 +358,157 @@ export default function StaffAttendancePage() {
           throw attendanceError;
         }
 
-        setAttendance(
-          attendanceRow as Attendance | null
-        );
-      } catch (err: any) {
+        const todayAttendance = attendanceRow as Attendance | null;
+        setAttendance(todayAttendance);
+        await saveOfflineAttendanceProfile({
+          user_id: user.id,
+          staff: staffProfile,
+          attendance_mode: staffProfile.attendance_mode || "online",
+          attendance_date: today(),
+          check_in_at: todayAttendance?.check_in_at || null,
+          check_out_at: todayAttendance?.check_out_at || null,
+        });
+        setOfflineEvents(await listOfflineAttendanceEvents());
+      } catch (err: unknown) {
         console.error(
           "STAFF ATTENDANCE LOAD ERROR:",
           err
         );
 
-        setError(
-          err?.message ||
-            "Unable to load today's attendance."
+        const cachedProfile = await getOfflineAttendanceProfile().catch(
+          (storageError: unknown) => {
+            console.error("OFFLINE ATTENDANCE PROFILE LOAD ERROR:", storageError);
+            return null;
+          },
         );
+        const {
+          data: { session },
+          error: offlineSessionError,
+        } = await supabase.auth.getSession();
+        if (offlineSessionError) {
+          console.error("OFFLINE ATTENDANCE SESSION ERROR:", offlineSessionError);
+        }
+        if (
+          cachedProfile?.attendance_mode === "offline" &&
+          cachedProfile.user_id === session?.user.id
+        ) {
+          setCurrentUserId(cachedProfile.user_id);
+          setStaff({
+            ...cachedProfile.staff,
+            attendance_mode: cachedProfile.attendance_mode,
+          });
+          setAttendance({
+            id: "offline-cache",
+            attendance_date: cachedProfile.attendance_date,
+            status: cachedProfile.check_in_at ? "present" : "pending",
+            check_in_at: cachedProfile.check_in_at,
+            check_out_at: cachedProfile.check_out_at,
+            check_in_latitude: null,
+            check_in_longitude: null,
+            check_in_accuracy_meters: null,
+            check_in_distance_meters: null,
+            check_out_latitude: null,
+            check_out_longitude: null,
+            check_out_accuracy_meters: null,
+            check_out_distance_meters: null,
+            working_minutes: null,
+            is_late: null,
+            is_early_checkout: null,
+          });
+          setOfflineEvents(await listOfflineAttendanceEvents().catch(() => []));
+          setMessage("Offline profile loaded. New attendance records remain pending until server validation.");
+        } else {
+          setError(getRpcErrorMessage(err, "Unable to load today's attendance."));
+        }
       } finally {
         setLoading(false);
       }
     }, [supabase]);
 
+  const syncOfflineAttendance = useCallback(async () => {
+    if (!navigator.onLine) return;
+    const {
+      data: { session },
+      error: sessionError,
+    } = await supabase.auth.getSession();
+    if (sessionError) throw sessionError;
+    if (!session?.access_token) return;
+
+    const events = (await listOfflineAttendanceEvents()).sort((left, right) =>
+      left.captured_at.localeCompare(right.captured_at),
+    );
+    for (const event of events) {
+      if (event.status !== "pending") continue;
+      if (event.user_id !== session.user.id) continue;
+      let response: Response;
+      try {
+        response = await fetch("/api/staff/attendance/offline-sync", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${session.access_token}`,
+          },
+          body: JSON.stringify({
+            request_id: event.request_id,
+            user_id: event.user_id,
+            staff_id: event.staff_id,
+            action: event.action,
+            captured_at: event.captured_at,
+            latitude: event.latitude,
+            longitude: event.longitude,
+            accuracy_meters: event.accuracy_meters,
+          }),
+        });
+      } catch {
+        break;
+      }
+
+      const result = (await response.json()) as {
+        success?: boolean;
+        error?: string;
+      };
+      if (response.ok && result.success) {
+        await deleteOfflineAttendanceEvent(event.request_id);
+      } else if (response.status === 422) {
+        await updateOfflineAttendanceEvent(event.request_id, {
+          status: "rejected",
+          error: result.error || "Server rejected this attendance record.",
+        });
+        setSuccess("");
+        setError(
+          `Offline attendance was not accepted: ${result.error || "The server rejected the GPS or school-day validation."}`,
+        );
+      } else {
+        throw new Error(result.error || "Unable to sync offline attendance.");
+      }
+    }
+    setOfflineEvents(await listOfflineAttendanceEvents());
+  }, [supabase]);
+
   useEffect(() => {
-    loadToday();
-  }, [loadToday]);
+    async function initializeAttendance() {
+      try {
+        await loadToday();
+        await syncOfflineAttendance();
+        if (navigator.onLine) await loadToday();
+      } catch (loadError: unknown) {
+        console.error("STAFF ATTENDANCE INITIAL LOAD ERROR:", loadError);
+        setError(getRpcErrorMessage(loadError, "Unable to sync offline attendance."));
+      }
+    }
+    void initializeAttendance();
+  }, [loadToday, syncOfflineAttendance]);
+
+  useEffect(() => {
+    const onOnline = () => {
+      void syncOfflineAttendance().then(() => loadToday()).catch((syncError: unknown) => {
+        console.error("OFFLINE ATTENDANCE SYNC ERROR:", syncError);
+        setError(getRpcErrorMessage(syncError, "Unable to sync offline attendance."));
+      });
+    };
+    window.addEventListener("online", onOnline);
+    return () => window.removeEventListener("online", onOnline);
+  }, [loadToday, syncOfflineAttendance]);
 
   /* =====================================================
      GET GPS
@@ -449,16 +600,13 @@ export default function StaffAttendancePage() {
           current.accuracy
         )} m`
       );
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error(
         "GPS ERROR:",
         err
       );
 
-      setError(
-        err?.message ||
-          "Unable to get your location."
-      );
+      setError(getRpcErrorMessage(err, "Unable to get your location."));
 
       setLocation(null);
     } finally {
@@ -585,6 +733,82 @@ export default function StaffAttendancePage() {
     return createdEmployee;
   }, [supabase]);
 
+  async function captureOfflineAction(action: "check_in" | "check_out") {
+    if (!staff) throw new Error("Staff record not found.");
+    const current = await getLocation();
+    const capturedAt = new Date().toISOString();
+    const cachedProfile = await getOfflineAttendanceProfile();
+    if (!cachedProfile) {
+      throw new Error("Offline attendance profile is not ready. Reload this page while connected to the internet.");
+    }
+    if (
+      cachedProfile.user_id !== currentUserId ||
+      cachedProfile.staff.id !== staff.id
+    ) {
+      throw new Error("The saved offline profile belongs to a different staff login. Reconnect and open attendance with the correct account.");
+    }
+    const event: OfflineAttendanceEvent = {
+      request_id: crypto.randomUUID(),
+      user_id: cachedProfile.user_id,
+      staff_id: staff.id,
+      action,
+      captured_at: capturedAt,
+      latitude: current.latitude,
+      longitude: current.longitude,
+      accuracy_meters: current.accuracy,
+      status: "pending",
+      error: null,
+    };
+
+    await saveOfflineAttendanceEvent(event);
+    await saveOfflineAttendanceProfile({
+      ...cachedProfile,
+      attendance_date: today(),
+      check_in_at:
+        action === "check_in" ? capturedAt : cachedProfile.check_in_at,
+      check_out_at:
+        action === "check_out" ? capturedAt : cachedProfile.check_out_at,
+    });
+    setLocation(current);
+    setSuccess(
+      "Saved on this device. This attendance is pending server GPS/geofence validation until it syncs.",
+    );
+    setMessage("Attendance saved locally; it is not official until the server accepts it.");
+    setOfflineEvents(await listOfflineAttendanceEvents());
+
+    if (navigator.onLine) {
+      await syncOfflineAttendance();
+      await loadToday();
+    } else {
+      setAttendance((currentAttendance) => ({
+        ...(currentAttendance || {
+          id: "offline-cache",
+          attendance_date: today(),
+          status: "pending",
+          check_in_latitude: null,
+          check_in_longitude: null,
+          check_in_accuracy_meters: null,
+          check_in_distance_meters: null,
+          check_out_latitude: null,
+          check_out_longitude: null,
+          check_out_accuracy_meters: null,
+          check_out_distance_meters: null,
+          working_minutes: null,
+          is_late: null,
+          is_early_checkout: null,
+        }),
+        check_in_at:
+          action === "check_in"
+            ? capturedAt
+            : currentAttendance?.check_in_at || null,
+        check_out_at:
+          action === "check_out"
+            ? capturedAt
+            : currentAttendance?.check_out_at || null,
+      }));
+    }
+  }
+
   /* =====================================================
      CHECK IN
      ===================================================== */
@@ -594,6 +818,12 @@ export default function StaffAttendancePage() {
       setProcessing(true);
       setError("");
       setSuccess("");
+
+      if (staff?.attendance_mode === "offline") {
+        setMessage("Capturing GPS for an offline attendance record...");
+        await captureOfflineAction("check_in");
+        return;
+      }
 
       /*
        * Always obtain a fresh location.
@@ -670,7 +900,7 @@ export default function StaffAttendancePage() {
       );
 
       await loadToday();
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error(
         "STAFF CHECK-IN ERROR:",
         err
@@ -700,6 +930,12 @@ export default function StaffAttendancePage() {
       setProcessing(true);
       setError("");
       setSuccess("");
+
+      if (staff?.attendance_mode === "offline") {
+        setMessage("Capturing GPS for an offline attendance record...");
+        await captureOfflineAction("check_out");
+        return;
+      }
 
       setMessage(
         "Getting your current GPS location..."
@@ -765,7 +1001,7 @@ export default function StaffAttendancePage() {
       );
 
       await loadToday();
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error(
         "STAFF CHECK-OUT ERROR:",
         err
@@ -817,15 +1053,31 @@ export default function StaffAttendancePage() {
     );
   }
 
+  const pendingCheckIn = offlineEvents.some(
+    (event) =>
+      event.user_id === currentUserId &&
+      isToday(event.captured_at) &&
+      event.action === "check_in" &&
+      event.status === "pending",
+  );
+  const pendingCheckOut = offlineEvents.some(
+    (event) =>
+      event.user_id === currentUserId &&
+      isToday(event.captured_at) &&
+      event.action === "check_out" &&
+      event.status === "pending",
+  );
+  const hasPendingOfflineAttendance = offlineEvents.some(
+    (event) =>
+      event.user_id === currentUserId &&
+      isToday(event.captured_at) &&
+      event.status === "pending",
+  );
   const checkedIn =
-    Boolean(
-      attendance?.check_in_at
-    );
+    Boolean(attendance?.check_in_at) || pendingCheckIn;
 
   const checkedOut =
-    Boolean(
-      attendance?.check_out_at
-    );
+    Boolean(attendance?.check_out_at) || pendingCheckOut;
 
   const canCheckIn =
     !checkedIn;
@@ -860,6 +1112,40 @@ export default function StaffAttendancePage() {
 
         </div>
 
+        {staff.attendance_mode === "offline" && (
+          <section className="mb-6 rounded-2xl border border-violet-200 bg-violet-50 p-5">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="font-bold text-violet-950">Offline attendance is enabled</p>
+                <p className="mt-1 text-sm text-violet-800">
+                  Visit the offline attendance screen once while online so it is available after the connection drops.
+                </p>
+              </div>
+              <a
+                href="/offline-attendance.html"
+                className="inline-flex min-h-11 items-center justify-center rounded-xl bg-violet-700 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-800"
+              >
+                Open offline attendance screen
+              </a>
+            </div>
+            {offlineEvents.length > 0 && (
+              <ul className="mt-4 space-y-2 text-sm text-violet-950">
+                {offlineEvents
+                  .filter((event) => event.user_id === currentUserId)
+                  .map((event) => (
+                  <li key={event.request_id} className="rounded-lg bg-white/80 p-3">
+                    {event.action === "check_in" ? "Check-in" : "Check-out"} at{" "}
+                    {formatTime(event.captured_at)} —{" "}
+                    {event.status === "pending"
+                      ? "pending server verification"
+                      : `rejected: ${event.error || "GPS/time validation failed"}`}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        )}
+
         {/* STATUS */}
 
         <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
@@ -892,7 +1178,9 @@ export default function StaffAttendancePage() {
 
               <h2 className="mt-5 text-2xl font-bold text-slate-900">
 
-                {checkedOut
+                {hasPendingOfflineAttendance
+                  ? "Attendance Pending Verification"
+                  : checkedOut
                   ? "Attendance Completed"
                   : checkedIn
                   ? "You are Checked In"
@@ -902,11 +1190,13 @@ export default function StaffAttendancePage() {
 
               <p className="mt-2 max-w-xl text-sm leading-6 text-slate-500">
 
-                {checkedOut
+                {hasPendingOfflineAttendance
+                  ? "Saved locally. This record is not official until the server validates its GPS and school-day eligibility."
+                  : checkedOut
                   ? "Your check-in and check-out have both been recorded for today."
                   : checkedIn
                   ? "Keep working normally. Check out when you leave the school."
-                  : "Your location will be verified against the school's configured attendance area."}
+                  : "Your location will be verified against the configured school attendance area."}
 
               </p>
 
@@ -1132,7 +1422,7 @@ export default function StaffAttendancePage() {
                 <div>
 
                   <h2 className="font-bold text-slate-900">
-                    Today's Attendance
+                    Today&apos;s Attendance
                   </h2>
 
                   <p className="text-sm text-slate-500">
@@ -1411,12 +1701,18 @@ function getRpcSuccessMessage(
 }
 
 function getRpcErrorMessage(
-  error: any,
+  error: unknown,
   fallback: string
 ) {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
   if (
-    typeof error?.message ===
-    "string"
+    typeof error === "object" &&
+    error !== null &&
+    "message" in error &&
+    typeof error.message === "string"
   ) {
     return error.message;
   }

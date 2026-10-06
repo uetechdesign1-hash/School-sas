@@ -24,7 +24,7 @@ import {
  * always relieved at the weighted average COST, never at the selling price.
  */
 
-export type InvoiceCategory = "books" | "uniform" | "other";
+export type InvoiceCategory = "books" | "uniform" | "stationery" | "id_cards" | "bags" | "shoes" | "other";
 
 export type BookSaleLineInput = {
   inventoryItemId: string;
@@ -73,7 +73,7 @@ export function generateSaleNumber(date: string) {
 export function asInvoiceCategory(
   value: string | null | undefined,
 ): InvoiceCategory {
-  return value === "books" || value === "uniform" ? value : "other";
+  return value === "books" || value === "uniform" || value === "stationery" || value === "id_cards" || value === "bags" || value === "shoes" ? value : "other";
 }
 
 export function categoryAccounts(category: InvoiceCategory) {
@@ -252,7 +252,7 @@ export async function saveStudentBookSale(
 
   const { data: itemRows, error: itemError } = await supabase
     .from("inventory_items")
-    .select("id, name, category")
+    .select("id, name, category, selling_price")
     .eq("school_id", input.schoolId)
     .in("id", itemIds);
 
@@ -262,6 +262,19 @@ export async function saveStudentBookSale(
     throw new InventoryError(
       "One or more selected inventory items are not part of this school.",
     );
+  }
+
+  const configuredPrices = new Map(
+    (itemRows ?? []).map((row) => [String(row.id), round2(Number(row.selling_price || 0))]),
+  );
+  for (const line of input.lines) {
+    const configuredPrice = configuredPrices.get(line.inventoryItemId);
+    if (!(configuredPrice! > 0)) {
+      throw new Error("Set a student selling price greater than zero on each inventory item before recording a sale.");
+    }
+    if (round2(line.unitPrice) !== configuredPrice) {
+      throw new Error("The sale price does not match the school-set inventory price. Refresh and try again.");
+    }
   }
 
   const categoryByItemId = new Map(
@@ -485,6 +498,10 @@ export async function saveStudentBookSale(
 function categoryLabel(category: InvoiceCategory) {
   if (category === "books") return "Book";
   if (category === "uniform") return "Uniform";
+  if (category === "stationery") return "Stationery";
+  if (category === "id_cards") return "ID card";
+  if (category === "bags") return "Bag";
+  if (category === "shoes") return "Shoe";
 
   return "Other";
 }

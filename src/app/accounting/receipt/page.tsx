@@ -30,6 +30,10 @@ import { createClient } from "@/lib/supabase/client";
 import { getCurrentSchoolId } from "@/lib/supabase/current-school";
 import { generateReceiptPDF } from "@/lib/fees/generateReceipt";
 import { ensureSchoolAccountingSetup } from "@/lib/accounting/canonical-accounting";
+import { listInventoryItems, type InventoryItemRecord } from "@/lib/inventory/inventory-items";
+import { getStockSummary } from "@/lib/inventory/valuation";
+import { saveStudentBookSale } from "@/lib/inventory/book-sales";
+import { attachInventorySaleToFeeBill as linkInventorySaleToFeeBill } from "@/lib/inventory/fee-bill-link";
 
 type ReceiptType = "student_fee" | "other_income";
 
@@ -92,12 +96,15 @@ type FeeBillItem = {
   discount: number;
   net_amount: number;
   balance: number;
+  inventory_sale_id?: string | null;
 };
 
 type ReceiptPaymentLine = {
   feeBillItemId: string;
   amount: string;
 };
+
+type InventoryIssueLine = { inventoryItemId: string; quantity: string };
 
 type FeeBill = {
   id: string;
@@ -296,6 +303,10 @@ export default function ReceiptPage() {
   const [selectedBillId, setSelectedBillId] = useState("");
   const [receiptFeeItems, setReceiptFeeItems] = useState<FeeBillItem[]>([]);
   const [receiptPaymentLines, setReceiptPaymentLines] = useState<ReceiptPaymentLine[]>([]);
+  const [includeInventory, setIncludeInventory] = useState(false);
+  const [inventoryItems, setInventoryItems] = useState<InventoryItemRecord[]>([]);
+  const [inventoryStock, setInventoryStock] = useState<Record<string, number>>({});
+  const [inventoryIssueLines, setInventoryIssueLines] = useState<InventoryIssueLine[]>([{ inventoryItemId: "", quantity: "1" }]);
   const [feeManagementName, setFeeManagementName] = useState("");
   const [feeManagementAcademicYear, setFeeManagementAcademicYear] = useState("");
   const [feeManagementAmount, setFeeManagementAmount] = useState(0);
@@ -312,6 +323,8 @@ export default function ReceiptPage() {
   const [history, setHistory] = useState<ReceiptHistoryRow[]>([]);
   const [historyTypeFilter, setHistoryTypeFilter] = useState<ReceiptType | "all">("all");
   const [historyCategoryFilter, setHistoryCategoryFilter] = useState("all");
+  const [historyClassFilter, setHistoryClassFilter] = useState("all");
+  const [historySectionFilter, setHistorySectionFilter] = useState("all");
   const [historyFromDate, setHistoryFromDate] = useState("");
   const [historyToDate, setHistoryToDate] = useState("");
 
@@ -557,7 +570,7 @@ export default function ReceiptPage() {
 
     const { data: itemData, error: itemError } = await supabase
       .from("fee_bill_items")
-      .select("id, school_id, bill_id, fee_category_id, description, amount, discount, net_amount")
+      .select("id, school_id, bill_id, fee_category_id, description, amount, discount, net_amount, inventory_sale_id")
       .eq("school_id", schoolId)
       .eq("bill_id", billId)
       .order("created_at", { ascending: true });
@@ -1079,11 +1092,15 @@ export default function ReceiptPage() {
     return history.filter((row) => {
       const typeMatches = historyTypeFilter === "all" || row.receipt_type === historyTypeFilter;
       const categoryMatches = historyCategoryFilter === "all" || (row.fee_categories || []).includes(historyCategoryFilter);
+      const classMatches = historyClassFilter === "all" || row.class_name === classes.find((item) => item.id === historyClassFilter)?.name;
+      const sectionMatches = historySectionFilter === "all" || row.section_name === sections.find((item) => item.id === historySectionFilter)?.name;
       const fromMatches = !historyFromDate || row.transaction_date >= historyFromDate;
       const toMatches = !historyToDate || row.transaction_date <= historyToDate;
-      return typeMatches && categoryMatches && fromMatches && toMatches;
+      return typeMatches && categoryMatches && classMatches && sectionMatches && fromMatches && toMatches;
     });
-  }, [history, historyTypeFilter, historyCategoryFilter, historyFromDate, historyToDate]);
+  }, [history, historyTypeFilter, historyCategoryFilter, historyClassFilter, historySectionFilter, classes, sections, historyFromDate, historyToDate]);
+
+  const historySections = useMemo(() => sections.filter((item) => historyClassFilter === "all" || item.class_id === historyClassFilter), [sections, historyClassFilter]);
 
   function getDisplayedHistoryCategories(row: ReceiptHistoryRow) {
     const categories = row.fee_categories || [];
@@ -1293,6 +1310,13 @@ export default function ReceiptPage() {
 
       setSchoolId(currentSchoolId);
 
+      const [inventoryRows, stockRows] = await Promise.all([
+        listInventoryItems(supabase, currentSchoolId),
+        getStockSummary(supabase, currentSchoolId),
+      ]);
+      setInventoryItems(inventoryRows.filter((item) => item.is_active));
+      setInventoryStock(Object.fromEntries(stockRows.map((item) => [item.id, item.closingQuantity])));
+
       await Promise.all([
         loadAccounts(currentSchoolId),
         loadClasses(currentSchoolId),
@@ -1338,6 +1362,8 @@ export default function ReceiptPage() {
     setSelectedClassId("");
     setSelectedSectionId("");
     setSelectedStudentId("");
+    setIncludeInventory(false);
+    setInventoryIssueLines([{ inventoryItemId: "", quantity: "1" }]);
     setSelectedBillId("");
 
     setFeeBills([]);
@@ -1374,6 +1400,8 @@ export default function ReceiptPage() {
     setSelectedClassId("");
     setSelectedSectionId("");
     setSelectedStudentId("");
+    setIncludeInventory(false);
+    setInventoryIssueLines([{ inventoryItemId: "", quantity: "1" }]);
     setSelectedBillId("");
     setFeeBills([]);
     setReceiptFeeItems([]);
@@ -1432,6 +1460,8 @@ export default function ReceiptPage() {
     setSelectedStudentId(studentId);
     setSelectedBillId("");
     setAmount("");
+    setIncludeInventory(false);
+    setInventoryIssueLines([{ inventoryItemId: "", quantity: "1" }]);
 
     await loadStudentBills(studentId);
   }
@@ -1988,6 +2018,61 @@ export default function ReceiptPage() {
     return true;
   }
 
+  async function addInventoryToStudentBill() {
+    if (!schoolId || !selectedStudentId || !feeBills[0]) {
+      setError("Select a student with a current fee bill before adding inventory.");
+      return;
+    }
+    const bill = feeBills[0];
+    const selectedLines = inventoryIssueLines.filter((line) => line.inventoryItemId);
+    if (!selectedLines.length) {
+      setError("Select at least one inventory item to issue.");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    setSuccess("");
+    try {
+      const userResult = await supabase.auth.getUser();
+      if (userResult.error || !userResult.data.user) throw new Error("No authenticated user found.");
+      const saleLines = selectedLines.map((line) => {
+        const item = inventoryItems.find((candidate) => candidate.id === line.inventoryItemId);
+        const quantity = Number(line.quantity);
+        const available = inventoryStock[line.inventoryItemId] || 0;
+        if (!item || !Number.isFinite(quantity) || quantity <= 0) throw new Error("Choose an inventory item and enter a valid quantity.");
+        if (quantity > available + 0.0001) throw new Error(`${item.name} has only ${available} ${item.unit} available.`);
+        if (!(Number(item.selling_price) > 0)) throw new Error(`Set the sale price for ${item.name} in Inventory before issuing it.`);
+        return { inventoryItemId: item.id, quantity, unitPrice: Number(item.selling_price) };
+      });
+      const setup = await ensureSchoolAccountingSetup(supabase, schoolId);
+      const sale = await saveStudentBookSale(supabase, {
+        schoolId, saleDate: receiptDate, studentId: selectedStudentId,
+        saleNumber: null, paymentMode: "receivable", paymentAccountId: null,
+        receivableAccountId: setup.accountMap.OTHER_RECEIVABLES || null,
+        notes: `Issued on fee bill ${manualBillNumber.trim() || bill.bill_number}`,
+        createdBy: userResult.data.user.id, lines: saleLines,
+      });
+      const linked = await linkInventorySaleToFeeBill(supabase, schoolId, sale.saleId, bill.id);
+      await loadStudentBills(selectedStudentId);
+      const billItems = await loadReceiptFeeItems(bill.id);
+      const linkedItemIds = new Set(linked.lines.map((line) => line.id));
+      const newLines = billItems.filter((item) => linkedItemIds.has(item.id) && item.balance > 0);
+      setReceiptPaymentLines((current) => [
+        ...current.filter((line) => line.feeBillItemId),
+        ...newLines.map((item) => ({ feeBillItemId: item.id, amount: "" })),
+      ]);
+      const stockRows = await getStockSummary(supabase, schoolId);
+      setInventoryStock(Object.fromEntries(stockRows.map((item) => [item.id, item.closingQuantity])));
+      setInventoryIssueLines([{ inventoryItemId: "", quantity: "1" }]);
+      setIncludeInventory(false);
+      setSuccess(`Inventory issued (${sale.saleNumber}) and added as an optional fee line. Enter any amount being collected now; the remainder stays outstanding.`);
+    } catch (err: any) {
+      setError(err?.message || "Unable to add inventory to this student’s bill.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function createReceipt(event: FormEvent) {
     event.preventDefault();
 
@@ -2049,6 +2134,8 @@ export default function ReceiptPage() {
           throw new Error("No outstanding fee bill is linked to this student. Assign the fees in Student Fees first.");
         }
 
+        if (includeInventory) throw new Error("Add the selected inventory to the student’s bill before recording the receipt.");
+
         const total = receiptPaymentTotal;
         const allocationPayload = receiptPaymentLines.map((line) => ({
           fee_bill_item_id: line.feeBillItemId,
@@ -2096,6 +2183,14 @@ export default function ReceiptPage() {
 
         const paymentId = String(data.payment_id || "");
         if (!paymentId) throw new Error("Payment was recorded but no payment ID was returned.");
+
+        const { error: inventoryAccountingError } = await supabase.rpc(
+          "reclassify_inventory_fee_payment",
+          { p_payment_id: paymentId },
+        );
+        if (inventoryAccountingError) {
+          throw new Error(`Payment was recorded, but inventory payment accounting could not be reclassified: ${inventoryAccountingError.message}`);
+        }
 
         if (manualBillNumber.trim()) {
           const { error: billNumberError } = await supabase
@@ -2237,8 +2332,6 @@ export default function ReceiptPage() {
 
       await loadHistory(schoolId!);
     } catch (err: any) {
-      console.error("RECEIPT RECORDING ERROR:", err);
-
       if (createdReceiptId) {
         await supabase
           .from("receipts")
@@ -2269,9 +2362,13 @@ export default function ReceiptPage() {
           .eq("school_id", schoolId);
       }
 
-      setError(
-        err?.message || "Unable to save receipt."
-      );
+      const errorMessage = [
+        err?.message,
+        err?.details,
+        err?.hint,
+        err?.code ? `Code: ${err.code}` : null,
+      ].filter((part) => typeof part === "string" && part.trim()).join(" · ");
+      setError(errorMessage || "Unable to save receipt.");
     } finally {
       setSaving(false);
     }
@@ -2279,6 +2376,8 @@ export default function ReceiptPage() {
 
   function resetPaymentFields() {
     setSelectedStudentId("");
+    setIncludeInventory(false);
+    setInventoryIssueLines([{ inventoryItemId: "", quantity: "1" }]);
     setSelectedBillId("");
     setFeeBills([]);
     setReceiptFeeItems([]);
@@ -2677,17 +2776,27 @@ export default function ReceiptPage() {
               Dashboard
             </Link>
 
-            <div className="text-sm font-semibold text-blue-600">
-              Accounting
+            <div className="flex flex-wrap items-end justify-between gap-4">
+              <div>
+                <div className="text-sm font-semibold text-blue-600">
+                  Accounting
+                </div>
+
+                <h1 className="mt-1 text-3xl font-bold text-slate-900">
+                  Receipt
+                </h1>
+
+                <p className="mt-1 text-sm text-slate-500">
+                  Create, view, edit, delete and print school receipts.
+                </p>
+              </div>
+              <Link
+                href="/dashboard/accounting/inventory"
+                className="inline-flex items-center rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-sm font-semibold text-emerald-800 hover:bg-emerald-100"
+              >
+                Inventory sale / issue receipt
+              </Link>
             </div>
-
-            <h1 className="mt-1 text-3xl font-bold text-slate-900">
-              Receipt
-            </h1>
-
-            <p className="mt-1 text-sm text-slate-500">
-              Create, view, edit, delete and print school receipts.
-            </p>
           </div>
         </div>
 
@@ -3047,7 +3156,7 @@ export default function ReceiptPage() {
                                   {getStudentName(
                                     student
                                   )}{" "}
-                                  â€”{" "}
+                                  -{" "}
                                   {
                                     student.admission_no
                                   }
@@ -3135,6 +3244,38 @@ export default function ReceiptPage() {
                         </Field>
                       </div>
 
+                      <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50/50 p-4">
+                        <label className="flex cursor-pointer items-start gap-3">
+                          <input type="checkbox" checked={includeInventory} disabled={!!editingId || !feeBills[0]} onChange={(event) => setIncludeInventory(event.target.checked)} className="mt-1 h-4 w-4 rounded border-slate-300 text-emerald-600 disabled:opacity-40" />
+                          <span>
+                            <span className="block text-sm font-bold text-slate-900">Add inventory items to this student’s bill</span>
+                            <span className="mt-1 block text-xs text-slate-600">Issued quantities reduce stock and add the school’s sale price to the student’s outstanding balance.{selectedStudentId && !feeBills[0] ? " A current fee bill is required." : ""}</span>
+                          </span>
+                        </label>
+                        {includeInventory && <div className="mt-4 space-y-3">
+                          {inventoryIssueLines.map((line, index) => {
+                            const item = inventoryItems.find((candidate) => candidate.id === line.inventoryItemId);
+                            return <div key={`inventory-${index}`} className="grid gap-3 md:grid-cols-[minmax(0,1fr)_150px_140px_auto] md:items-end">
+                              <Field label="Inventory Item">
+                                <select value={line.inventoryItemId} onChange={(event) => setInventoryIssueLines((current) => current.map((row, rowIndex) => rowIndex === index ? { ...row, inventoryItemId: event.target.value } : row))} className="input">
+                                  <option value="">Select item</option>
+                                  {inventoryItems.map((option) => <option key={option.id} value={option.id} disabled={inventoryIssueLines.some((row, rowIndex) => rowIndex !== index && row.inventoryItemId === option.id)}>{option.name}{option.size ? ` · ${option.size}` : ""} · stock {inventoryStock[option.id] || 0} {option.unit}</option>)}
+                                </select>
+                              </Field>
+                              <Field label="Quantity">
+                                <input type="number" min="0.001" step="0.001" max={item ? inventoryStock[item.id] || 0 : undefined} value={line.quantity} onChange={(event) => setInventoryIssueLines((current) => current.map((row, rowIndex) => rowIndex === index ? { ...row, quantity: event.target.value } : row))} className="input" />
+                              </Field>
+                              <Field label="Sale Price">
+                                <div className="input flex items-center bg-slate-50">{item ? money(Number(item.selling_price)) : "—"}</div>
+                              </Field>
+                              <button type="button" onClick={() => setInventoryIssueLines((current) => current.filter((_, rowIndex) => rowIndex !== index))} disabled={inventoryIssueLines.length <= 1} className="rounded-lg border border-red-200 px-3 py-2.5 text-xs font-semibold text-red-600 disabled:opacity-40">Remove</button>
+                            </div>;
+                          })}
+                          <button type="button" onClick={() => setInventoryIssueLines((current) => [...current, { inventoryItemId: "", quantity: "1" }])} className="rounded-lg border border-emerald-200 bg-white px-3 py-2 text-xs font-semibold text-emerald-700">+ Add inventory item</button>
+                          <button type="button" onClick={addInventoryToStudentBill} disabled={saving || !feeBills[0]} className="ml-2 rounded-lg bg-emerald-700 px-4 py-2 text-xs font-bold text-white disabled:opacity-50">{saving ? "Adding to bill…" : "Issue inventory & add optional fee"}</button>
+                        </div>}
+                      </div>
+
                       <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4">
                         <div className="flex items-start justify-between gap-3">
                           <div>
@@ -3161,7 +3302,7 @@ export default function ReceiptPage() {
                                     <option value="">Select Fee Category</option>
                                     {receiptFeeItems.map((feeItem) => (
                                       <option key={feeItem.id} value={feeItem.id} disabled={receiptPaymentLines.some((candidate, i) => i !== index && candidate.feeBillItemId === feeItem.id)}>
-                                        {feeItem.description} — Due {money(feeItem.balance)}
+                                        {feeItem.description}{feeItem.inventory_sale_id ? " · Optional Inventory" : ""} — Due {money(feeItem.balance)}
                                       </option>
                                     ))}
                                   </select>
@@ -3535,6 +3676,16 @@ export default function ReceiptPage() {
                       {historyCategories.map((category) => (
                         <option key={category} value={category}>{category}</option>
                       ))}
+                    </select>
+
+                    <select value={historyClassFilter} onChange={(event) => { setHistoryClassFilter(event.target.value); setHistorySectionFilter("all"); }} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
+                      <option value="all">All classes</option>
+                      {classes.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                    </select>
+
+                    <select value={historySectionFilter} onChange={(event) => setHistorySectionFilter(event.target.value)} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
+                      <option value="all">All sections</option>
+                      {historySections.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
                     </select>
 
                     <input

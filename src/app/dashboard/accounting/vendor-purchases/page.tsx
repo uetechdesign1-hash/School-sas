@@ -28,6 +28,7 @@ import {
 import jsPDF from "jspdf";
 import * as XLSX from "xlsx";
 import { createClient } from "@/lib/supabase/client";
+import InventoryClient from "../inventory/inventory-client";
 import Link from "next/link";
 import {
   deleteCanonicalJournalForSource,
@@ -49,6 +50,7 @@ import {
   applyStockMovements,
   InventoryError,
 } from "@/lib/inventory/valuation";
+import { createInventoryItem, type InventoryCategory } from "@/lib/inventory/inventory-items";
 import {
   errorText,
   missingColumn,
@@ -83,18 +85,21 @@ type BillItem = {
   id: string;
   bill_id: string;
   description: string | null;
+  size?: string | null;
+  unit?: string | null;
+  inventory_item_id?: string | null;
   expense_account_id: string | null;
   quantity: number;
   unit_price: number;
   amount: number;
-  inventory_item_id?: string | null;
 };
 
 type InventoryItem = {
   id: string;
   school_id: string;
   name: string;
-  category: "books" | "uniform" | "other";
+  size?: string | null;
+  category: InventoryCategory;
   unit: string;
   opening_quantity: number;
   opening_unit_cost: number;
@@ -154,6 +159,7 @@ type Account = {
   name: string;
   account_type: string;
   is_active: boolean;
+  is_system: boolean;
 };
 
 type BillView = Bill & {
@@ -176,6 +182,7 @@ type JournalLineView = {
 type LedgerRow = {
   date: string;
   particulars: string;
+  billNumber: string;
   kind: "purchase" | "payment" | "return" | "opening";
   purchase: number;
   payment: number;
@@ -189,11 +196,15 @@ type Tab =
   | "payments"
   | "returns"
   | "outstanding"
-  | "ledger";
+  | "ledger"
+  | "inventory";
 
 type LineDraft = {
   description: string;
-  accountId: string;
+  size: string;
+  unit: string;
+  customUnit: string;
+  category: InventoryCategory;
   qty: string;
   price: string;
   inventoryItemId: string;
@@ -261,6 +272,30 @@ const MONTH_NAMES = [
   "November",
   "December",
 ];
+
+const PURCHASE_UNITS = ["pcs", "nos", "set", "pair", "pack", "box", "carton", "bundle", "ream", "kg", "g", "L", "ml", "m", "cm", "ft", "inch", "roll", "bag", "bottle", "can", "dozen", "other"];
+
+function PurchaseUnitField({
+  value,
+  customValue,
+  onChange,
+  onCustomChange,
+}: {
+  value: string;
+  customValue: string;
+  onChange: (value: string) => void;
+  onCustomChange: (value: string) => void;
+}) {
+  const isCustom = !PURCHASE_UNITS.slice(0, -1).includes(value);
+  return (
+    <div className="flex min-w-40 flex-col gap-1.5">
+      <select value={isCustom ? "other" : value} onChange={(event) => onChange(event.target.value === "other" ? "other" : event.target.value)} className="input w-28">
+        {PURCHASE_UNITS.map((unit) => <option key={unit} value={unit}>{unit}</option>)}
+      </select>
+      {(value === "other" || isCustom) && <input value={customValue} onChange={(event) => onCustomChange(event.target.value)} className="input w-32" placeholder="Enter unit" />}
+    </div>
+  );
+}
 
 function monthKeyOf(value: string | null | undefined) {
   return String(value || "").slice(0, 7);
@@ -542,6 +577,7 @@ export default function VendorPurchasesPage() {
   const [viewBill, setViewBill] = useState<BillView | null>(null);
   const [viewJournal, setViewJournal] = useState<JournalLineView[]>([]);
   const [viewLoading, setViewLoading] = useState(false);
+  const [viewItemsLoading, setViewItemsLoading] = useState(false);
 
   const [detailVendor, setDetailVendor] = useState<Vendor | null>(null);
 
@@ -558,10 +594,6 @@ export default function VendorPurchasesPage() {
   const [billPurchaseType, setBillPurchaseType] = useState<
     "inventory" | "expense" | "service"
   >("expense");
-  const [inventoryCategory, setInventoryCategory] = useState<
-    "books" | "uniform" | "other"
-  >("books");
-
   const [showReturnModal, setShowReturnModal] = useState(false);
   const [returnBill, setReturnBill] = useState<BillView | null>(null);
   const [returnNumber, setReturnNumber] = useState("");
@@ -685,7 +717,7 @@ export default function VendorPurchasesPage() {
 
       supabase
         .from("accounts")
-        .select("id,school_id,code,name,account_type,is_active")
+        .select("id,school_id,code,name,account_type,is_active,is_system")
         .eq("school_id", id)
         .eq("is_active", true)
         .order("name"),
@@ -779,11 +811,7 @@ export default function VendorPurchasesPage() {
 
   const expenseAccounts = useMemo(
     () =>
-      accounts.filter(
-        (a) =>
-          a.account_type === "expense" ||
-          a.account_type === "EXPENSE",
-      ),
+      accounts.filter((account) => account.account_type.toLowerCase() === "expense"),
     [accounts],
   );
 
@@ -1204,6 +1232,7 @@ export default function VendorPurchasesPage() {
       rows.push({
         date: "",
         particulars: "Opening balance brought forward",
+        billNumber: "",
         kind: "opening",
         purchase: 0,
         payment: 0,
@@ -1219,6 +1248,7 @@ export default function VendorPurchasesPage() {
         particulars: bill.bill_number
           ? `Purchase bill ${bill.bill_number}`
           : "Purchase bill",
+        billNumber: bill.bill_number || "",
         kind: "purchase",
         purchase: Number(bill.total_amount || 0),
         payment: 0,
@@ -1238,6 +1268,7 @@ export default function VendorPurchasesPage() {
         particulars: payment.reference_number
           ? `Payment (Ref: ${payment.reference_number})`
           : "Payment",
+        billNumber: "",
         kind: "payment",
         purchase: 0,
         payment: Number(payment.amount || 0),
@@ -1253,6 +1284,7 @@ export default function VendorPurchasesPage() {
 
       rows.push({
         date: ret.return_date,
+        billNumber: billNumber || "",
         particulars: [
           ret.return_number ? `Purchase return ${ret.return_number}` : "Purchase return",
           billNumber ? `bill ${billNumber}` : null,
@@ -1510,22 +1542,27 @@ export default function VendorPurchasesPage() {
     setBillDate(bill.bill_date);
     setDueDate(bill.due_date || "");
     setBillNotes(bill.notes || "");
-    setBillPurchaseType((bill as any).purchase_type || "expense");
+    setBillPurchaseType(bill.purchase_type === "inventory" || bill.purchase_type === "service" ? bill.purchase_type : "expense");
 
     setLines(
       bill.items.length > 0
-        ? bill.items.map((item) => ({
+          ? bill.items.map((item) => ({
             description: item.description || "",
-            accountId: item.expense_account_id || "",
+            size: item.size || "",
+            unit: item.unit && PURCHASE_UNITS.slice(0, -1).includes(item.unit) ? item.unit : "other",
+            customUnit: item.unit && item.unit !== "other" && !PURCHASE_UNITS.slice(0, -1).includes(item.unit) ? item.unit : "",
+            category: inventoryItems.find((inv) => inv.id === item.inventory_item_id)?.category || "other",
             qty: String(Number(item.quantity || 1)),
             price: String(Number(item.unit_price || 0)),
-            inventoryItemId:
-              (item as any).inventory_item_id || "",
+            inventoryItemId: item.inventory_item_id || "",
           }))
         : [
             {
               description: "",
-              accountId: expenseAccounts[0]?.id || "",
+              size: "",
+              unit: "pcs",
+              customUnit: "",
+              category: "other",
               qty: "1",
               price: "",
               inventoryItemId: "",
@@ -1540,18 +1577,19 @@ export default function VendorPurchasesPage() {
 
   function openBillModal() {
     resetBillForm();
+    setError("");
+    setSuccess("");
 
-    if (expenseAccounts.length > 0) {
-      setLines([
-        {
-          description: "",
-          accountId: expenseAccounts[0].id,
-          qty: "1",
-          price: "",
-          inventoryItemId: "",
-        },
-      ]);
-    }
+    setLines([{
+      description: "",
+      size: "",
+      unit: "pcs",
+      customUnit: "",
+      category: "other",
+      qty: "1",
+      price: "",
+      inventoryItemId: "",
+    }]);
 
     setShowBillModal(true);
   }
@@ -1561,7 +1599,10 @@ export default function VendorPurchasesPage() {
       ...prev,
       {
         description: "",
-        accountId: expenseAccounts[0]?.id || "",
+        size: "",
+        unit: "pcs",
+        customUnit: "",
+        category: "other",
         qty: "1",
         price: "",
         inventoryItemId: "",
@@ -1601,7 +1642,11 @@ export default function VendorPurchasesPage() {
       const cleanLines = lines
         .map((line) => ({
           description: line.description.trim(),
-          accountId: line.accountId,
+          size: line.size.trim(),
+          unit: (line.unit === "other" ? line.customUnit.trim() : line.unit.trim()) || "pcs",
+          unitChoice: line.unit,
+          customUnit: line.customUnit.trim(),
+          category: line.category,
           inventoryItemId: line.inventoryItemId,
           qty: Number(line.qty || 0),
           price: Number(line.price || 0),
@@ -1618,6 +1663,9 @@ export default function VendorPurchasesPage() {
       }
 
       for (const line of cleanLines) {
+        if (line.unitChoice === "other" && !line.customUnit) {
+          throw new Error("Enter the custom unit when choosing Other.");
+        }
         if (!(line.qty > 0)) {
           throw new Error(
             "Quantity must be greater than zero on every line item.",
@@ -1630,17 +1678,9 @@ export default function VendorPurchasesPage() {
           );
         }
 
-        if (isInventoryBill && !line.inventoryItemId) {
-          throw new Error(
-            "Select an inventory item for every line on an inventory (resale) purchase.",
-          );
-        }
+        if (isInventoryBill && !line.description) throw new Error("Enter an item name for every inventory line.");
 
-        if (!line.accountId && !isInventoryBill) {
-          throw new Error(
-            "Select an expense account for every line item.",
-          );
-        }
+        if (!line.description) throw new Error("Enter an item or service description for every line.");
       }
 
       const total = round2(
@@ -1679,14 +1719,117 @@ export default function VendorPurchasesPage() {
             `Bill total cannot be less than the ${money(editingBill.paid)} already paid against it.`,
           );
         }
+
+        if (editingBill.purchase_type === "inventory") {
+          const hasPurchaseReturns = purchaseReturns.some((purchaseReturn) => purchaseReturn.bill_id === editingBill.id);
+          if (hasPurchaseReturns) throw new Error("This inventory bill has purchase returns. Delete or correct those returns before editing the bill.");
+
+          const oldItemIds = [...new Set(editingBill.items.map((item) => item.inventory_item_id).filter((id): id is string => Boolean(id)))];
+          if (oldItemIds.length) {
+            const { data: movements, error: movementError } = await supabase
+              .from("inventory_stock_movements")
+              .select("inventory_item_id, movement_date, created_at, ref_table, ref_id")
+              .eq("school_id", schoolId)
+              .in("inventory_item_id", oldItemIds)
+              .order("movement_date", { ascending: true })
+              .order("created_at", { ascending: true });
+            if (movementError) throw movementError;
+
+            const ownMovementByItem = new Map<string, { movement_date: string; created_at: string }>();
+            for (const movement of movements || []) {
+              if (movement.ref_table === "purchase_bills" && movement.ref_id === editingBill.id) ownMovementByItem.set(movement.inventory_item_id, movement);
+            }
+            const hasLaterStockActivity = (movements || []).some((movement) => {
+              if (movement.ref_table === "purchase_bills" && movement.ref_id === editingBill.id) return false;
+              const ownMovement = ownMovementByItem.get(movement.inventory_item_id);
+              if (!ownMovement) return true;
+              return movement.movement_date > ownMovement.movement_date ||
+                (movement.movement_date === ownMovement.movement_date && movement.created_at > ownMovement.created_at);
+            });
+            if (hasLaterStockActivity) {
+              throw new Error("This item has later stock activity. To protect weighted-average cost and sales already posted, record a return and a corrected purchase instead of editing this bill.");
+            }
+          }
+        }
       }
 
       const user =
         (await supabase.auth.getUser()).data.user?.id || null;
+      const setup = await ensureSchoolAccountingSetup(supabase, schoolId);
+      const purchaseDebitAccountId = isInventoryBill
+        ? ""
+        : setup.accountMap[billPurchaseType === "service" ? "SERVICE_EXPENSE" : "PURCHASE_EXPENSE"] || "";
+      if (!isInventoryBill && !purchaseDebitAccountId) {
+        throw new Error(`The ${billPurchaseType === "service" ? "Service Expense" : "Purchase / Consumption Expense"} account is missing. Run accounting setup and retry.`);
+      }
+
+      // Resale products can be entered directly on this bill. Reuse an
+      // existing name + variant or create the stock item the first time it is
+      // purchased, so the bill always posts into the inventory ledger.
+      if (isInventoryBill) {
+        const itemIdByVariant = new Map<string, string>();
+        for (const line of cleanLines) {
+          const variantKey = `${line.description.trim().toLowerCase()}\u0000${line.unit.toLowerCase()}\u0000${line.size.trim().toLowerCase()}\u0000${line.category}`;
+          const alreadyResolved = itemIdByVariant.get(variantKey);
+          if (alreadyResolved) {
+            line.inventoryItemId = alreadyResolved;
+            continue;
+          }
+          const match = inventoryItems.find((item) =>
+            item.is_active && item.name.trim().toLowerCase() === line.description.toLowerCase() &&
+            item.unit.trim().toLowerCase() === line.unit.toLowerCase() &&
+            (item.size || "").trim().toLowerCase() === line.size.toLowerCase() &&
+            item.category === line.category);
+          const itemId = match?.id || await createInventoryItem(supabase, {
+              schoolId,
+              name: line.description,
+              size: line.size || null,
+              sellingPrice: 0,
+              category: line.category,
+              unit: line.unit,
+              openingQuantity: 0,
+              openingUnitCost: 0,
+              notes: null,
+              createdBy: user,
+            });
+          line.inventoryItemId = itemId;
+          itemIdByVariant.set(variantKey, itemId);
+        }
+      }
+
+      if (isInventoryBill) {
+        const itemIds = [...new Set(cleanLines.map((line) => line.inventoryItemId).filter(Boolean))];
+        if (itemIds.length) {
+          const { data: latestRows, error: latestError } = await supabase
+            .from("inventory_stock_movements")
+            .select("inventory_item_id, movement_date, ref_table, ref_id")
+            .eq("school_id", schoolId)
+            .in("inventory_item_id", itemIds)
+            .order("movement_date", { ascending: false });
+          if (latestError) throw latestError;
+          const latestByItem = new Map<string, string>();
+          for (const row of latestRows || []) {
+            if (editingBill && row.ref_table === "purchase_bills" && row.ref_id === editingBill.id) continue;
+            if (!latestByItem.has(row.inventory_item_id)) latestByItem.set(row.inventory_item_id, row.movement_date);
+          }
+          const backdatedItem = itemIds.find((id) => (latestByItem.get(id) || "") > billDate);
+          if (backdatedItem) throw new Error("Inventory purchases cannot be dated before a later stock movement. This keeps weighted-average cost and stock history accurate.");
+        }
+      }
 
       let billId = editingBill?.id || "";
 
       if (editingBill) {
+        // Remove the old inbound movements before changing the bill rows.
+        // Earlier validation rejects edits once later stock activity exists.
+        const { error: clearStockError } = await supabase
+          .from("inventory_stock_movements")
+          .delete()
+          .eq("school_id", schoolId)
+          .eq("ref_table", "purchase_bills")
+          .eq("ref_id", editingBill.id);
+        if (clearStockError) throw clearStockError;
+
         const { error: updateError } = await supabase
           .from("purchase_bills")
           .update({
@@ -1714,13 +1857,14 @@ export default function VendorPurchasesPage() {
         }
 
         // Replace the line items with the corrected set.
-        const { error: clearItemsError } = await supabase
+      const { error: clearItemsError } = await supabase
           .from("purchase_bill_items")
           .delete()
           .eq("bill_id", editingBill.id)
           .eq("school_id", schoolId);
 
-        if (clearItemsError) throw clearItemsError;
+      if (clearItemsError) throw clearItemsError;
+
       } else {
         const { data: bill, error: billError } = await supabase
           .from("purchase_bills")
@@ -1770,7 +1914,11 @@ export default function VendorPurchasesPage() {
             school_id: schoolId,
             bill_id: billId,
             description: line.description || null,
-            expense_account_id: line.accountId || null,
+            size: line.size || null,
+            // Keep the legacy field populated for older return/accounting
+            // paths. New bills use a purchase-type system account below.
+            expense_account_id: purchaseDebitAccountId || null,
+            unit: line.unit,
             inventory_item_id: line.inventoryItemId || null,
             quantity: line.qty,
             unit_price: line.price,
@@ -1779,7 +1927,22 @@ export default function VendorPurchasesPage() {
           })),
         );
 
-      if (itemsError) throw itemsError;
+      if (itemsError) {
+        // The bill header is inserted before its detail rows. If those rows
+        // fail (for example, because a schema migration is missing), remove
+        // the new empty header so retrying the same vendor invoice is safe.
+        if (!editingBill) {
+          const { error: cleanupError } = await supabase
+            .from("purchase_bills")
+            .delete()
+            .eq("id", billId)
+            .eq("school_id", schoolId);
+          if (cleanupError) {
+            throw new Error(`${errorText(itemsError, "Unable to save purchase items.")} The incomplete bill could not be cleaned up: ${errorText(cleanupError, "cleanup failed")}`);
+          }
+        }
+        throw itemsError;
+      }
 
       // Inventory (resale) purchases move stock in at cost; the stock ledger
       // entry is recorded before posting so a failed insert blocks the journal.
@@ -1814,23 +1977,6 @@ export default function VendorPurchasesPage() {
           sourceTable: "purchase_bills",
           journalEntryIds: [editingBill.journal_entry_id],
         });
-      }
-
-      const setup = await ensureSchoolAccountingSetup(
-        supabase,
-        schoolId,
-      );
-
-      const grouped = new Map<string, number>();
-
-      for (const line of cleanLines) {
-        grouped.set(
-          line.accountId,
-          round2(
-            (grouped.get(line.accountId) || 0) +
-              round2(line.qty * line.price),
-          ),
-        );
       }
 
       // Inventory purchases debit the category inventory asset accounts;
@@ -1917,13 +2063,11 @@ export default function VendorPurchasesPage() {
         sourceRecordId: billId,
         vendorPayablesAccountId,
         totalAmount: total,
-        expenseLines: [...grouped].map(
-          ([accountId, amount]) => ({
-            accountId,
-            amount,
-            description: `Purchase - ${vendorNameText}`,
-          }),
-        ),
+        expenseLines: isInventoryBill ? [] : [{
+          accountId: purchaseDebitAccountId,
+          amount: total,
+          description: billPurchaseType === "service" ? `Service purchase - ${vendorNameText}` : `Purchase / consumption - ${vendorNameText}`,
+        }],
         ...(isInventoryBill
           ? { debitLines: debitLinesForJournal }
           : {}),
@@ -1953,8 +2097,23 @@ export default function VendorPurchasesPage() {
       );
       await loadData(schoolId);
     } catch (e: any) {
-      console.error(e);
-      setError(e?.message || "Unable to create purchase bill.");
+      // Next's dev console interceptor turns console.error into a red runtime
+      // overlay, which hides the purchase form's own error message. Surface
+      // the database/client details in the form instead.
+      const column = missingColumn(e);
+      const message = errorText(e, "Unable to create purchase bill.");
+      if (column === "size") {
+        const migration = /purchase_bill_items/i.test(message)
+          ? "supabase/migrations/20261006100000_purchase_bill_item_size.sql"
+          : "supabase/migrations/20261005160000_inventory_item_sizes.sql";
+        setError(`${message} Apply ${migration} in Supabase, then retry.`);
+      } else if (column === "unit") {
+        setError(`${message} Apply supabase/migrations/20261006110000_universal_purchase_units_and_inventory_categories.sql in Supabase, then retry.`);
+      } else if (column === "selling_price") {
+        setError(`${message} Apply the inventory selling price migration in Supabase, then retry.`);
+      } else {
+        setError(message);
+      }
     } finally {
       setSavingBill(false);
     }
@@ -2412,6 +2571,43 @@ export default function VendorPurchasesPage() {
         );
       }
 
+      if (deleteBillTarget.purchase_type === "inventory") {
+        if (purchaseReturns.some((row) => row.bill_id === deleteBillTarget.id)) {
+          throw new Error("Delete this bill's purchase returns before deleting the bill.");
+        }
+        const itemIds = [...new Set(deleteBillTarget.items.map((item) => item.inventory_item_id).filter((id): id is string => Boolean(id)))];
+        if (itemIds.length) {
+          const { data: movements, error: movementError } = await supabase
+            .from("inventory_stock_movements")
+            .select("inventory_item_id, movement_date, created_at, ref_table, ref_id")
+            .eq("school_id", schoolId)
+            .in("inventory_item_id", itemIds)
+            .order("movement_date", { ascending: true })
+            .order("created_at", { ascending: true });
+          if (movementError) throw movementError;
+          const ownByItem = new Map<string, { movement_date: string; created_at: string }>();
+          for (const movement of movements || []) {
+            if (movement.ref_table === "purchase_bills" && movement.ref_id === deleteBillTarget.id) {
+              ownByItem.set(movement.inventory_item_id, movement);
+            }
+          }
+          const laterActivity = (movements || []).some((movement) => {
+            if (movement.ref_table === "purchase_bills" && movement.ref_id === deleteBillTarget.id) return false;
+            const own = ownByItem.get(movement.inventory_item_id);
+            return !own || movement.movement_date > own.movement_date ||
+              (movement.movement_date === own.movement_date && movement.created_at > own.created_at);
+          });
+          if (laterActivity) throw new Error("This inventory has later stock activity. Delete or correct downstream activity before deleting this purchase bill.");
+        }
+        const { error: movementDeleteError } = await supabase
+          .from("inventory_stock_movements")
+          .delete()
+          .eq("school_id", schoolId)
+          .eq("ref_table", "purchase_bills")
+          .eq("ref_id", deleteBillTarget.id);
+        if (movementDeleteError) throw movementDeleteError;
+      }
+
       if (deleteBillTarget.journal_entry_id) {
         await deleteCanonicalJournalForSource(supabase, {
           schoolId,
@@ -2484,42 +2680,74 @@ export default function VendorPurchasesPage() {
   async function openBillView(bill: BillView) {
     setViewBill(bill);
     setViewJournal([]);
-
-    if (!bill.journal_entry_id || !schoolId) return;
+    if (!schoolId) return;
 
     try {
-      setViewLoading(true);
+      setViewItemsLoading(true);
+      const { data: itemRows, error: itemError } = await supabase
+        .from("purchase_bill_items")
+        .select("*")
+        .eq("school_id", schoolId)
+        .eq("bill_id", bill.id)
+        .order("line_order", { ascending: true });
+      if (itemError) throw itemError;
 
+      let billItems = (itemRows || []) as BillItem[];
+      // Older/partially migrated bills may have stock ledger entries even
+      // when their purchase_bill_items rows are missing. Use those records
+      // to show the purchased inventory details in the bill view.
+      if (billItems.length === 0) {
+        const { data: movements, error: movementError } = await supabase
+          .from("inventory_stock_movements")
+          .select("id,inventory_item_id,quantity,unit_cost,total_cost,notes,item:inventory_items(name,size,unit)")
+          .eq("school_id", schoolId)
+          .eq("ref_table", "purchase_bills")
+          .eq("ref_id", bill.id)
+          .eq("movement_type", "purchase");
+        if (movementError) throw movementError;
+        billItems = (movements || []).map((row: any) => {
+          const item = row.item && typeof row.item === "object" ? row.item : null;
+          return {
+            id: row.id,
+            bill_id: bill.id,
+            description: item?.name || row.notes || "Inventory item",
+            size: item?.size || null,
+            unit: item?.unit || "pcs",
+            inventory_item_id: row.inventory_item_id,
+            expense_account_id: null,
+            quantity: Number(row.quantity || 0),
+            unit_price: Number(row.unit_cost || 0),
+            amount: Number(row.total_cost || 0),
+          };
+        });
+      }
+      setViewBill({ ...bill, items: billItems });
+    } catch (e: any) {
+      setError(e?.message || "Unable to load purchase bill items.");
+    } finally {
+      setViewItemsLoading(false);
+    }
+
+    if (!bill.journal_entry_id) return;
+    try {
+      setViewLoading(true);
       const { data, error } = await supabase
         .from("journal_lines")
-        .select(
-          "id,debit,credit,description,account:accounts(name)",
-        )
+        .select("id,debit,credit,description,account:accounts(name)")
         .eq("journal_entry_id", bill.journal_entry_id)
         .eq("school_id", schoolId)
         .order("debit", { ascending: false });
-
       if (error) throw error;
-
-      // The accounts(name) embed yields { account: { name } }, so flatten it
-      // to a plain string; rendering the object directly would crash React
-      // with "Objects are not valid as a React child".
-      setViewJournal(
-        (data || []).map((row: any) => ({
-          id: row.id,
-          debit: row.debit,
-          credit: row.credit,
-          description: row.description,
-          account_name:
-            (row.account &&
-            typeof row.account === "object"
-              ? (row.account as { name?: string | null }).name
-              : (row.account as string | null)) ??
-            null,
-        })),
-      );
+      setViewJournal((data || []).map((row: any) => ({
+        id: row.id,
+        debit: row.debit,
+        credit: row.credit,
+        description: row.description,
+        account_name: (row.account && typeof row.account === "object"
+          ? row.account.name
+          : row.account) ?? null,
+      })));
     } catch (e: any) {
-      console.error(e);
       setError(e?.message || "Unable to load accounting entry.");
     } finally {
       setViewLoading(false);
@@ -2669,22 +2897,22 @@ export default function VendorPurchasesPage() {
         columns: [
           { label: "Date" },
           { label: "Particulars" },
-          { label: "Type" },
-          { label: "Purchase", numeric: true },
-          { label: "Payment", numeric: true },
+          { label: "Bill No." },
+          { label: "Debit", numeric: true },
+          { label: "Credit", numeric: true },
           { label: "Balance", numeric: true },
         ] as ExportColumn[],
         rows: ledgerRows.map((row) => [
           row.date,
           row.particulars,
-          row.kind === "purchase"
-            ? "Purchase"
-            : row.kind === "payment"
-              ? "Payment"
-              : "Opening",
-          row.purchase ? money(row.purchase) : "-",
-          row.payment ? money(row.payment) : "-",
-          money(row.balance),
+          row.billNumber,
+          row.kind === "opening"
+            ? (row.balance < 0 ? money(Math.abs(row.balance)) : "-")
+            : (row.payment + row.returnAmount ? money(row.payment + row.returnAmount) : "-"),
+          row.kind === "opening"
+            ? (row.balance > 0 ? money(row.balance) : "-")
+            : (row.purchase ? money(row.purchase) : "-"),
+          `${money(Math.abs(row.balance))} ${row.balance < 0 ? "Dr" : "Cr"}`,
         ]),
       } as ExportTable,
     };
@@ -2740,6 +2968,7 @@ export default function VendorPurchasesPage() {
     { key: "returns", label: "Purchase Returns", icon: <Receipt size={15} /> },
     { key: "vendors", label: "Vendors", icon: <Users size={15} /> },
     { key: "ledger", label: "Vendor Ledger", icon: <Landmark size={15} /> },
+    { key: "inventory", label: "Inventory & Sale Prices", icon: <Truck size={15} /> },
   ];
 
   return (
@@ -2950,6 +3179,12 @@ export default function VendorPurchasesPage() {
               </button>
             </div>
           </div>
+
+          {tab === "inventory" && (
+            <div className="mt-5 rounded-xl border bg-white p-2">
+              <InventoryClient />
+            </div>
+          )}
         </div>
       </div>
 
@@ -3649,7 +3884,7 @@ filteredReturns.map((ret) => {
                 <table className="min-w-[900px] w-full">
                   <thead className="bg-slate-50">
                     <tr className="border-b">
-                      {["Date", "Particulars", "Type", "Purchase", "Payment", "Return", "Balance"].map(
+                      {["Date", "Particulars", "Bill No.", "Debit", "Credit", "Balance"].map(
                         (h) => (
                           <th
                             key={h}
@@ -3665,7 +3900,7 @@ filteredReturns.map((ret) => {
                   <tbody>
                     {ledgerRows.length === 0 ? (
                       <tr>
-                        <td colSpan={7} className="px-5 py-12 text-center text-sm text-slate-400">
+                        <td colSpan={6} className="px-5 py-12 text-center text-sm text-slate-400">
                           No purchases, payments or returns recorded for this vendor yet.
                         </td>
                       </tr>
@@ -3680,42 +3915,12 @@ filteredReturns.map((ret) => {
                             {row.particulars}
                           </td>
 
-                          <td className="px-5 py-4">
-                            <span
-                              className={`inline-flex rounded-full px-2.5 py-1 text-xs font-bold ${
-                                row.kind === "purchase"
-                                  ? "bg-blue-50 text-blue-700"
-                                  : row.kind === "payment"
-                                    ? "bg-emerald-50 text-emerald-700"
-                                    : row.kind === "return"
-                                      ? "bg-amber-50 text-amber-700"
-                                      : "bg-slate-100 text-slate-600"
-                              }`}
-                            >
-                              {row.kind === "purchase"
-                                ? "Purchase"
-                                : row.kind === "payment"
-                                  ? "Payment"
-                                  : row.kind === "return"
-                                    ? "Return"
-                                    : "Opening"}
-                            </span>
-                          </td>
-
-                          <td className="px-5 py-4 text-sm text-blue-700">
-                            {row.purchase ? money(row.purchase) : "-"}
-                          </td>
-
-                          <td className="px-5 py-4 text-sm text-emerald-600">
-                            {row.payment ? money(row.payment) : "-"}
-                          </td>
-
-                          <td className="px-5 py-4 text-sm text-amber-700">
-                            {row.returnAmount ? money(row.returnAmount) : "-"}
-                          </td>
+                          <td className="px-5 py-4 text-sm text-slate-600">{row.billNumber || "-"}</td>
+                          <td className="px-5 py-4 text-sm text-emerald-700">{row.kind === "opening" ? (row.balance < 0 ? money(Math.abs(row.balance)) : "-") : (row.payment + row.returnAmount ? money(row.payment + row.returnAmount) : "-")}</td>
+                          <td className="px-5 py-4 text-sm text-blue-700">{row.kind === "opening" ? (row.balance > 0 ? money(row.balance) : "-") : (row.purchase ? money(row.purchase) : "-")}</td>
 
                           <td className="px-5 py-4 text-sm font-bold text-slate-900">
-                            {money(row.balance)}
+                            {money(Math.abs(row.balance))} {row.balance < 0 ? "Dr" : "Cr"}
                           </td>
                         </tr>
                       ))
@@ -4490,6 +4695,12 @@ filteredReturns.map((ret) => {
           title={editingBill ? "Edit Purchase Bill" : "Create Purchase Bill"}
           onClose={() => !savingBill && setShowBillModal(false)}
         >
+          {error && (
+            <div className="mb-4 flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+              <AlertCircle size={17} className="mt-0.5 shrink-0" />
+              <span>{error}</span>
+            </div>
+          )}
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Vendor *">
               <select
@@ -4554,16 +4765,19 @@ filteredReturns.map((ret) => {
 
             <div className="sm:col-span-2 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">
               {billPurchaseType === "inventory"
-                ? "Inventory purchases are booked as an asset (Dr Inventory / Cr Vendor Payables). They do NOT appear as an operating expense until the items are sold."
-                : "Expense and service purchases are booked directly as operating expenses (Dr Expense / Cr Vendor Payables)."}
+                ? "Choose Inventory / Resale for products to sell or issue from stock. Enter a size, pack, colour, or any other variant when needed."
+                : billPurchaseType === "service"
+                  ? "Choose Service for repairs, work, transport, consulting, or other services. No stock is created."
+                  : "Choose Expense / Consumption for supplies used by the school. No stock is created."}
             </div>
           </div>
 
           <div className="mt-5">
             <div className="mb-2 flex items-center justify-between">
-              <label className="text-xs font-bold uppercase tracking-wide text-slate-500">
-                Line Items
-              </label>
+              <div>
+                <label className="text-xs font-bold uppercase tracking-wide text-slate-500">Line Items</label>
+                <p className="mt-1 text-xs text-slate-500">Enter item name, quantity, any size or variant, and unit price.</p>
+              </div>
 
               <button
                 onClick={addLine}
@@ -4581,141 +4795,40 @@ filteredReturns.map((ret) => {
             ) : (
               <div className="space-y-3">
                 {lines.map((line, index) => (
-                  <div
-                    key={index}
-                    className="rounded-xl border bg-slate-50 p-3"
-                  >
-                    <div className="grid gap-3 sm:grid-cols-12">
-                      <div className="sm:col-span-5">
-                        <Field label="Description">
-                          <input
-                            value={line.description}
-                            onChange={(e) =>
-                              updateLine(index, {
-                                description: e.target.value,
-                              })
-                            }
-                            placeholder="Item description"
-                            className="input"
-                          />
-                        </Field>
+                  <div key={index} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                    <div className="flex items-start gap-3">
+                      <div className="min-w-0 flex-1">
+                        <label className="mb-1.5 block text-xs font-semibold text-slate-600">{billPurchaseType === "service" ? "Service description" : "Item name"}</label>
+                        <input list="purchase-item-names" value={line.description} onChange={(e) => {
+                          const value = e.target.value;
+                          const match = inventoryItems.find((item) => item.is_active && item.name.toLowerCase() === value.trim().toLowerCase());
+                          updateLine(index, { description: value, inventoryItemId: match?.id || "", ...(match ? { category: match.category, size: match.size || "", unit: match.unit || line.unit } : {}) });
+                        }} placeholder="Enter item name" className="input" />
+                        {isInventoryBillType && <div className="mt-1 text-[11px] text-slate-500">New items are added to stock when saved.</div>}
                       </div>
-
-                      {isInventoryBillType ? (
-                        <div className="sm:col-span-3">
-                          <Field label="Inventory Item">
-                            <select
-                              value={line.inventoryItemId}
-                              onChange={(e) =>
-                                updateLine(index, {
-                                  inventoryItemId: e.target.value,
-                                })
-                              }
-                              className="input"
-                            >
-                              <option value="">Select item...</option>
-
-                              {inventoryItems.map((item) => (
-                                <option key={item.id} value={item.id}>
-                                  {item.name} ({item.category})
-                                </option>
-                              ))}
-                            </select>
-                          </Field>
-                        </div>
-                      ) : (
-                        <div className="sm:col-span-3">
-                          <Field label="Expense Account">
-                            <select
-                              value={line.accountId}
-                              onChange={(e) =>
-                                updateLine(index, {
-                                  accountId: e.target.value,
-                                })
-                              }
-                              className="input"
-                            >
-                              <option value="">Select...</option>
-
-                              {expenseAccounts.map((account) => (
-                                <option
-                                  key={account.id}
-                                  value={account.id}
-                                >
-                                  {account.code
-                                    ? `${account.code} - `
-                                    : ""}
-                                  {account.name}
-                                </option>
-                              ))}
-                            </select>
-                          </Field>
-                        </div>
-                      )}
-
-                      <div className="sm:col-span-1">
-                        <Field label="Qty">
-                          <input
-                            type="number"
-                            min="0"
-                            step="0.001"
-                            value={line.qty}
-                            onChange={(e) =>
-                              updateLine(index, {
-                                qty: e.target.value,
-                              })
-                            }
-                            className="input"
-                          />
-                        </Field>
-                      </div>
-
-                      <div className="sm:col-span-2">
-                        <Field label="Unit Price">
-                          <input
-                            type="number"
-                            min="0"
-                            step="0.01"
-                            value={line.price}
-                            onChange={(e) =>
-                              updateLine(index, {
-                                price: e.target.value,
-                              })
-                            }
-                            className="input"
-                          />
-                        </Field>
-                      </div>
-
-                      <div className="flex items-end justify-between gap-2 sm:col-span-1">
-                        <div className="text-sm font-bold text-slate-800">
-                          {money(
-                            Number(line.qty || 0) *
-                              Number(line.price || 0),
-                          )}
-                        </div>
-
-                        <button
-                          onClick={() => removeLine(index)}
-                          className="rounded-lg p-1.5 text-red-500 hover:bg-red-50"
-                        >
-                          <Trash2 size={15} />
-                        </button>
-                      </div>
+                      <button type="button" onClick={() => removeLine(index)} className="mt-6 rounded-lg border border-red-100 p-2 text-red-600 hover:bg-red-50" aria-label="Remove item"><Trash2 size={16} /></button>
+                    </div>
+                    <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+                      <div><label className="mb-1.5 block text-xs font-semibold text-slate-600">Quantity</label><input type="number" min="0.001" step="0.001" value={line.qty} onChange={(e) => updateLine(index, { qty: e.target.value })} className="input text-right font-semibold tabular-nums" /></div>
+                      <div><label className="mb-1.5 block text-xs font-semibold text-slate-600">Unit</label><PurchaseUnitField value={line.unit} customValue={line.customUnit} onChange={(value) => updateLine(index, { unit: value, inventoryItemId: "" })} onCustomChange={(customUnit) => updateLine(index, { customUnit, inventoryItemId: "" })} /></div>
+                      <div><label className="mb-1.5 block text-xs font-semibold text-slate-600">Size / Variant</label><input list="purchase-item-sizes" value={line.size} onChange={(e) => updateLine(index, { size: e.target.value, inventoryItemId: "" })} placeholder="Optional" className="input" /></div>
+                      <div><label className="mb-1.5 block text-xs font-semibold text-slate-600">Purchase Rate</label><input type="number" min="0" step="0.01" value={line.price} onChange={(e) => updateLine(index, { price: e.target.value })} placeholder="0.00" className="input text-right font-semibold tabular-nums" /></div>
+                      {isInventoryBillType && <div><label className="mb-1.5 block text-xs font-semibold text-slate-600">Category</label><select value={line.category} onChange={(e) => updateLine(index, { category: e.target.value as InventoryCategory, inventoryItemId: "" })} className="input"><option value="books">Books</option><option value="uniform">Uniform</option><option value="stationery">Stationery</option><option value="id_cards">ID Cards</option><option value="bags">Bags</option><option value="shoes">Shoes</option><option value="other">Other resale</option></select></div>}
+                    </div>
+                    <div className="mt-3 flex items-center justify-between rounded-lg bg-blue-50 px-3 py-2.5">
+                      <span className="text-xs font-semibold uppercase tracking-wide text-blue-800">Line amount <span className="normal-case font-normal text-blue-700">({Number(line.qty || 0)} × {money(Number(line.price || 0))})</span></span>
+                      <span className="text-base font-bold tabular-nums text-blue-900">{money(Number(line.qty || 0) * Number(line.price || 0))}</span>
                     </div>
                   </div>
                 ))}
+                <datalist id="purchase-item-names">{inventoryItems.filter((item) => item.is_active).map((item) => <option key={item.id} value={item.name} />)}</datalist>
+                <datalist id="purchase-item-sizes">{Array.from(new Set(inventoryItems.map((item) => item.size).filter((size): size is string => Boolean(size)))).map((size) => <option key={size} value={size} />)}</datalist>
               </div>
             )}
 
             <div className="mt-3 flex items-center justify-between rounded-xl bg-slate-900 px-4 py-3 text-white">
-              <span className="text-sm font-semibold">
-                Bill Total
-              </span>
-
-              <span className="text-lg font-bold">
-                {money(billTotal)}
-              </span>
+              <div><div className="text-xs text-slate-300">Subtotal</div><div className="text-sm font-semibold">{money(billTotal)}</div></div>
+              <div className="text-right"><div className="text-xs text-slate-300">Bill Total</div><div className="text-lg font-bold">{money(billTotal)}</div></div>
             </div>
           </div>
 
@@ -4730,10 +4843,13 @@ filteredReturns.map((ret) => {
             </Field>
           </div>
 
-          <div className="mt-4 rounded-xl bg-emerald-50 p-3 text-xs text-emerald-700">
-            {editingBill
-              ? `On save: the existing accounting entry is removed and re-posted as ${isInventoryBillType ? "Dr Inventory" : "Dr Expense"} accounts / Cr Vendor Payables for ${money(billTotal)}.`
-              : `On save: ${isInventoryBillType ? "Dr Inventory" : "Dr Expense"} accounts / Cr Vendor Payables will be posted automatically for ${money(billTotal)}.`}
+          <div className="mt-4 rounded-xl bg-emerald-50 p-3 text-xs text-emerald-800">
+            <div className="mb-2 font-semibold">Accounting preview</div>
+            <div className="flex flex-wrap gap-x-6 gap-y-1">
+              <span>{isInventoryBillType ? "Inventory Asset" : billPurchaseType === "service" ? "Service Expense" : "Purchase / Consumption Expense"} <strong>Dr {money(billTotal)}</strong></span>
+              <span>Vendor Payables <strong>Cr {money(billTotal)}</strong></span>
+            </div>
+            <div className="mt-2 text-emerald-700">{isInventoryBillType ? "Purchase rates are stored as cost. Set each item's student selling price separately in Inventory." : "No inventory stock movement will be created for this purchase type."}</div>
           </div>
 
           <div className="mt-5 flex justify-end gap-3 border-t pt-5">
@@ -4958,12 +5074,15 @@ filteredReturns.map((ret) => {
                 <thead className="bg-slate-50">
                   <tr className="border-b">
                     <th className="px-4 py-3 text-left text-xs font-bold uppercase tracking-wide text-slate-500">
-                      Description
+                      Item / Service
                     </th>
 
                     <th className="px-4 py-3 text-right text-xs font-bold uppercase tracking-wide text-slate-500">
                       Qty
                     </th>
+
+                    <th className="px-4 py-3 text-left text-xs font-bold uppercase tracking-wide text-slate-500">Unit</th>
+                    <th className="px-4 py-3 text-left text-xs font-bold uppercase tracking-wide text-slate-500">Size / Variant</th>
 
                     <th className="px-4 py-3 text-right text-xs font-bold uppercase tracking-wide text-slate-500">
                       Unit Price
@@ -4976,10 +5095,12 @@ filteredReturns.map((ret) => {
                 </thead>
 
                 <tbody>
-                  {viewBill.items.length === 0 ? (
+                  {viewItemsLoading ? (
+                    <tr><td colSpan={6} className="px-4 py-6 text-center text-sm text-slate-500">Loading purchase items...</td></tr>
+                  ) : viewBill.items.length === 0 ? (
                     <tr>
-                      <td colSpan={4} className="px-4 py-6 text-center text-sm text-slate-400">
-                        No line items.
+                      <td colSpan={6} className="px-4 py-6 text-center text-sm text-slate-400">
+                        No saved line items were found for this bill.
                       </td>
                     </tr>
                   ) : (
@@ -4997,6 +5118,9 @@ filteredReturns.map((ret) => {
                           {Number(item.quantity || 0)}
                         </td>
 
+                        <td className="px-4 py-3 text-sm text-slate-600">{item.unit || "pcs"}</td>
+                        <td className="px-4 py-3 text-sm text-slate-600">{item.size || "-"}</td>
+
                         <td className="px-4 py-3 text-right text-sm text-slate-600">
                           {money(Number(item.unit_price || 0))}
                         </td>
@@ -5011,7 +5135,7 @@ filteredReturns.map((ret) => {
 
                 <tfoot className="bg-slate-50">
                   <tr>
-                    <td colSpan={3} className="px-4 py-3 text-right text-sm font-bold text-slate-700">
+                    <td colSpan={5} className="px-4 py-3 text-right text-sm font-bold text-slate-700">
                       Total
                     </td>
 
@@ -5032,7 +5156,7 @@ filteredReturns.map((ret) => {
 
           <div className="mt-5">
             <div className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-500">
-              Accounting Entry (Dr Expense / Cr Vendor Payables)
+              Accounting Entry
             </div>
 
             {viewLoading ? (

@@ -20,6 +20,18 @@ You can start editing the page by modifying `app/page.tsx`. The page auto-update
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
+## Offline Staff Attendance
+
+To enable offline GPS check-in/out:
+
+1. Apply `supabase/migrations/20260930130000_offline_staff_attendance.sql` to the Supabase project.
+2. Configure `SUPABASE_SERVICE_ROLE_KEY` as a server-only environment variable. Do not expose it with a `NEXT_PUBLIC_` prefix.
+3. Choose **Offline — save GPS locally and sync later** in Add Staff (or the staff edit page).
+4. Have the staff member sign in, open **My Attendance**, and open the offline attendance screen once while connected. Allow location access; the browser caches the screen for later use.
+5. If the connection drops, open the cached offline attendance screen and record check-in/out. Reconnect and open the regular attendance page before the end of that school day to sync.
+
+Offline records are pending until the server accepts them. Sync rechecks the configured school geofence and school-day deadline; rejected events are shown and are not reported as official attendance. GPS and device time are collected by the browser and are not cryptographic proof of physical presence. Service workers and browser geolocation require HTTPS, except on localhost.
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:

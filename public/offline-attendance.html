@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#4338ca">
+    <title>Offline Attendance | EduNexa</title>
+    <style>
+      :root { color-scheme: light; font-family: ui-sans-serif, system-ui, sans-serif; background: #f1f5f9; color: #0f172a; }
+      * { box-sizing: border-box; }
+      body { margin: 0; min-height: 100vh; padding: 20px; display: grid; place-items: center; }
+      main { width: min(100%, 520px); overflow: hidden; border-radius: 28px; background: white; box-shadow: 0 24px 70px #0f172a20; }
+      header { padding: 28px; color: white; background: linear-gradient(135deg, #4338ca, #7c3aed 65%, #c026d3); }
+      header p { margin: 0; color: #e0e7ff; font-size: 13px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+      h1 { margin: 10px 0 4px; font-size: 27px; }
+      header .sub { margin: 0; font-size: 14px; line-height: 1.5; }
+      section { padding: 24px 28px 28px; }
+      .status { margin-bottom: 18px; border: 1px solid #c7d2fe; border-radius: 16px; background: #eef2ff; padding: 14px; font-size: 14px; line-height: 1.5; }
+      .error { border-color: #fecaca; background: #fef2f2; color: #991b1b; }
+      .success { border-color: #a7f3d0; background: #ecfdf5; color: #065f46; }
+      .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+      button, a { min-height: 50px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; border: 0; border-radius: 14px; padding: 12px; font: inherit; font-weight: 800; text-decoration: none; cursor: pointer; }
+      button:disabled { cursor: not-allowed; opacity: .45; }
+      #checkin { background: #059669; color: white; }
+      #checkout { background: #0f172a; color: white; }
+      #refresh { margin-top: 10px; width: 100%; border: 1px solid #cbd5e1; background: white; color: #334155; }
+      .events { margin: 18px 0 0; padding: 0; list-style: none; }
+      .events li { margin-top: 8px; border: 1px solid #e2e8f0; border-radius: 12px; padding: 10px 12px; font-size: 13px; }
+      .hint { margin: 18px 0 0; color: #64748b; font-size: 12px; line-height: 1.55; }
+      @media (max-width: 420px) { body { padding: 10px; } header, section { padding: 22px; } }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <p>EduNexa · Offline Attendance</p>
+        <h1 id="staff-name">Loading staff profile…</h1>
+        <p class="sub" id="school-day"></p>
+      </header>
+      <section>
+        <div id="status" class="status">Checking saved attendance profile…</div>
+        <div class="actions">
+          <button id="checkin" type="button" disabled>Check In</button>
+          <button id="checkout" type="button" disabled>Check Out</button>
+        </div>
+        <button id="refresh" type="button">Refresh status</button>
+        <ul id="events" class="events"></ul>
+        <p class="hint">GPS and device time are saved on this device and remain pending until the app reconnects. The server accepts them only if the GPS is within the school geofence and sync happens before the end of the school day. Do not clear this browser's site data before syncing.</p>
+      </section>
+    </main>
+    <script>
+      const DB = "edunexa-staff-attendance";
+      const DB_VERSION = 1;
+      const statusBox = document.getElementById("status");
+      const checkInButton = document.getElementById("checkin");
+      const checkOutButton = document.getElementById("checkout");
+      let profile = null;
+      let busy = false;
+
+      function openDb() {
+        return new Promise((resolve, reject) => {
+          const request = indexedDB.open(DB, DB_VERSION);
+          request.onupgradeneeded = () => {
+            const db = request.result;
+            if (!db.objectStoreNames.contains("events")) db.createObjectStore("events", { keyPath: "request_id" });
+            if (!db.objectStoreNames.contains("profile")) db.createObjectStore("profile", { keyPath: "key" });
+          };
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+        });
+      }
+
+      async function requestStore(storeName, mode, callback) {
+        const db = await openDb();
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction(storeName, mode);
+          const request = callback(tx.objectStore(storeName));
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+          tx.oncomplete = () => db.close();
+          tx.onerror = () => { db.close(); reject(tx.error); };
+        });
+      }
+
+      function localDate(date) {
+        return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+      }
+
+      async function events() {
+        return requestStore("events", "readonly", store => store.getAll());
+      }
+
+      function setStatus(text, kind = "") {
+        statusBox.textContent = text;
+        statusBox.className = `status ${kind}`;
+      }
+
+      async function render() {
+        const savedProfile = await requestStore("profile", "readonly", store => store.get("current"));
+        profile = savedProfile ? { ...savedProfile } : null;
+        if (profile && profile.attendance_date !== localDate(new Date())) {
+          profile.attendance_date = localDate(new Date());
+          profile.check_in_at = null;
+          profile.check_out_at = null;
+          await requestStore("profile", "readwrite", store => store.put(profile));
+        }
+        document.getElementById("staff-name").textContent = profile?.staff
+          ? [profile.staff.first_name, profile.staff.last_name].filter(Boolean).join(" ")
+          : "Offline attendance";
+        document.getElementById("school-day").textContent = new Date().toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+
+        const allEvents = await events();
+        const list = allEvents.filter(item => item.user_id === profile?.user_id);
+        const todays = list.filter(item => localDate(new Date(item.captured_at)) === localDate(new Date()));
+        const pending = todays.filter(item => item.status === "pending");
+        const expiredPending = list.filter(item =>
+          item.status === "pending" &&
+          localDate(new Date(item.captured_at)) !== localDate(new Date())
+        );
+        const pendingIn = pending.some(item => item.action === "check_in");
+        const pendingOut = pending.some(item => item.action === "check_out");
+        const checkedIn = Boolean(profile?.check_in_at) || pendingIn;
+        const checkedOut = Boolean(profile?.check_out_at) || pendingOut;
+        const profileReady = profile?.attendance_mode === "offline";
+        checkInButton.disabled = busy || !profileReady || checkedIn || !navigator.geolocation;
+        checkOutButton.disabled = busy || !profileReady || !checkedIn || checkedOut || !navigator.geolocation;
+
+        const listElement = document.getElementById("events");
+        listElement.replaceChildren();
+        for (const item of list.slice().sort((a, b) => b.captured_at.localeCompare(a.captured_at))) {
+          const row = document.createElement("li");
+          const time = new Date(item.captured_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+          const expired = localDate(new Date(item.captured_at)) !== localDate(new Date());
+          row.textContent = `${item.action === "check_in" ? "Check-in" : "Check-out"} · ${time} · ${item.status === "rejected" ? `Not accepted: ${item.error || "GPS/time validation failed"}` : expired ? "Expired; the server will reject records synced after the school day" : "Pending server verification"}`;
+          listElement.append(row);
+        }
+
+        if (!profileReady) {
+          setStatus("Open this page from My Attendance while online first, and choose Offline mode for this staff member.", "error");
+        } else if (expiredPending.length) {
+          setStatus(`${expiredPending.length} record${expiredPending.length === 1 ? "" : "s"} missed the sync deadline. Reconnect and open attendance to get the server's rejection result.`, "error");
+        } else if (pending.length) {
+          setStatus(`${pending.length} attendance record${pending.length === 1 ? "" : "s"} waiting to sync. Reconnect and open the attendance page to submit them.`);
+        } else if (checkedOut) {
+          setStatus("Today's check-in and check-out are recorded.");
+        } else if (checkedIn) {
+          setStatus("Check-in is recorded. Check out when leaving the school.");
+        } else {
+          setStatus("Ready. Check-in/out will be saved on this device with GPS and synced after reconnecting.");
+        }
+      }
+
+      function getGps() {
+        return new Promise((resolve, reject) => {
+          if (!navigator.geolocation) return reject(new Error("GPS is unavailable on this device."));
+          navigator.geolocation.getCurrentPosition(
+            position => resolve({
+              latitude: position.coords.latitude,
+              longitude: position.coords.longitude,
+              accuracy_meters: position.coords.accuracy
+            }),
+            error => reject(new Error(error.code === 1 ? "Allow location access to record attendance." : "Unable to get GPS. Turn on location services and try again.")),
+            { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 }
+          );
+        });
+      }
+
+      async function capture(action) {
+        if (busy || !profile || profile.attendance_mode !== "offline") return;
+        busy = true;
+        checkInButton.disabled = true;
+        checkOutButton.disabled = true;
+        setStatus("Getting a fresh GPS location…");
+        try {
+          const gps = await getGps();
+          const capturedAt = new Date().toISOString();
+          const requestId = crypto.randomUUID();
+          const event = {
+            request_id: requestId,
+            user_id: profile.user_id,
+            staff_id: profile.staff.id,
+            action,
+            captured_at: capturedAt,
+            ...gps,
+            status: "pending",
+            error: null
+          };
+          await requestStore("events", "readwrite", store => store.put(event));
+          if (action === "check_in") profile.check_in_at = capturedAt;
+          else profile.check_out_at = capturedAt;
+          await requestStore("profile", "readwrite", store => store.put(profile));
+          setStatus("Saved on this device. It is pending server geofence validation and must sync before the school day ends.", "success");
+        } catch (error) {
+          setStatus(error instanceof Error ? error.message : "Could not save attendance.", "error");
+        } finally {
+          busy = false;
+          await render();
+        }
+      }
+
+      checkInButton.addEventListener("click", () => void capture("check_in"));
+      checkOutButton.addEventListener("click", () => void capture("check_out"));
+      document.getElementById("refresh").addEventListener("click", () => void render());
+      window.addEventListener("online", async () => {
+        const queued = await events().catch(() => []);
+        if (queued.some(item => item.user_id === profile?.user_id && item.status === "pending")) {
+          setStatus("Connection restored. Opening the signed-in attendance page to sync and verify saved records…", "success");
+          setTimeout(() => location.replace("/dashboard/staff/attendance"), 800);
+        }
+      });
+      void render().catch(error => setStatus(error instanceof Error ? error.message : "Offline attendance storage is unavailable.", "error"));
+    </script>
+  </body>
+</html>

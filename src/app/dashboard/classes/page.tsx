@@ -357,6 +357,33 @@ export default function ClassesPage() {
     );
   }
 
+  async function handleEditClass(classItem: ClassRow) {
+    const name = window.prompt("Edit class name", classItem.name)?.trim();
+    if (!name || name === classItem.name) return;
+    const { error } = await supabase.from("classes").update({ name }).eq("id", classItem.id).eq("school_id", schoolId);
+    if (error) { setErrorMessage(`Unable to update class: ${error.message}`); return; }
+    setClasses((current) => current.map((item) => item.id === classItem.id ? { ...item, name } : item));
+    setSuccessMessage("Class updated.");
+  }
+
+  async function handleDeleteClass(classItem: ClassRow) {
+    if (!window.confirm(`Delete class "${classItem.name}"?`)) return;
+    const { error } = await supabase.from("classes").delete().eq("id", classItem.id).eq("school_id", schoolId);
+    if (error) { setErrorMessage(`Unable to delete class. Reassign its students and remove related fee structures first. ${error.message}`); return; }
+    setClasses((current) => current.filter((item) => item.id !== classItem.id));
+    setSections((current) => { const next = { ...current }; delete next[classItem.id]; return next; });
+    setSuccessMessage("Class deleted.");
+  }
+
+  async function handleEditSection(section: SectionRow) {
+    const name = window.prompt("Edit section name", section.name)?.trim();
+    if (!name || name === section.name) return;
+    const { error } = await supabase.from("sections").update({ name }).eq("id", section.id).eq("school_id", schoolId);
+    if (error) { setErrorMessage(`Unable to update section: ${error.message}`); return; }
+    setSections((current) => ({ ...current, [section.class_id]: (current[section.class_id] || []).map((item) => item.id === section.id ? { ...item, name } : item).sort((a, b) => a.name.localeCompare(b.name)) }));
+    setSuccessMessage("Section updated.");
+  }
+
   if (loading) {
     return (
       <main className="min-h-screen bg-slate-50 p-6">
@@ -480,9 +507,11 @@ export default function ClassesPage() {
                       </p>
                     </div>
 
-                    <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">
-                      Class
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <button type="button" onClick={() => void handleEditClass(classItem)} className="text-xs font-semibold text-blue-700 hover:text-blue-900">Edit</button>
+                      <button type="button" onClick={() => void handleDeleteClass(classItem)} className="text-xs font-semibold text-red-600 hover:text-red-800">Delete</button>
+                      <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">Class</span>
+                    </div>
 
                   </div>
 
@@ -505,6 +534,13 @@ export default function ClassesPage() {
                                 {section.name}
                               </span>
 
+                              <button
+                                type="button"
+                                onClick={() => void handleEditSection(section)}
+                                className="text-xs font-semibold text-blue-700 hover:text-blue-900"
+                              >
+                                Edit
+                              </button>
                               <button
                                 type="button"
                                 onClick={() =>

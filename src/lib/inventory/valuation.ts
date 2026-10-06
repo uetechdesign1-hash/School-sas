@@ -232,6 +232,7 @@ export async function applyStockMovements(
 export type StockSummaryItem = {
   id: string;
   name: string;
+  size?: string | null;
   category: string;
   unit: string;
   isActive: boolean;
@@ -257,7 +258,7 @@ export async function getStockSummary(
     supabase
       .from("inventory_items")
       .select(
-        "id, name, category, unit, opening_quantity, opening_unit_cost, is_active",
+        "id, name, size, category, unit, opening_quantity, opening_unit_cost, is_active",
       )
       .eq("school_id", schoolId)
       .order("name"),
@@ -305,6 +306,7 @@ export async function getStockSummary(
     return {
       id: item.id,
       name: item.name,
+      size: item.size,
       category: item.category,
       unit: item.unit,
       isActive: item.is_active,

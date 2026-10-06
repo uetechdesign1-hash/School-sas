@@ -94,6 +94,8 @@ export const DEFAULT_ACCOUNT_TEMPLATES: DefaultAccountTemplate[] = [
   { code: "BUILDING_MAINTENANCE", name: "Building Maintenance", account_type: "expense" },
   { code: "OFFICE_EXPENSE", name: "Office Expenses", account_type: "expense" },
   { code: "ACADEMIC_EXPENSE", name: "Academic Expenses", account_type: "expense" },
+  { code: "PURCHASE_EXPENSE", name: "Purchase / Consumption Expense", account_type: "expense" },
+  { code: "SERVICE_EXPENSE", name: "Service Expense", account_type: "expense" },
   // Resale inventory (assets), sales revenue and cost of goods sold.
   // Inventory purchases post to these asset accounts instead of expenses;
   // the cost only reaches the P&L when the goods are sold (COGS).
@@ -113,7 +115,7 @@ export const DEFAULT_ACCOUNT_TEMPLATES: DefaultAccountTemplate[] = [
  * The keys match inventory_items.category.
  */
 export const INVENTORY_CATEGORY_ACCOUNTS: Record<
-  "books" | "uniform" | "other",
+  "books" | "uniform" | "stationery" | "id_cards" | "bags" | "shoes" | "other",
   { inventory: string; sales: string; cogs: string }
 > = {
   books: {
@@ -126,6 +128,10 @@ export const INVENTORY_CATEGORY_ACCOUNTS: Record<
     sales: "UNIFORM_SALES",
     cogs: "UNIFORM_COGS",
   },
+  stationery: { inventory: "OTHER_RESALE_INVENTORY", sales: "OTHER_SALES", cogs: "OTHER_COGS" },
+  id_cards: { inventory: "OTHER_RESALE_INVENTORY", sales: "OTHER_SALES", cogs: "OTHER_COGS" },
+  bags: { inventory: "OTHER_RESALE_INVENTORY", sales: "OTHER_SALES", cogs: "OTHER_COGS" },
+  shoes: { inventory: "OTHER_RESALE_INVENTORY", sales: "OTHER_SALES", cogs: "OTHER_COGS" },
   other: {
     inventory: "OTHER_RESALE_INVENTORY",
     sales: "OTHER_SALES",
@@ -251,7 +257,7 @@ export async function ensureSchoolAccountingSetup(
   if (missingTemplates.length > 0) {
     const { data: insertedAccounts, error: insertAccountsError } = await supabase
       .from("accounts")
-      .insert(
+      .upsert(
         missingTemplates.map((template) => ({
           school_id: schoolId,
           code: template.code,
@@ -260,6 +266,7 @@ export async function ensureSchoolAccountingSetup(
           is_system: true,
           is_active: true,
         })),
+        { onConflict: "school_id,name", ignoreDuplicates: true },
       )
       .select("id, code, name, account_type");
 
@@ -269,6 +276,41 @@ export async function ensureSchoolAccountingSetup(
 
     for (const account of insertedAccounts ?? []) {
       accountMap[account.code] = account.id;
+    }
+
+    if ((insertedAccounts ?? []).length < missingTemplates.length) {
+      const unresolvedTemplates = missingTemplates.filter(
+        (template) => !accountMap[template.code],
+      );
+      const { data: concurrentByCode, error: concurrentCodeError } = await supabase
+        .from("accounts")
+        .select("id, code, name, account_type")
+        .eq("school_id", schoolId)
+        .in("code", unresolvedTemplates.map((template) => template.code));
+      if (concurrentCodeError) throw new Error(concurrentCodeError.message);
+
+      for (const account of concurrentByCode ?? []) {
+        accountMap[account.code] = account.id;
+      }
+
+      for (const template of unresolvedTemplates) {
+        if (accountMap[template.code]) continue;
+        const { data: concurrentByName, error: concurrentNameError } = await supabase
+          .from("accounts")
+          .select("id, code, name, account_type")
+          .eq("school_id", schoolId)
+          .eq("name", template.name)
+          .maybeSingle();
+        if (concurrentNameError) throw new Error(concurrentNameError.message);
+        if (concurrentByName?.id) accountMap[template.code] = concurrentByName.id;
+      }
+    }
+
+    const unresolvedCodes = missingTemplates
+      .filter((template) => !accountMap[template.code])
+      .map((template) => template.code);
+    if (unresolvedCodes.length) {
+      throw new Error(`Accounting setup could not resolve accounts: ${unresolvedCodes.join(", ")}`);
     }
   }
 

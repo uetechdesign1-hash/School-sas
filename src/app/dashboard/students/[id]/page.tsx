@@ -1108,23 +1108,19 @@ export default function StudentDetailsPage() {
         return;
       }
 
-      const {
-        error: deleteError,
-      } =
-        await supabase
-          .from("students")
-          .delete()
-          .eq(
-            "id",
-            student.id
-          )
-          .eq(
-            "school_id",
-            schoolId
-          );
+      const { data: deleteResult, error: deleteError } = await supabase.rpc(
+        "delete_student_and_owned_records",
+        {
+          p_student_id: student.id,
+          p_school_id: schoolId,
+        },
+      );
 
       if (deleteError) {
         throw deleteError;
+      }
+      if (!deleteResult?.success) {
+        throw new Error(deleteResult?.message || "Student was not deleted.");
       }
 
       router.replace(
@@ -1133,16 +1129,18 @@ export default function StudentDetailsPage() {
 
       router.refresh();
     } catch (error) {
-      console.error(
-        "DELETE STUDENT ERROR:",
-        error
-      );
+      const details = error && typeof error === "object"
+        ? error as { message?: string; details?: string; hint?: string; code?: string }
+        : null;
+      const message = details?.message || (error instanceof Error ? error.message : "Unable to delete student.");
+      const isMissingDeleteRpc = details?.code === "PGRST202" || /delete_student_and_owned_records.*(not found|schema cache)/i.test(message);
+      const readableMessage = isMissingDeleteRpc
+        ? "Student deletion database migration is not installed yet. Apply the pending Supabase migrations, then try again."
+        : [message, details?.details, details?.hint, details?.code ? `Code: ${details.code}` : null]
+            .filter(Boolean)
+            .join("\n");
 
-      setError(
-        error instanceof Error
-          ? error.message
-          : "Unable to delete student."
-      );
+      setError(readableMessage);
     }
   }
 

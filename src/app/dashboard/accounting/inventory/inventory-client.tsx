@@ -12,6 +12,7 @@ import {
   Power,
   Pencil,
   RefreshCw,
+  ShoppingCart,
   SlidersHorizontal,
   TrendingDown,
   TrendingUp,
@@ -36,24 +37,32 @@ import {
   type InventoryItemRecord,
   type InventoryMovementRecord,
 } from "@/lib/inventory/inventory-items";
+import { saveStudentBookSale, type BookSalePaymentMode } from "@/lib/inventory/book-sales";
 
 type Draft = {
   name: string;
+  size: string;
   category: InventoryCategory;
   unit: string;
   openingQuantity: string;
   openingUnitCost: string;
+  sellingPrice: string;
   notes: string;
 };
+
+type SaleLineDraft = { inventoryItemId: string; quantity: string; unitPrice: string };
+type StudentOption = { id: string; first_name: string; middle_name?: string | null; last_name?: string | null; admission_no: string };
 
 const today = () => new Date().toISOString().slice(0, 10);
 
 const emptyDraft: Draft = {
   name: "",
+  size: "",
   category: "books",
   unit: "pcs",
   openingQuantity: "0",
   openingUnitCost: "0",
+  sellingPrice: "0",
   notes: "",
 };
 
@@ -89,6 +98,22 @@ function errorMessage(error: unknown) {
   if (error instanceof InventoryError) return error.message;
   if (error instanceof Error) return error.message;
 
+  if (error && typeof error === "object") {
+    const details = error as { message?: string; details?: string; hint?: string; code?: string };
+    const message = [details.message, details.details, details.hint, details.code ? `Code: ${details.code}` : ""]
+      .filter(Boolean)
+      .join(" · ");
+    if (message) {
+      if (/column .*size.*(does not exist|schema cache)|could not find.*size/i.test(message)) {
+        return `${message} Apply supabase/migrations/20261005160000_inventory_item_sizes.sql in Supabase, then retry.`;
+      }
+      if (/column .*selling_price.*(does not exist|schema cache)|could not find.*selling_price/i.test(message)) {
+        return `${message} Apply supabase/migrations/20261005170000_inventory_item_selling_price.sql in Supabase, then retry.`;
+      }
+      return message;
+    }
+  }
+
   return "Something went wrong.";
 }
 
@@ -106,6 +131,8 @@ export default function InventoryClient() {
   const [schoolId, setSchoolId] = useState<string | null>(null);
   const [items, setItems] = useState<InventoryItemRecord[]>([]);
   const [summary, setSummary] = useState<StockSummaryItem[]>([]);
+  const [students, setStudents] = useState<StudentOption[]>([]);
+  const [accounts, setAccounts] = useState<Array<{ id: string; name: string; account_type: string }>>([]);
 
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -119,6 +146,13 @@ export default function InventoryClient() {
     null,
   );
   const [draft, setDraft] = useState<Draft>(emptyDraft);
+  const [showSaleModal, setShowSaleModal] = useState(false);
+  const [saleStudentId, setSaleStudentId] = useState("");
+  const [saleDate, setSaleDate] = useState(today());
+  const [salePaymentMode, setSalePaymentMode] = useState<BookSalePaymentMode>("cash");
+  const [saleAccountId, setSaleAccountId] = useState("");
+  const [saleNotes, setSaleNotes] = useState("");
+  const [saleLines, setSaleLines] = useState<SaleLineDraft[]>([{ inventoryItemId: "", quantity: "1", unitPrice: "" }]);
 
   const [adjustItem, setAdjustItem] = useState<InventoryItemRecord | null>(
     null,
@@ -138,13 +172,21 @@ export default function InventoryClient() {
   const [ledgerLoading, setLedgerLoading] = useState(false);
 
   async function loadData(id: string) {
-    const [itemRows, stockRows] = await Promise.all([
+    const [itemRows, stockRows, studentResult, accountResult] = await Promise.all([
       listInventoryItems(supabase, id),
       getStockSummary(supabase, id),
+      supabase.from("students").select("id, first_name, middle_name, last_name, admission_no").eq("school_id", id).order("first_name"),
+      supabase.from("accounts").select("id, name, account_type").eq("school_id", id).eq("is_active", true).order("name"),
     ]);
+
+    if (studentResult.error) throw studentResult.error;
+    if (accountResult.error) throw accountResult.error;
 
     setItems(itemRows);
     setSummary(stockRows);
+    setStudents((studentResult.data || []) as StudentOption[]);
+    setAccounts(accountResult.data || []);
+    setSaleAccountId((current) => current || accountResult.data?.[0]?.id || "");
   }
 
   useEffect(() => {
@@ -203,6 +245,69 @@ export default function InventoryClient() {
     [items],
   );
 
+  const paymentAccounts = useMemo(
+    () => accounts.filter((account) => ["cash", "bank"].includes(account.account_type.toLowerCase())),
+    [accounts],
+  );
+
+  const saleTotal = useMemo(
+    () => saleLines.reduce((sum, line) => sum + Number(line.quantity || 0) * Number(line.unitPrice || 0), 0),
+    [saleLines],
+  );
+
+  function studentLabel(student: StudentOption) {
+    return [`${student.first_name} ${student.middle_name || ""} ${student.last_name || ""}`.replace(/\s+/g, " ").trim(), student.admission_no].filter(Boolean).join(" · ");
+  }
+
+  function openSaleModal() {
+    setSaleStudentId("");
+    setSaleDate(today());
+    setSalePaymentMode("cash");
+    setSaleAccountId(paymentAccounts.find((account) => account.account_type.toLowerCase() === "cash")?.id || paymentAccounts[0]?.id || "");
+    setSaleNotes("");
+    setSaleLines([{ inventoryItemId: "", quantity: "1", unitPrice: "" }]);
+    setError("");
+    setSuccess("");
+    setShowSaleModal(true);
+  }
+
+  async function recordSale() {
+    if (!schoolId) return;
+    try {
+      setSaving(true);
+      setError("");
+      if (!saleStudentId) throw new Error("Select the student receiving the item.");
+      if (salePaymentMode !== "receivable" && !saleAccountId) throw new Error("Select the account that received payment.");
+
+      const userId = (await supabase.auth.getUser()).data.user?.id || null;
+      const result = await saveStudentBookSale(supabase, {
+        schoolId,
+        saleDate,
+        studentId: saleStudentId,
+        saleNumber: null,
+        paymentMode: salePaymentMode,
+        paymentAccountId: salePaymentMode === "receivable" ? null : saleAccountId,
+        receivableAccountId: null,
+        notes: saleNotes.trim() || null,
+        createdBy: userId,
+        lines: saleLines.map((line) => ({
+          inventoryItemId: line.inventoryItemId,
+          quantity: Number(line.quantity || 0),
+          unitPrice: Number(line.unitPrice || 0),
+        })),
+      });
+
+      setShowSaleModal(false);
+      const recipient = students.find((student) => student.id === saleStudentId);
+      setSuccess(`Sale ${result.saleNumber || ""} recorded for ${recipient ? studentLabel(recipient) : "the student"}. ${money(result.totalAmount)} recorded; stock was reduced.`);
+      await loadData(schoolId);
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
   function openAddItem() {
     setEditingItem(null);
     setDraft(emptyDraft);
@@ -215,10 +320,12 @@ export default function InventoryClient() {
     setEditingItem(item);
     setDraft({
       name: item.name,
+      size: item.size || "",
       category: item.category,
       unit: item.unit,
       openingQuantity: String(item.opening_quantity),
       openingUnitCost: String(item.opening_unit_cost),
+      sellingPrice: String(item.selling_price ?? 0),
       notes: item.notes || "",
     });
     setError("");
@@ -238,14 +345,16 @@ export default function InventoryClient() {
           schoolId,
           itemId: editingItem.id,
           name: draft.name,
+          size: draft.size.trim() || null,
           category: draft.category,
           unit: draft.unit,
           openingQuantity: Number(draft.openingQuantity || 0),
           openingUnitCost: Number(draft.openingUnitCost || 0),
+          sellingPrice: Number(draft.sellingPrice || 0),
           notes: draft.notes.trim() || null,
         });
 
-        setSuccess(`"${draft.name.trim()}" updated.`);
+        setSuccess(`"${draft.name.trim()}${draft.size.trim() ? ` - Size ${draft.size.trim()}` : ""}" updated.`);
       } else {
         const user =
           (await supabase.auth.getUser()).data.user?.id || null;
@@ -253,15 +362,17 @@ export default function InventoryClient() {
         await createInventoryItem(supabase, {
           schoolId,
           name: draft.name,
+          size: draft.size.trim() || null,
           category: draft.category,
           unit: draft.unit,
           openingQuantity: Number(draft.openingQuantity || 0),
           openingUnitCost: Number(draft.openingUnitCost || 0),
+          sellingPrice: Number(draft.sellingPrice || 0),
           notes: draft.notes.trim() || null,
           createdBy: user,
         });
 
-        setSuccess(`"${draft.name.trim()}" added.`);
+        setSuccess(`"${draft.name.trim()}${draft.size.trim() ? ` - Size ${draft.size.trim()}` : ""}" added.`);
       }
 
       setShowItemModal(false);
@@ -381,7 +492,15 @@ const itemsById = useMemo(
               </p>
             </div>
 
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={openSaleModal}
+                disabled={!activeItems.length || !students.length}
+                className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+              >
+                <ShoppingCart size={16} />
+                Sell / Issue to student
+              </button>
               <button
                 onClick={refresh}
                 disabled={refreshing || loading}
@@ -478,11 +597,12 @@ const itemsById = useMemo(
             </div>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[1080px]">
+              <table className="w-full min-w-[1160px]">
                 <thead className="bg-slate-50">
                   <tr>
                     {[
                       { label: "Item", align: "left" },
+                      { label: "Size", align: "left" },
                       { label: "Category", align: "left" },
                       { label: "Opening", align: "right" },
                       { label: "Purchases", align: "right" },
@@ -490,6 +610,7 @@ const itemsById = useMemo(
                       { label: "Sales", align: "right" },
                       { label: "Closing", align: "right" },
                       { label: "Avg cost", align: "right" },
+                      { label: "Sale price", align: "right" },
                       { label: "Stock value", align: "right" },
                       { label: "Actions", align: "right" },
                     ].map((column) => (
@@ -525,6 +646,10 @@ const itemsById = useMemo(
                           </div>
                         </td>
 
+                        <td className="px-5 py-4 text-sm font-medium text-blue-700">
+                          {row.size ? `Size ${row.size}` : "—"}
+                        </td>
+
                         <td className="px-5 py-4 text-sm text-slate-600">
                           {INVENTORY_CATEGORY_LABELS[
                             row.category as InventoryCategory
@@ -553,6 +678,10 @@ const itemsById = useMemo(
 
                         <td className="px-5 py-4 text-right text-sm text-slate-600">
                           {money(row.avgCost)}
+                        </td>
+
+                        <td className="px-5 py-4 text-right font-semibold text-slate-900">
+                          {money(Number(item?.selling_price || 0))}
                         </td>
 
                         <td className="px-5 py-4 text-right font-semibold text-slate-900">
@@ -598,7 +727,7 @@ const itemsById = useMemo(
                 <tfoot className="bg-slate-50">
                   <tr>
                     <td
-                      colSpan={8}
+                      colSpan={10}
                       className="px-5 py-4 text-right font-semibold text-slate-700"
                     >
                       Total stock value
@@ -623,6 +752,89 @@ const itemsById = useMemo(
         </p>
       </div>
 
+      {showSaleModal && (
+        <Modal title="Sell / Issue inventory to student" onClose={() => !saving && setShowSaleModal(false)}>
+          <div className="grid gap-4">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="Student">
+                <select value={saleStudentId} onChange={(event) => setSaleStudentId(event.target.value)} className={inputClass}>
+                  <option value="">Select student...</option>
+                  {students.map((student) => <option key={student.id} value={student.id}>{studentLabel(student)}</option>)}
+                </select>
+              </Field>
+              <Field label="Sale / issue date">
+                <input type="date" value={saleDate} onChange={(event) => setSaleDate(event.target.value)} className={inputClass} />
+              </Field>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="Payment handling">
+                <select
+                  value={salePaymentMode}
+                  onChange={(event) => {
+                    const mode = event.target.value as BookSalePaymentMode;
+                    setSalePaymentMode(mode);
+                    if (mode !== "receivable") setSaleAccountId(paymentAccounts.find((account) => account.account_type.toLowerCase() === mode)?.id || "");
+                  }}
+                  className={inputClass}
+                >
+                  <option value="cash">Paid in cash</option>
+                  <option value="bank">Paid to bank / online</option>
+                  <option value="receivable">Record as amount due</option>
+                </select>
+              </Field>
+              {salePaymentMode !== "receivable" ? (
+                <Field label="Received into">
+                  <select value={saleAccountId} onChange={(event) => setSaleAccountId(event.target.value)} className={inputClass}>
+                    <option value="">Select cash / bank account...</option>
+                    {paymentAccounts.filter((account) => account.account_type.toLowerCase() === salePaymentMode).map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}
+                  </select>
+                </Field>
+              ) : (
+                <div className="self-end rounded-lg bg-amber-50 p-3 text-xs text-amber-800">
+                  The sale is recorded in Other Receivables; it does not change the student’s fee bill balance.
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold uppercase tracking-wide text-slate-500">Items to issue</span>
+                <button type="button" onClick={() => setSaleLines((current) => [...current, { inventoryItemId: "", quantity: "1", unitPrice: "" }])} className="rounded-lg border px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50">Add item</button>
+              </div>
+              {saleLines.map((line, index) => (
+                <div key={`sale-line-${index}`} className="grid gap-3 rounded-xl border bg-slate-50 p-3 sm:grid-cols-12">
+                  <div className="sm:col-span-6">
+                    <Field label="Product / uniform size">
+                      <select value={line.inventoryItemId} onChange={(event) => {
+                        const selected = items.find((item) => item.id === event.target.value);
+                        setSaleLines((current) => current.map((saleLine, itemIndex) => itemIndex === index ? { ...saleLine, inventoryItemId: event.target.value, unitPrice: selected ? String(selected.selling_price || 0) : "" } : saleLine));
+                      }} className={inputClass}>
+                        <option value="">Select stock item...</option>
+                        {activeItems.map((item) => {
+                          const available = summaryById.get(item.id)?.closingQuantity || 0;
+                          return <option key={item.id} value={item.id} disabled={available <= 0 || Number(item.selling_price) <= 0}>{item.name}{item.size ? ` - Size ${item.size}` : ""} · {money(Number(item.selling_price || 0))} · available {qty(available)}</option>;
+                        })}
+                      </select>
+                    </Field>
+                  </div>
+                  <div className="sm:col-span-2"><Field label="Quantity"><input type="number" min="0.001" step="0.001" value={line.quantity} onChange={(event) => setSaleLines((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, quantity: event.target.value } : item))} className={inputClass} /></Field></div>
+                  <div className="sm:col-span-3"><Field label="School selling price"><input type="number" value={line.unitPrice} readOnly className={`${inputClass} bg-slate-100`} /></Field></div>
+                  <button type="button" onClick={() => setSaleLines((current) => current.length > 1 ? current.filter((_, itemIndex) => itemIndex !== index) : [{ inventoryItemId: "", quantity: "1", unitPrice: "" }])} className="self-end rounded-lg p-2 text-red-600 hover:bg-red-50" aria-label="Remove sale item"><X size={16} /></button>
+                </div>
+              ))}
+              <div className="flex items-center justify-between rounded-lg bg-slate-900 px-4 py-3 text-white"><span className="text-sm font-semibold">Sale total</span><span className="text-lg font-bold">{money(saleTotal)}</span></div>
+            </div>
+
+            <Field label="Notes">
+              <textarea value={saleNotes} onChange={(event) => setSaleNotes(event.target.value)} rows={2} className={inputClass} placeholder="Optional issue or sale notes" />
+            </Field>
+            <p className="rounded-lg bg-emerald-50 p-3 text-xs text-emerald-800">Saving this sale reduces stock immediately, blocks quantities above stock on hand, and posts sales revenue plus cost of goods sold.</p>
+          </div>
+          <ModalActions saving={saving} onCancel={() => setShowSaleModal(false)} onConfirm={recordSale} confirmLabel="Record sale and reduce stock" />
+        </Modal>
+      )}
+
       {showItemModal && (
         <Modal
           title={editingItem ? "Edit inventory item" : "Add inventory item"}
@@ -640,6 +852,15 @@ const itemsById = useMemo(
               />
             </Field>
 
+            <Field label="Size / variant (optional)">
+                <input
+                  value={draft.size}
+                  onChange={(e) => setDraft((prev) => ({ ...prev, size: e.target.value }))}
+                  placeholder="Size 32, 1 L bottle, A4, Blue"
+                  className={inputClass}
+                />
+            </Field>
+
             <div className="grid gap-4 sm:grid-cols-2">
               <Field label="Category">
                 <select
@@ -654,6 +875,10 @@ const itemsById = useMemo(
                 >
                   <option value="books">Books (resale)</option>
                   <option value="uniform">Uniform (resale)</option>
+                  <option value="stationery">Stationery</option>
+                  <option value="id_cards">ID Cards</option>
+                  <option value="bags">Bags</option>
+                  <option value="shoes">Shoes</option>
                   <option value="other">Other resale goods</option>
                 </select>
               </Field>
@@ -669,6 +894,17 @@ const itemsById = useMemo(
                 />
               </Field>
             </div>
+
+            <Field label="Student selling price">
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={draft.sellingPrice}
+                onChange={(e) => setDraft((prev) => ({ ...prev, sellingPrice: e.target.value }))}
+                className={inputClass}
+              />
+            </Field>
 
             <div className="grid gap-4 sm:grid-cols-2">
               <Field label="Opening quantity">
@@ -733,7 +969,7 @@ const itemsById = useMemo(
       )}
 
       {adjustItem && (
-        <Modal title={`Adjust stock · ${adjustItem.name}`} onClose={() => setAdjustItem(null)}>
+        <Modal title={`Adjust stock · ${adjustItem.name}${adjustItem.size ? ` · Size ${adjustItem.size}` : ""}`} onClose={() => setAdjustItem(null)}>
           <div className="grid gap-4">
             <div className="grid gap-4 sm:grid-cols-2">
               <Field label="Direction">

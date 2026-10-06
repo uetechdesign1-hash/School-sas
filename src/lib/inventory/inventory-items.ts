@@ -8,12 +8,14 @@ import { applyStockMovements } from "@/lib/inventory/valuation";
  * it as the first movement row the first time the item is touched.
  */
 
-export type InventoryCategory = "books" | "uniform" | "other";
+export type InventoryCategory = "books" | "uniform" | "stationery" | "id_cards" | "bags" | "shoes" | "other";
 
 export type InventoryItemRecord = {
   id: string;
   school_id: string;
   name: string;
+  size: string | null;
+  selling_price: number;
   category: InventoryCategory;
   unit: string;
   opening_quantity: number;
@@ -25,6 +27,8 @@ export type InventoryItemRecord = {
 export type InventoryItemInput = {
   schoolId: string;
   name: string;
+  size: string | null;
+  sellingPrice: number;
   category: InventoryCategory;
   unit: string;
   openingQuantity: number;
@@ -55,6 +59,10 @@ const round4 = (value: number) =>
 export const INVENTORY_CATEGORY_LABELS: Record<InventoryCategory, string> = {
   books: "Books",
   uniform: "Uniform",
+  stationery: "Stationery",
+  id_cards: "ID Cards",
+  bags: "Bags",
+  shoes: "Shoes",
   other: "Other resale",
 };
 
@@ -65,7 +73,7 @@ export async function listInventoryItems(
   const { data, error } = await supabase
     .from("inventory_items")
     .select(
-      "id, school_id, name, category, unit, opening_quantity, opening_unit_cost, is_active, notes",
+      "id, school_id, name, size, selling_price, category, unit, opening_quantity, opening_unit_cost, is_active, notes",
     )
     .eq("school_id", schoolId)
     .order("name");
@@ -115,11 +123,17 @@ export async function createInventoryItem(
     throw new Error("Opening unit cost cannot be negative.");
   }
 
+  if (!Number.isFinite(input.sellingPrice) || input.sellingPrice < 0) {
+    throw new Error("Student selling price cannot be negative.");
+  }
+
   const { data, error } = await supabase
     .from("inventory_items")
     .insert({
       school_id: input.schoolId,
       name,
+      size: input.size?.trim() || null,
+      selling_price: round2(input.sellingPrice),
       category: input.category,
       unit: input.unit.trim() || "pcs",
       opening_quantity: round4(input.openingQuantity),
@@ -132,7 +146,7 @@ export async function createInventoryItem(
 
   if (error) {
     if (String(error.message || "").includes("duplicate key")) {
-      throw new Error("An item with this name already exists.");
+      throw new Error("An item with this name and size already exists.");
     }
 
     throw error;
@@ -152,6 +166,8 @@ export async function updateInventoryItem(
     schoolId: string;
     itemId: string;
     name: string;
+    size: string | null;
+    sellingPrice: number;
     category: InventoryCategory;
     unit: string;
     openingQuantity: number;
@@ -163,6 +179,10 @@ export async function updateInventoryItem(
 
   if (!name) {
     throw new Error("Item name is required.");
+  }
+
+  if (!Number.isFinite(input.sellingPrice) || input.sellingPrice < 0) {
+    throw new Error("Student selling price cannot be negative.");
   }
 
   const [countResult, itemResult] = await Promise.all([
@@ -206,6 +226,8 @@ export async function updateInventoryItem(
     .from("inventory_items")
     .update({
       name,
+      size: input.size?.trim() || null,
+      selling_price: round2(input.sellingPrice),
       category: input.category,
       unit: input.unit.trim() || "pcs",
       opening_quantity: hasMovements
@@ -221,7 +243,7 @@ export async function updateInventoryItem(
 
   if (error) {
     if (String(error.message || "").includes("duplicate key")) {
-      throw new Error("An item with this name already exists.");
+      throw new Error("An item with this name and size already exists.");
     }
 
     throw error;

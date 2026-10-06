@@ -21,12 +21,18 @@ import {
   CreditCard,
   Download,
   Loader2,
+  Package,
   Pencil,
+  Trash2,
 } from "lucide-react";
 
 import { createClient } from "@/lib/supabase/client";
 import { generateReceiptPDF } from "@/lib/fees/generateReceipt";
 import { ensureSchoolAccountingSetup } from "@/lib/accounting/canonical-accounting";
+import { listInventoryItems, type InventoryItemRecord } from "@/lib/inventory/inventory-items";
+import { saveStudentBookSale } from "@/lib/inventory/book-sales";
+import { getStockSummary } from "@/lib/inventory/valuation";
+import { attachInventorySaleToFeeBill } from "@/lib/inventory/fee-bill-link";
 
 const supabase = createClient();
 
@@ -97,11 +103,20 @@ type CarryForwardRecord = {
   amount: number;
   status: string;
   target_bill_id?: string | null;
+  notes?: string | null;
+};
+
+type CarriedFeeLine = {
+  fee_category_id: string | null;
+  category_name: string;
+  academic_year_name: string;
+  amount: number;
 };
 
 type FeeConcession = {
   id: string;
   bill_id: string;
+  fee_category_id?: string | null;
   amount: number;
   reason?: string | null;
   notes?: string | null;
@@ -110,6 +125,11 @@ type FeeConcession = {
 type PaymentLine = {
   feeBillItemId: string;
   amount: string;
+};
+
+type InventoryIssueLine = {
+  inventoryItemId: string;
+  quantity: string;
 };
 
 type FeePayment = {
@@ -131,6 +151,42 @@ type School = {
   phone?: string | null;
   email?: string | null;
 };
+
+const FEE_CATEGORY_NOTE_PREFIX = "[[fee-category:";
+const CARRY_FORWARD_NOTE_PREFIX = "[[fee-category-carry-forward:v1]]";
+
+function parseCarryForwardLines(notes?: string | null): CarriedFeeLine[] | null {
+  if (!notes?.startsWith(CARRY_FORWARD_NOTE_PREFIX)) return null;
+  try {
+    const parsed = JSON.parse(notes.slice(CARRY_FORWARD_NOTE_PREFIX.length)) as { items?: CarriedFeeLine[] };
+    if (!Array.isArray(parsed.items)) return null;
+    return parsed.items.filter((item) =>
+      typeof item.category_name === "string" &&
+      typeof item.academic_year_name === "string" &&
+      Number.isFinite(Number(item.amount)) &&
+      Number(item.amount) > 0,
+    );
+  } catch {
+    return null;
+  }
+}
+
+function categoryIdFromConcessionNotes(notes?: string | null) {
+  return notes?.match(/^\[\[fee-category:([0-9a-f-]+)\]\]/i)?.[1] || null;
+}
+
+function concessionNotesWithoutCategory(notes?: string | null) {
+  return (notes || "").replace(/^\[\[fee-category:[0-9a-f-]+\]\]\s*/i, "").trim();
+}
+
+function notesWithConcessionCategory(categoryId: string, notes?: string | null) {
+  const cleanNotes = concessionNotesWithoutCategory(notes);
+  return `${FEE_CATEGORY_NOTE_PREFIX}${categoryId}]]${cleanNotes ? `\n${cleanNotes}` : ""}`;
+}
+
+function isMissingConcessionCategoryColumn(error: { message?: string } | null | undefined) {
+  return Boolean(error?.message && /fee_category_id.*(column|schema cache)|(column|schema cache).*fee_category_id/i.test(error.message));
+}
 
 
 type FinancialAccount = {
@@ -259,12 +315,26 @@ export default function FeesPage() {
   const [paymentLines, setPaymentLines] = useState<PaymentLine[]>([]);
   const [showConcessionForm, setShowConcessionForm] = useState(false);
   const [concessionAmount, setConcessionAmount] = useState("");
+  const [concessionCategoryId, setConcessionCategoryId] = useState("");
   const [concessionReason, setConcessionReason] = useState("");
   const [savingConcession, setSavingConcession] = useState(false);
+  const selectedConcessionItem = useMemo(
+    () => billItems.find((item) => item.bill_id === selectedBill?.id && item.fee_category_id === concessionCategoryId),
+    [billItems, selectedBill?.id, concessionCategoryId],
+  );
+  const selectedConcessionOutstanding = useMemo(() => {
+    if (!selectedConcessionItem) return 0;
+    const paid = paymentAllocations
+      .filter((allocation) => allocation.fee_bill_item_id === selectedConcessionItem.id)
+      .reduce((sum, allocation) => sum + Number(allocation.amount || 0), 0);
+    return Math.max(0, Number(selectedConcessionItem.net_amount ?? selectedConcessionItem.amount) - paid);
+  }, [selectedConcessionItem, paymentAllocations]);
   const [editingConcession, setEditingConcession] = useState<FeeConcession | null>(null);
   const [editConcessionAmount, setEditConcessionAmount] = useState("");
+  const [editConcessionCategoryId, setEditConcessionCategoryId] = useState("");
   const [editConcessionReason, setEditConcessionReason] = useState("");
   const [savingConcessionEdit, setSavingConcessionEdit] = useState(false);
+  const [deletingConcessionId, setDeletingConcessionId] = useState<string | null>(null);
 
   const [manualBillNumber, setManualBillNumber] = useState("");
   const [manualReceiptNumber, setManualReceiptNumber] = useState("");
@@ -284,6 +354,18 @@ export default function FeesPage() {
   );
   const [notes, setRemarks] = useState("");
   const [savingPayment, setSavingPayment] = useState(false);
+  const [inventoryItems, setInventoryItems] = useState<InventoryItemRecord[]>([]);
+  const [inventoryStock, setInventoryStock] = useState<Record<string, number>>({});
+  const [inventoryIssueLines, setInventoryIssueLines] = useState<InventoryIssueLine[]>([
+    { inventoryItemId: "", quantity: "1" },
+  ]);
+  const [addingInventory, setAddingInventory] = useState(false);
+  const [inventoryNotice, setInventoryNotice] = useState<string | null>(null);
+  const [pendingInventorySale, setPendingInventorySale] = useState<{
+    id: string;
+    saleNumber: string | null;
+    billId: string;
+  } | null>(null);
 
   const [message, setMessage] = useState<{
     type: "success" | "error";
@@ -535,6 +617,38 @@ export default function FeesPage() {
     };
   }, [loadSchoolContext, loadStudents, loadFinancialAccounts]);
 
+  useEffect(() => {
+    if (!schoolId) return;
+    const currentSchoolId = schoolId;
+    let cancelled = false;
+
+    async function loadInventory() {
+      try {
+        const [items, stock] = await Promise.all([
+          listInventoryItems(supabase, currentSchoolId),
+          getStockSummary(supabase, currentSchoolId),
+        ]);
+        if (cancelled) return;
+        setInventoryItems(items.filter((item) => item.is_active));
+        setInventoryStock(
+          Object.fromEntries(stock.map((item) => [item.id, item.closingQuantity])),
+        );
+      } catch (error) {
+        if (cancelled) return;
+        console.error("Student fee inventory load error:", error);
+        setMessage({
+          type: "error",
+          text: error instanceof Error ? error.message : "Unable to load inventory.",
+        });
+      }
+    }
+
+    void loadInventory();
+    return () => {
+      cancelled = true;
+    };
+  }, [schoolId]);
+
   /*
    * --------------------------------------------------
    * SEARCH STUDENTS
@@ -656,12 +770,29 @@ export default function FeesPage() {
           setPaymentAllocations([]);
         }
 
-        const { data: concessionData, error: concessionError } = await supabase
+        let { data: concessionData, error: concessionError } = await supabase
           .from("fee_concessions")
-          .select("id, bill_id, amount, reason, notes")
+          .select("id, bill_id, fee_category_id, amount, reason, notes")
           .eq("school_id", schoolId)
           .eq("student_id", student.id)
           .order("id", { ascending: false });
+
+        // Continue showing legacy concessions if the category migration has
+        // not reached this database yet. Category assignment itself requires
+        // that migration and reports its database error when saved.
+        if (isMissingConcessionCategoryColumn(concessionError)) {
+          const legacyResult = await supabase
+            .from("fee_concessions")
+            .select("id, bill_id, amount, reason, notes")
+            .eq("school_id", schoolId)
+            .eq("student_id", student.id)
+            .order("id", { ascending: false });
+          concessionData = (legacyResult.data || []).map((item) => ({
+            ...item,
+            fee_category_id: categoryIdFromConcessionNotes(item.notes),
+          }));
+          concessionError = legacyResult.error;
+        }
 
         if (concessionError) {
           console.error("Concession history loading error:", concessionError);
@@ -786,7 +917,7 @@ export default function FeesPage() {
           await supabase
             .from("fee_carry_forwards")
             .select(
-              "id, source_bill_id, to_academic_year_id, amount, status, target_bill_id",
+              "id, source_bill_id, to_academic_year_id, amount, status, target_bill_id, notes",
             )
             .eq("school_id", schoolId)
             .eq("student_id", student.id)
@@ -1249,12 +1380,22 @@ export default function FeesPage() {
       0,
     );
 
-    // A pending previous-year balance becomes part of the new academic
-    // year's bill. This keeps one payment flow and one outstanding balance.
+    // Previous-year category balances remain separate bill lines, so each
+    // payment and outstanding amount remains attributable to its source fee.
     const carryForwardTotal = assignmentPreview.pendingCarryForwards.reduce(
       (sum, record) => sum + Math.max(Number(record.amount || 0), 0),
       0,
     );
+    const carryForwardLines = assignmentPreview.pendingCarryForwards.flatMap((record) => {
+      const snapshot = parseCarryForwardLines(record.notes);
+      if (snapshot?.length) return snapshot;
+      return [{
+        fee_category_id: null,
+        category_name: "Old Fee",
+        academic_year_name: assignmentPreview.previousAcademicYear?.name || "Previous Year",
+        amount: Math.max(Number(record.amount || 0), 0),
+      }].filter((line) => line.amount > 0);
+    });
 
     const totalAmount = structureTotal + carryForwardTotal;
 
@@ -1426,8 +1567,9 @@ export default function FeesPage() {
       }));
 
       if (carryForwardTotal > 0) {
-        const { data: oldFeeCategory, error: oldFeeCategoryError } =
-          await supabase
+        let oldFeeCategoryId: string | undefined;
+        if (carryForwardLines.some((line) => !line.fee_category_id)) {
+          const { data: oldFeeCategory, error: oldFeeCategoryError } = await supabase
             .from("fee_categories")
             .select("id")
             .eq("school_id", schoolId)
@@ -1435,16 +1577,10 @@ export default function FeesPage() {
             .limit(1)
             .maybeSingle();
 
-        if (oldFeeCategoryError) {
-          throw new Error(
-            `Unable to load the Old Fee category: ${oldFeeCategoryError.message}`,
-          );
-        }
-
-        let oldFeeCategoryId = oldFeeCategory?.id as string | undefined;
-        if (!oldFeeCategoryId) {
-          const { data: createdOldFeeCategory, error: createOldFeeError } =
-            await supabase
+          if (oldFeeCategoryError) throw new Error(`Unable to load the Old Fee category: ${oldFeeCategoryError.message}`);
+          oldFeeCategoryId = oldFeeCategory?.id as string | undefined;
+          if (!oldFeeCategoryId) {
+            const { data: createdOldFeeCategory, error: createOldFeeError } = await supabase
               .from("fee_categories")
               .insert({
                 school_id: schoolId,
@@ -1455,31 +1591,25 @@ export default function FeesPage() {
               })
               .select("id")
               .single();
-
-          if (createOldFeeError) {
-            throw new Error(
-              `Unable to create the Old Fee category: ${createOldFeeError.message}`,
-            );
+            if (createOldFeeError) throw new Error(`Unable to create the Old Fee category: ${createOldFeeError.message}`);
+            oldFeeCategoryId = createdOldFeeCategory.id;
           }
-
-          oldFeeCategoryId = createdOldFeeCategory.id;
+          if (!oldFeeCategoryId) throw new Error("Old Fee category could not be resolved.");
         }
 
-        if (!oldFeeCategoryId) {
-          throw new Error("Old Fee category could not be resolved.");
+        for (const line of carryForwardLines) {
+          billItems.push({
+            school_id: schoolId,
+            bill_id: billData.id,
+            fee_structure_id: null,
+            fee_category_id: line.fee_category_id || oldFeeCategoryId!,
+            description: `${line.category_name} - ${line.academic_year_name}`,
+            fee_type: "one_time",
+            amount: Number(line.amount),
+            discount: 0,
+            net_amount: Number(line.amount),
+          });
         }
-
-        billItems.push({
-          school_id: schoolId,
-          bill_id: billData.id,
-          fee_structure_id: null,
-          fee_category_id: oldFeeCategoryId,
-          description: `Old Fee - ${assignmentPreview.previousAcademicYear?.name || "Previous Year"}`,
-          fee_type: "one_time",
-          amount: carryForwardTotal,
-          discount: 0,
-          net_amount: carryForwardTotal,
-        });
       }
 
       const { error: billItemsError } = await supabase
@@ -1630,8 +1760,54 @@ export default function FeesPage() {
       return;
     }
 
+    const sourceItems = billItems.filter((item) => item.bill_id === bill.id);
+    const itemBalances: CarriedFeeLine[] = sourceItems.flatMap((item) => {
+      const paid = paymentAllocations
+        .filter((allocation) => allocation.fee_bill_item_id === item.id)
+        .reduce((sum, allocation) => sum + Number(allocation.amount || 0), 0);
+      const netAmount = Number(item.net_amount ?? (Number(item.amount || 0) - Number(item.discount || 0)));
+      const amount = Math.max(0, netAmount - paid);
+      if (amount <= 0.005) return [];
+      return [{
+        fee_category_id: item.fee_category_id || null,
+        category_name: item.description || "Fee",
+        academic_year_name: sourceAcademicYear.name,
+        amount: Number(amount.toFixed(2)),
+      }];
+    });
+
+    // The bill header is the accounting balance. If legacy bills have a
+    // small mismatch between the header and category allocations, scale or
+    // preserve the difference as a clearly labeled unallocated fee line.
+    let carryLines = itemBalances;
+    const categorizedTotal = itemBalances.reduce((sum, item) => sum + item.amount, 0);
+    if (categorizedTotal > outstanding + 0.005) {
+      const ratio = outstanding / categorizedTotal;
+      carryLines = itemBalances.map((item) => ({ ...item, amount: Number((item.amount * ratio).toFixed(2)) }));
+      const roundingDifference = Number((outstanding - carryLines.reduce((sum, item) => sum + item.amount, 0)).toFixed(2));
+      if (carryLines.length && Math.abs(roundingDifference) > 0) {
+        carryLines[carryLines.length - 1] = { ...carryLines[carryLines.length - 1], amount: Number((carryLines[carryLines.length - 1].amount + roundingDifference).toFixed(2)) };
+      }
+    } else if (outstanding - categorizedTotal > 0.005) {
+      carryLines = [...itemBalances, {
+        fee_category_id: null,
+        category_name: "Other outstanding fee",
+        academic_year_name: sourceAcademicYear.name,
+        amount: Number((outstanding - categorizedTotal).toFixed(2)),
+      }];
+    }
+    carryLines = carryLines.filter((item) => item.amount > 0.005);
+    if (!carryLines.length) {
+      carryLines = [{
+        fee_category_id: null,
+        category_name: "Unallocated fee balance",
+        academic_year_name: sourceAcademicYear.name,
+        amount: outstanding,
+      }];
+    }
+
     const confirmed = window.confirm(
-      `Carry forward ${formatMoney(outstanding)} from ${sourceAcademicYear.name} to ${targetYear.name} for ${getStudentName(selectedStudent)}?`,
+      `Carry forward ${formatMoney(outstanding)} from ${sourceAcademicYear.name} to ${targetYear.name} for ${getStudentName(selectedStudent)} as ${carryLines.length} category-wise line(s)?`,
     );
 
     if (!confirmed) {
@@ -1645,7 +1821,7 @@ export default function FeesPage() {
         p_source_bill_id: bill.id,
         p_to_academic_year_id: targetYear.id,
         p_amount: outstanding,
-        p_notes: `Carry forward from ${sourceAcademicYear.name} to ${targetYear.name}`,
+        p_notes: `${CARRY_FORWARD_NOTE_PREFIX}${JSON.stringify({ items: carryLines })}`,
       });
 
       if (error) {
@@ -1654,7 +1830,7 @@ export default function FeesPage() {
 
       setMessage({
         type: "success",
-        text: `${formatMoney(outstanding)} carried forward to ${targetYear.name}.`,
+        text: `${formatMoney(outstanding)} carried forward to ${targetYear.name} across ${carryLines.length} category-wise line(s).`,
       });
 
       await loadLedger(selectedStudent);
@@ -1795,15 +1971,6 @@ export default function FeesPage() {
    * --------------------------------------------------
    */
   function openPaymentModal(bill: FeeBill) {
-    if (Number(bill.balance_amount) <= 0) {
-      setMessage({
-        type: "error",
-        text: "This bill is already fully paid.",
-      });
-
-      return;
-    }
-
     setSelectedBill(bill);
     setPaymentLines([]);
     setPaymentMode("cash");
@@ -1841,7 +2008,8 @@ export default function FeesPage() {
   function openEditConcession(concession: FeeConcession) {
     setEditingConcession(concession);
     setEditConcessionAmount(String(Number(concession.amount || 0)));
-    setEditConcessionReason(concession.reason || concession.notes || "");
+    setEditConcessionCategoryId(concession.fee_category_id || categoryIdFromConcessionNotes(concession.notes) || "");
+    setEditConcessionReason(concession.reason || concessionNotesWithoutCategory(concession.notes));
     setMessage(null);
   }
 
@@ -1849,6 +2017,7 @@ export default function FeesPage() {
     if (savingConcessionEdit) return;
     setEditingConcession(null);
     setEditConcessionAmount("");
+    setEditConcessionCategoryId("");
     setEditConcessionReason("");
   }
 
@@ -1856,8 +2025,33 @@ export default function FeesPage() {
     if (!schoolId || !selectedStudent || !editingConcession) return;
 
     const amount = Number(editConcessionAmount);
+    const targetItem = billItems.find((item) => item.bill_id === editingConcession.bill_id && item.fee_category_id === editConcessionCategoryId);
+    if (!targetItem) {
+      setMessage({ type: "error", text: "Select a fee category from this bill." });
+      return;
+    }
     if (!Number.isFinite(amount) || amount <= 0) {
       setMessage({ type: "error", text: "Enter a valid concession amount." });
+      return;
+    }
+
+    const targetPaid = paymentAllocations
+      .filter((allocation) => allocation.fee_bill_item_id === targetItem.id)
+      .reduce((sum, allocation) => sum + Number(allocation.amount || 0), 0);
+    const oldItem = editingConcession.fee_category_id
+      ? billItems.find((item) => item.bill_id === editingConcession.bill_id && item.fee_category_id === editingConcession.fee_category_id)
+      : undefined;
+    const currentTargetConcessions = concessions
+      .filter((item) => item.bill_id === editingConcession.bill_id && item.fee_category_id === editConcessionCategoryId)
+      .reduce((sum, item) => sum + Number(item.amount || 0), 0);
+    const targetConcessionsAlreadyInItem = Number(targetItem.discount || 0) + 0.005 >= currentTargetConcessions;
+    const targetOutstanding = Math.max(
+      0,
+      Number(targetItem.net_amount ?? targetItem.amount) - targetPaid +
+        (oldItem?.id === targetItem.id && targetConcessionsAlreadyInItem ? Number(editingConcession.amount || 0) : 0),
+    );
+    if (amount > targetOutstanding + 0.005) {
+      setMessage({ type: "error", text: "Concession cannot exceed the selected category's outstanding amount." });
       return;
     }
 
@@ -1880,12 +2074,68 @@ export default function FeesPage() {
         throw new Error(data?.message || "Concession was not updated.");
       }
 
+      const { error: categoryError } = await supabase
+        .from("fee_concessions")
+        .update({ fee_category_id: editConcessionCategoryId })
+        .eq("id", editingConcession.id)
+        .eq("school_id", schoolId);
+      if (categoryError) {
+        if (!isMissingConcessionCategoryColumn(categoryError)) {
+          throw new Error(`Amount was updated, but the fee category could not be saved: ${categoryError.message}`);
+        }
+        const { error: notesError } = await supabase
+          .from("fee_concessions")
+          .update({ notes: notesWithConcessionCategory(editConcessionCategoryId, editConcessionReason) })
+          .eq("id", editingConcession.id)
+          .eq("school_id", schoolId);
+        if (notesError) throw new Error(`Amount was updated, but the category fallback could not be saved: ${notesError.message}`);
+      }
+
+      const previousCategoryId = editingConcession.fee_category_id || categoryIdFromConcessionNotes(editingConcession.notes);
+      const itemAdjustments = new Map<string, { item: FeeBillItem; previousTotal: number; nextTotal: number }>();
+      const categoryTotal = (categoryId: string) => concessions
+        .filter((item) => item.bill_id === editingConcession.bill_id && item.fee_category_id === categoryId)
+        .reduce((sum, item) => sum + Number(item.amount || 0), 0);
+
+      if (previousCategoryId && previousCategoryId !== editConcessionCategoryId && oldItem) {
+        const previousTotal = categoryTotal(previousCategoryId);
+        itemAdjustments.set(oldItem.id, {
+          item: oldItem,
+          previousTotal,
+          nextTotal: Math.max(0, previousTotal - Number(editingConcession.amount || 0)),
+        });
+      }
+
+      const targetPreviousTotal = categoryTotal(editConcessionCategoryId);
+      itemAdjustments.set(targetItem.id, {
+        item: targetItem,
+        previousTotal: targetPreviousTotal,
+        nextTotal: targetPreviousTotal + amount - (previousCategoryId === editConcessionCategoryId ? Number(editingConcession.amount || 0) : 0),
+      });
+
+      for (const { item, previousTotal, nextTotal } of itemAdjustments.values()) {
+        // Earlier saves may have stored the concession row but failed before
+        // updating its bill item. Rebuild the category discount from the
+        // concession ledger instead of incrementing a possibly stale value.
+        const previousDiscountWasApplied = Number(item.discount || 0) + 0.005 >= previousTotal;
+        const baseDiscount = previousDiscountWasApplied
+          ? Math.max(0, Number(item.discount || 0) - previousTotal)
+          : Number(item.discount || 0);
+        const nextDiscount = baseDiscount + nextTotal;
+        const { error: itemError } = await supabase.from("fee_bill_items").update({
+          discount: nextDiscount,
+          net_amount: Math.max(0, Number(item.amount || 0) - nextDiscount),
+        }).eq("id", item.id).eq("school_id", schoolId);
+        if (itemError) throw new Error(`Concession was saved, but its category amount could not be updated: ${itemError.message}`);
+      }
+
       setConcessions((current) =>
         current.map((item) =>
           item.id === editingConcession.id
             ? {
                 ...item,
                 amount,
+                fee_category_id: editConcessionCategoryId,
                 reason: editConcessionReason.trim() || null,
                 notes: editConcessionReason.trim() || null,
               }
@@ -1893,9 +2143,21 @@ export default function FeesPage() {
         ),
       );
 
+      setBillItems((current) => current.map((item) => {
+        const oldCategoryItem = editingConcession.fee_category_id
+          ? current.find((candidate) => candidate.bill_id === editingConcession.bill_id && candidate.fee_category_id === editingConcession.fee_category_id)
+          : undefined;
+        const delta = item.id === targetItem.id
+          ? amount - (oldCategoryItem?.id === targetItem.id ? Number(editingConcession.amount || 0) : 0)
+          : item.id === oldCategoryItem?.id ? -Number(editingConcession.amount || 0) : 0;
+        if (!delta) return item;
+        return { ...item, discount: Math.max(0, Number(item.discount || 0) + delta), net_amount: Math.max(0, Number(item.net_amount ?? item.amount) - delta) };
+      }));
+
       await loadLedger(selectedStudent);
       setEditingConcession(null);
       setEditConcessionAmount("");
+      setEditConcessionCategoryId("");
       setEditConcessionReason("");
       setMessage({
         type: "success",
@@ -1912,11 +2174,50 @@ export default function FeesPage() {
     }
   }
 
+  async function deleteConcession(concession: FeeConcession) {
+    if (!schoolId || !selectedStudent || deletingConcessionId) return;
+    if (!window.confirm(`Delete this ${formatMoney(Number(concession.amount || 0))} concession? The student's category and bill outstanding will be recalculated.`)) return;
+
+    setDeletingConcessionId(concession.id);
+    setMessage(null);
+    try {
+      const { data, error } = await supabase.rpc("delete_fee_concession_and_recalculate", {
+        p_school_id: schoolId,
+        p_concession_id: concession.id,
+      });
+      if (error) throw new Error(`Unable to delete concession: ${error.message}`);
+      if (!data?.success) throw new Error(data?.message || "Concession was not deleted.");
+
+      await loadLedger(selectedStudent);
+      if (editingConcession?.id === concession.id) closeEditConcession();
+      setMessage({
+        type: "success",
+        text: `Concession of ${formatMoney(Number(concession.amount || 0))} deleted. The category and bill outstanding were recalculated.`,
+      });
+    } catch (error) {
+      console.error("DELETE CONCESSION ERROR:", error);
+      setMessage({ type: "error", text: error instanceof Error ? error.message : "Unable to delete concession." });
+    } finally {
+      setDeletingConcessionId(null);
+    }
+  }
+
   async function applyConcession() {
     if (!schoolId || !selectedStudent || !selectedBill) return;
 
+    const targetItem = billItems.find((item) => item.bill_id === selectedBill.id && item.fee_category_id === concessionCategoryId);
+    if (!targetItem) {
+      setMessage({ type: "error", text: "Select a fee category from this bill." });
+      return;
+    }
+
+    const categoryPaid = paymentAllocations
+      .filter((allocation) => allocation.fee_bill_item_id === targetItem.id)
+      .reduce((sum, allocation) => sum + Number(allocation.amount || 0), 0);
+    const categoryOutstanding = Math.max(0, Number(targetItem.net_amount ?? targetItem.amount) - categoryPaid);
+
     const amountToConcede = Number(concessionAmount);
-    const outstanding = Number(selectedBill.balance_amount || 0);
+    const outstanding = categoryOutstanding;
 
     if (!Number.isFinite(amountToConcede) || amountToConcede <= 0) {
       setMessage({ type: "error", text: "Enter a valid concession amount." });
@@ -1937,12 +2238,13 @@ export default function FeesPage() {
     try {
       // Concession is stored as its own ledger adjustment. The database
       // recalculation includes fee_concessions in fee_bills.discount.
-      const { data: concessionData, error: concessionError } = await supabase
+      let { data: concessionData, error: concessionError } = await supabase
         .from("fee_concessions")
         .insert({
           school_id: schoolId,
           student_id: selectedStudent.id,
           bill_id: selectedBill.id,
+          fee_category_id: concessionCategoryId,
           concession_type: "fixed",
           percentage: null,
           amount: amountToConcede,
@@ -1952,6 +2254,26 @@ export default function FeesPage() {
         })
         .select("id")
         .single();
+
+      if (isMissingConcessionCategoryColumn(concessionError)) {
+        const legacyInsert = await supabase
+          .from("fee_concessions")
+          .insert({
+            school_id: schoolId,
+            student_id: selectedStudent.id,
+            bill_id: selectedBill.id,
+            concession_type: "fixed",
+            percentage: null,
+            amount: amountToConcede,
+            reason: concessionReason.trim() || "Fee concession",
+            notes: notesWithConcessionCategory(concessionCategoryId, concessionReason.trim() || null),
+            created_by: (await supabase.auth.getUser()).data.user?.id || null,
+          })
+          .select("id")
+          .single();
+        concessionData = legacyInsert.data;
+        concessionError = legacyInsert.error;
+      }
 
       if (concessionError) {
         throw new Error(`Unable to apply concession: ${concessionError.message}`);
@@ -1979,6 +2301,26 @@ export default function FeesPage() {
           `Concession could not be applied because the bill could not be recalculated: ${recalculateError.message}`,
         );
       }
+
+      const { error: itemAdjustmentError } = await supabase
+        .from("fee_bill_items")
+        .update({
+          discount: Number(targetItem.discount || 0) + amountToConcede,
+          net_amount: Math.max(0, Number(targetItem.net_amount ?? targetItem.amount) - amountToConcede),
+        })
+        .eq("id", targetItem.id)
+        .eq("school_id", schoolId);
+
+      if (itemAdjustmentError) {
+        await supabase.from("fee_concessions").delete().eq("id", concessionData.id).eq("school_id", schoolId);
+        await supabase.rpc("recalculate_fee_bill", { p_bill_id: selectedBill.id });
+        throw new Error(`Bill outstanding was recalculated, but the category balance could not be updated: ${itemAdjustmentError.message}`);
+      }
+      setBillItems((current) => current.map((item) => item.id === targetItem.id ? {
+        ...item,
+        discount: Number(targetItem.discount || 0) + amountToConcede,
+        net_amount: Math.max(0, Number(targetItem.net_amount ?? targetItem.amount) - amountToConcede),
+      } : item));
 
       const { data: refreshedBillData, error: refreshedBillError } =
         await supabase
@@ -2008,6 +2350,7 @@ export default function FeesPage() {
       );
 
         setConcessionAmount("");
+      setConcessionCategoryId("");
       setConcessionReason("");
       setShowConcessionForm(false);
 
@@ -2139,6 +2482,138 @@ export default function FeesPage() {
       ),
     [paymentLines],
   );
+
+  async function addInventoryToSelectedBill() {
+    if (addingInventory || savingPayment) return;
+    if (!schoolId || !selectedStudent || !selectedBill) {
+      setInventoryNotice("Select a student and fee bill before adding inventory.");
+      return;
+    }
+    if (selectedStudent.school_id !== schoolId) {
+      setInventoryNotice("This student does not belong to your school.");
+      return;
+    }
+
+    setAddingInventory(true);
+    setInventoryNotice(null);
+    try {
+      let sale = pendingInventorySale;
+      if (!sale) {
+        const selectedLines = inventoryIssueLines.filter((line) => line.inventoryItemId);
+        if (!selectedLines.length) {
+          throw new Error("Select at least one inventory item to add to this bill.");
+        }
+        const saleLines = selectedLines.map((line) => {
+          const item = inventoryItems.find((candidate) => candidate.id === line.inventoryItemId);
+          const quantity = Number(line.quantity);
+          const available = inventoryStock[line.inventoryItemId] || 0;
+          if (!item || !Number.isFinite(quantity) || quantity <= 0) {
+            throw new Error("Choose an inventory item and enter a valid quantity.");
+          }
+          if (quantity > available + 0.0001) {
+            throw new Error(`${item.name} has only ${available} ${item.unit} available.`);
+          }
+          if (!(Number(item.selling_price) > 0)) {
+            throw new Error(`Set the sale price for ${item.name} in Inventory before issuing it.`);
+          }
+          return {
+            inventoryItemId: item.id,
+            quantity,
+            unitPrice: Number(item.selling_price),
+          };
+        });
+        const { data: { user }, error: authError } = await supabase.auth.getUser();
+        if (authError) throw authError;
+        if (!user) throw new Error("Your session has expired. Please sign in again.");
+
+        const setup = await ensureSchoolAccountingSetup(supabase, schoolId);
+        const saleResult = await saveStudentBookSale(supabase, {
+          schoolId,
+          saleDate: paymentDate,
+          studentId: selectedStudent.id,
+          saleNumber: null,
+          paymentMode: "receivable",
+          paymentAccountId: null,
+          receivableAccountId: setup.accountMap.OTHER_RECEIVABLES || null,
+          notes: `Issued on fee bill ${selectedBill.bill_number}`,
+          createdBy: user.id,
+          lines: saleLines,
+        });
+        sale = { id: saleResult.saleId, saleNumber: saleResult.saleNumber, billId: selectedBill.id };
+        setPendingInventorySale(sale);
+        setInventoryIssueLines([{ inventoryItemId: "", quantity: "1" }]);
+      }
+
+      if (sale.billId !== selectedBill.id) {
+        throw new Error("Inventory was already issued for a different bill. Select that original bill to finish linking it.");
+      }
+
+      let attached;
+      try {
+        attached = await attachInventorySaleToFeeBill(
+          supabase,
+          schoolId,
+          sale.id,
+          selectedBill.id,
+        );
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : "Unknown error";
+        throw new Error(
+          `Inventory was issued (${sale.saleNumber || sale.id}) but its fee bill line could not be added: ${detail}`,
+        );
+      }
+
+      const { data: linkedRows, error: linkedRowsError } = await supabase
+        .from("fee_bill_items")
+        .select("id,school_id,bill_id,fee_structure_id,fee_category_id,description,fee_type,amount,discount,net_amount")
+        .eq("school_id", schoolId)
+        .eq("bill_id", selectedBill.id)
+        .eq("inventory_sale_id", sale.id);
+      if (linkedRowsError) throw linkedRowsError;
+
+      const { data: refreshedBill, error: refreshedBillError } = await supabase
+        .from("fee_bills")
+        .select("id,academic_year_id,bill_number,bill_date,due_date,discount,total_amount,paid_amount,balance_amount,status")
+        .eq("id", selectedBill.id)
+        .eq("school_id", schoolId)
+        .eq("student_id", selectedStudent.id)
+        .single();
+      if (refreshedBillError) throw refreshedBillError;
+
+      await loadLedger(selectedStudent);
+      setSelectedBill(refreshedBill as FeeBill);
+      setBills((current) =>
+        current.map((bill) => bill.id === selectedBill.id ? refreshedBill as FeeBill : bill),
+      );
+      setPaymentLines((current) => {
+        const currentIds = new Set(current.map((line) => line.feeBillItemId));
+        return [
+          ...current,
+          ...(linkedRows || [])
+            .filter((line) => !currentIds.has(line.id))
+            .map((line) => ({ feeBillItemId: line.id, amount: "" })),
+        ];
+      });
+
+      const stock = await getStockSummary(supabase, schoolId);
+      setInventoryStock(Object.fromEntries(stock.map((item) => [item.id, item.closingQuantity])));
+      setPendingInventorySale(null);
+      setInventoryNotice(
+        attached.total > 0
+          ? `${formatMoney(attached.total)} inventory charge added to bill ${refreshedBill.bill_number}.`
+          : `Previously issued inventory was linked to bill ${refreshedBill.bill_number}.`,
+      );
+    } catch (error) {
+      const detail = error && typeof error === "object"
+        ? [(error as { message?: string }).message, (error as { details?: string }).details, (error as { hint?: string }).hint].filter(Boolean).join(" · ")
+        : "";
+      setInventoryNotice(
+        detail || (error instanceof Error ? error.message : "Unable to add inventory to this bill."),
+      );
+    } finally {
+      setAddingInventory(false);
+    }
+  }
 
 
   async function submitPayment(event: FormEvent) {
@@ -2390,6 +2865,14 @@ export default function FeesPage() {
         throw new Error("Payment was recorded but no payment ID was returned.");
       }
 
+      const { error: inventoryAccountingError } = await supabase.rpc(
+        "reclassify_inventory_fee_payment",
+        { p_payment_id: createdPaymentId },
+      );
+      if (inventoryAccountingError) {
+        throw new Error(`Payment was recorded, but inventory payment accounting could not be reclassified: ${inventoryAccountingError.message}`);
+      }
+
       let lastRemaining = Number(
         result.remaining_balance ?? Math.max(currentOutstanding - totalPayment, 0),
       );
@@ -2425,11 +2908,11 @@ export default function FeesPage() {
         section: selectedStudent.section,
         billNumber: refreshedBill.bill_number,
         feeDescription: receiptItems.map((item) => item.description).join(", "),
-        particulars: `${getStudentName(selectedStudent)} • ${selectedStudent.class_name || "Class"}${selectedStudent.section ? ` • ${selectedStudent.section}` : ""} • ${receiptItems.map((item) => item.description).join(", ")}`,
+        particulars: `${getStudentName(selectedStudent)} - ${selectedStudent.class_name || "Class"}${selectedStudent.section ? ` - ${selectedStudent.section}` : ""} - ${receiptItems.map((item) => item.description).join(", ")}`,
         feeItems: receiptItems,
         amount: totalPayment,
         concessionAmount: Number(refreshedBill.discount || 0),
-        paymentMode: collectionType === "split" ? `Split — Cash ${formatMoney(cashSplit)} + Bank/Online ${formatMoney(bankSplit)}` : mode,
+        paymentMode: collectionType === "split" ? `Split - Cash ${formatMoney(cashSplit)} + Bank/Online ${formatMoney(bankSplit)}` : mode,
         referenceNumber: referenceNumber.trim() || null,
         previousOutstanding: currentOutstanding,
         remainingOutstanding: lastRemaining,
@@ -2455,8 +2938,15 @@ export default function FeesPage() {
         text: `${formatMoney(totalPayment)} received for ${receiptItems.length} fee ${receiptItems.length === 1 ? "category" : "categories"}. Bill ${refreshedBill.bill_number} receipt downloaded.`,
       });
     } catch (error: unknown) {
-      const messageText = error instanceof Error ? error.message : "Unable to record payment. Please try again.";
-      console.error("PAYMENT RECORDING ERROR:", messageText, error);
+      const errorRecord = error && typeof error === "object"
+        ? error as { message?: string; details?: string; hint?: string; code?: string }
+        : null;
+      const messageText = [
+        error instanceof Error ? error.message : errorRecord?.message,
+        errorRecord?.details,
+        errorRecord?.hint,
+        errorRecord?.code ? `Code: ${errorRecord.code}` : null,
+      ].filter((part) => typeof part === "string" && part.trim()).join(" · ") || "Unable to record payment. Please try again.";
       setMessage({ type: "error", text: messageText });
     } finally {
       setSavingPayment(false);
@@ -3177,6 +3667,16 @@ export default function FeesPage() {
                                   <Pencil size={12} />
                                   Edit
                                 </button>
+                                <button
+                                  type="button"
+                                  onClick={() => void deleteConcession(concession)}
+                                  disabled={deletingConcessionId === concession.id || Boolean(deletingConcessionId)}
+                                  className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-white px-2 py-1 font-bold text-red-600 hover:bg-red-50 disabled:opacity-50"
+                                  title="Delete concession"
+                                >
+                                  <Trash2 size={12} />
+                                  {deletingConcessionId === concession.id ? "Deleting..." : "Delete"}
+                                </button>
                               </div>
                             ))}
                           </td>
@@ -3203,16 +3703,37 @@ export default function FeesPage() {
 
                           <td className="px-5 py-4 text-right">
                             <div className="flex flex-wrap items-center justify-end gap-2">
-                              {Number(bill.balance_amount) > 0 && (
-                                <button
-                                  type="button"
-                                  onClick={() => openPaymentModal(bill)}
-                                  className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 text-xs font-bold text-white transition hover:bg-blue-700"
-                                >
-                                  <Plus size={14} />
-                                  Add Payment
-                                </button>
-                              )}
+                              <button
+                                type="button"
+                                onClick={() => openPaymentModal(bill)}
+                                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 text-xs font-bold text-white transition hover:bg-blue-700"
+                              >
+                                <Plus size={14} />
+                                {Number(bill.balance_amount) > 0 ? "Add Payment / Inventory" : "Add Inventory"}
+                              </button>
+
+                              {concessions.filter((item) => item.bill_id === bill.id).map((concession) => (
+                                <span key={`actions-${concession.id}`} className="inline-flex gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => openEditConcession(concession)}
+                                    disabled={savingConcessionEdit}
+                                    className="inline-flex items-center gap-1 rounded-lg border border-amber-300 bg-white px-3 py-2 text-xs font-bold text-amber-800 transition hover:bg-amber-50 disabled:opacity-50"
+                                  >
+                                    <Pencil size={13} />
+                                    Edit Concession
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => void deleteConcession(concession)}
+                                    disabled={Boolean(deletingConcessionId)}
+                                    className="inline-flex items-center gap-1 rounded-lg border border-red-200 bg-white px-3 py-2 text-xs font-bold text-red-700 transition hover:bg-red-50 disabled:opacity-50"
+                                  >
+                                    <Trash2 size={13} />
+                                    Delete
+                                  </button>
+                                </span>
+                              ))}
 
                               {Number(bill.balance_amount) > 0 && (
                                 <button
@@ -3342,12 +3863,12 @@ export default function FeesPage() {
       </div>
 
       {editingConcession && selectedStudent && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-sm">
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="edit-concession-title">
           <div className="w-full max-w-md overflow-hidden rounded-2xl bg-white shadow-2xl">
             <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
               <div>
-                <h2 className="font-bold text-slate-900">Edit Concession</h2>
-                <p className="mt-1 text-xs text-slate-500">Correct the concession amount or reason. The bill will be recalculated automatically.</p>
+                <h2 id="edit-concession-title" className="font-bold text-slate-900">Edit Concession</h2>
+                <p className="mt-1 text-xs text-slate-500">Select the fee category this concession should reduce.</p>
               </div>
               <button
                 type="button"
@@ -3363,6 +3884,45 @@ export default function FeesPage() {
               <div className="rounded-xl bg-amber-50 p-3 text-xs text-amber-800">
                 <div className="font-bold">Previous concession</div>
                 <div className="mt-1 text-lg font-bold">{formatMoney(Number(editingConcession.amount || 0))}</div>
+              </div>
+
+              <div className="rounded-xl border border-slate-200 p-3">
+                <div className="mb-2 flex items-center justify-between text-xs font-bold text-slate-700">
+                  <span>Student concession history</span>
+                  <span>{concessions.length} record(s) · {formatMoney(concessions.reduce((sum, item) => sum + Number(item.amount || 0), 0))} total</span>
+                </div>
+                <div className="max-h-32 space-y-2 overflow-y-auto">
+                  {concessions.map((item) => {
+                    const categoryId = item.fee_category_id || categoryIdFromConcessionNotes(item.notes);
+                    const categoryName = billItems.find((billItem) => billItem.bill_id === item.bill_id && billItem.fee_category_id === categoryId)?.description;
+                    return (
+                      <div key={`history-${item.id}`} className={`flex items-start justify-between gap-3 rounded-lg px-2 py-1.5 text-xs ${item.id === editingConcession.id ? "bg-amber-50" : "bg-slate-50"}`}>
+                        <span className="min-w-0 text-slate-600">
+                          <span className="block font-semibold text-slate-800">{categoryName || "Bill overall"} · {bills.find((bill) => bill.id === item.bill_id)?.bill_number || "Fee bill"}{item.id === editingConcession.id ? " · Editing" : ""}</span>
+                          {(item.reason || concessionNotesWithoutCategory(item.notes)) && <span className="block truncate">{item.reason || concessionNotesWithoutCategory(item.notes)}</span>}
+                        </span>
+                        <span className="shrink-0 font-bold text-amber-700">{formatMoney(Number(item.amount || 0))}</span>
+                      </div>
+                    );
+                  })}
+                  {!concessions.length && <p className="text-xs text-slate-500">No concession records found.</p>}
+                </div>
+              </div>
+
+              <div>
+                <label className="mb-2 block text-sm font-semibold text-slate-700">Fee Category</label>
+                <select
+                  value={editConcessionCategoryId}
+                  onChange={(event) => setEditConcessionCategoryId(event.target.value)}
+                  disabled={savingConcessionEdit}
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                >
+                  <option value="">Select fee category</option>
+                  {billItems.filter((item) => item.bill_id === editingConcession.bill_id && item.fee_category_id).map((item) => (
+                    <option key={item.id} value={item.fee_category_id!}>{item.description}</option>
+                  ))}
+                </select>
+                {!editingConcession.fee_category_id && <p className="mt-1 text-xs text-amber-700">This older concession was applied to the bill overall. Choose a category to assign it.</p>}
               </div>
 
               <div>
@@ -3396,6 +3956,15 @@ export default function FeesPage() {
               <div className="flex justify-end gap-2">
                 <button
                   type="button"
+                  onClick={() => void deleteConcession(editingConcession)}
+                  disabled={savingConcessionEdit || Boolean(deletingConcessionId)}
+                  className="mr-auto inline-flex items-center gap-1 rounded-lg border border-red-200 px-3 py-2.5 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50"
+                >
+                  <Trash2 size={14} />
+                  {deletingConcessionId === editingConcession.id ? "Deleting..." : "Delete concession"}
+                </button>
+                <button
+                  type="button"
                   onClick={closeEditConcession}
                   disabled={savingConcessionEdit}
                   className="rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-xs font-semibold text-slate-600 hover:bg-slate-50"
@@ -3405,7 +3974,7 @@ export default function FeesPage() {
                 <button
                   type="button"
                   onClick={() => void saveConcessionEdit()}
-                  disabled={savingConcessionEdit}
+                  disabled={savingConcessionEdit || !editConcessionCategoryId}
                   className="rounded-lg bg-blue-600 px-4 py-2.5 text-xs font-bold text-white hover:bg-blue-700 disabled:opacity-50"
                 >
                   {savingConcessionEdit ? "Saving..." : "Save Correction"}
@@ -3478,14 +4047,24 @@ export default function FeesPage() {
                     Give Concession
                   </div>
                   <p className="mt-1 text-xs text-amber-800">
-                    Enter the concession amount to reduce this bill's outstanding balance.
+                    Choose the fee category to reduce. Its outstanding and the bill total will both update.
                   </p>
 
-                  <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                  <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                    <select
+                      value={concessionCategoryId}
+                      onChange={(event) => setConcessionCategoryId(event.target.value)}
+                      className="w-full rounded-lg border border-amber-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-amber-500 focus:ring-2 focus:ring-amber-100"
+                    >
+                      <option value="">Select fee category</option>
+                      {billItems.filter((item) => item.bill_id === selectedBill?.id && item.fee_category_id).map((item) => (
+                        <option key={item.id} value={item.fee_category_id!}>{item.description}</option>
+                      ))}
+                    </select>
                     <input
                       type="number"
                       min="0.01"
-                      max={Number(selectedBill.balance_amount)}
+                      max={selectedConcessionOutstanding}
                       step="0.01"
                       value={concessionAmount}
                       onChange={(event) => setConcessionAmount(event.target.value)}
@@ -3513,7 +4092,7 @@ export default function FeesPage() {
                     <button
                       type="button"
                       onClick={() => void applyConcession()}
-                      disabled={savingConcession}
+                      disabled={savingConcession || !concessionCategoryId}
                       className="rounded-lg bg-amber-600 px-3 py-2 text-xs font-bold text-white hover:bg-amber-700 disabled:opacity-50"
                     >
                       {savingConcession ? "Applying..." : "Apply Concession"}
@@ -3521,6 +4100,53 @@ export default function FeesPage() {
                   </div>
                 </div>
               )}
+
+              <section className="lg:col-span-3 rounded-xl border border-emerald-200 bg-emerald-50/50 p-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="flex items-start gap-2.5">
+                    <Package size={18} className="mt-0.5 text-emerald-700" />
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-900">Add inventory as an unassigned fee</h3>
+                      <p className="mt-1 max-w-2xl text-xs text-slate-600">Issue a resale item to this student without changing the class fee structure. Its sale price is added to this bill’s outstanding and can be collected below.</p>
+                    </div>
+                  </div>
+                  <div className="rounded-lg bg-white px-3 py-2 text-xs font-semibold text-emerald-800">Bill due: {formatMoney(Number(selectedBill.balance_amount || 0))}</div>
+                </div>
+
+                {inventoryNotice && <div className="mt-3 rounded-lg border border-emerald-200 bg-white px-3 py-2 text-sm text-emerald-800">{inventoryNotice}</div>}
+                {pendingInventorySale && <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">Inventory sale {pendingInventorySale.saleNumber || pendingInventorySale.id} is already recorded. Retry adding it to this same bill; stock will not be issued again.</div>}
+                {inventoryItems.length === 0 ? (
+                  <div className="mt-3 rounded-lg bg-white p-3 text-sm text-slate-500">No active resale inventory is available. Add stock and a student sale price in Inventory first.</div>
+                ) : (
+                  <div className="mt-3 space-y-2">
+                    {inventoryIssueLines.map((line, index) => {
+                      const item = inventoryItems.find((candidate) => candidate.id === line.inventoryItemId);
+                      return <div key={`fee-inventory-${index}`} className="grid grid-cols-1 gap-2 rounded-lg border border-emerald-100 bg-white p-3 sm:grid-cols-[minmax(0,1fr)_150px_130px_auto] sm:items-end">
+                        <div>
+                          <label className="mb-1 block text-xs font-semibold text-slate-600">Item · Size · Available Stock</label>
+                          <select value={line.inventoryItemId} onChange={(event) => setInventoryIssueLines((current) => current.map((row, rowIndex) => rowIndex === index ? { ...row, inventoryItemId: event.target.value } : row))} disabled={addingInventory || savingPayment} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm">
+                            <option value="">Select inventory item</option>
+                            {inventoryItems.map((option) => <option key={option.id} value={option.id} disabled={inventoryIssueLines.some((row, rowIndex) => rowIndex !== index && row.inventoryItemId === option.id)}>{option.name}{option.size ? ` · ${option.size}` : ""} · {inventoryStock[option.id] || 0} {option.unit}</option>)}
+                          </select>
+                        </div>
+                        <div>
+                          <label className="mb-1 block text-xs font-semibold text-slate-600">Quantity</label>
+                          <input type="number" min="0.001" step="0.001" max={item ? inventoryStock[item.id] || 0 : undefined} value={line.quantity} onChange={(event) => setInventoryIssueLines((current) => current.map((row, rowIndex) => rowIndex === index ? { ...row, quantity: event.target.value } : row))} disabled={addingInventory || savingPayment} className="w-full rounded-lg border border-slate-200 px-3 py-2.5 text-right text-sm font-semibold tabular-nums" />
+                        </div>
+                        <div>
+                          <label className="mb-1 block text-xs font-semibold text-slate-600">Sale Price</label>
+                          <div className="rounded-lg bg-slate-50 px-3 py-2.5 text-sm font-semibold tabular-nums text-slate-800">{item ? formatMoney(Number(item.selling_price)) : "—"}</div>
+                        </div>
+                        <button type="button" onClick={() => setInventoryIssueLines((current) => current.filter((_, rowIndex) => rowIndex !== index))} disabled={addingInventory || savingPayment || inventoryIssueLines.length <= 1} className="rounded-lg border border-red-200 px-3 py-2.5 text-xs font-semibold text-red-700 disabled:opacity-40">Remove</button>
+                      </div>;
+                    })}
+                    <div className="flex flex-wrap justify-between gap-2">
+                      <button type="button" onClick={() => setInventoryIssueLines((current) => [...current, { inventoryItemId: "", quantity: "1" }])} disabled={addingInventory || savingPayment} className="inline-flex items-center gap-1 rounded-lg border border-emerald-200 bg-white px-3 py-2 text-xs font-bold text-emerald-800 disabled:opacity-50"><Plus size={14} /> Add another item</button>
+                      <button type="button" onClick={() => void addInventoryToSelectedBill()} disabled={addingInventory || savingPayment || (!pendingInventorySale && !inventoryIssueLines.some((line) => line.inventoryItemId)) || Boolean(pendingInventorySale && pendingInventorySale.billId !== selectedBill.id)} className="inline-flex items-center gap-2 rounded-lg bg-emerald-700 px-4 py-2.5 text-xs font-bold text-white hover:bg-emerald-800 disabled:opacity-50">{addingInventory ? <><Loader2 size={14} className="animate-spin" /> Adding to bill...</> : pendingInventorySale ? "Retry adding issued sale to bill" : "Issue items and add to bill"}</button>
+                    </div>
+                  </div>
+                )}
+              </section>
 
               <div className="lg:col-span-3 rounded-xl border border-blue-100 bg-blue-50/40 p-4">
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">

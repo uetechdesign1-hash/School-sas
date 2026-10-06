@@ -740,11 +740,10 @@ export default function StudentsPage() {
     try {
       const supabase = createClient();
 
-      const { error: deleteError } = await supabase
-        .from("students")
-        .delete()
-        .eq("id", student.id)
-        .eq("school_id", student.school_id);
+      const { error: deleteError } = await supabase.rpc("delete_student_and_owned_records", {
+        p_student_id: student.id,
+        p_school_id: student.school_id,
+      });
 
       if (deleteError) {
         throw deleteError;
@@ -758,12 +757,21 @@ export default function StudentsPage() {
         current.filter((id) => id !== student.id),
       );
     } catch (deleteError) {
-      console.error("DELETE STUDENT ERROR:", deleteError);
+      const details = deleteError && typeof deleteError === "object"
+        ? deleteError as { message?: string; details?: string; hint?: string; code?: string }
+        : null;
+      console.error("DELETE STUDENT ERROR:", {
+        message: details?.message || (deleteError instanceof Error ? deleteError.message : String(deleteError)),
+        details: details?.details,
+        hint: details?.hint,
+        code: details?.code,
+        error: deleteError,
+      });
 
       alert(
-        deleteError instanceof Error
-          ? deleteError.message
-          : "Unable to delete student.",
+        [details?.message || (deleteError instanceof Error ? deleteError.message : "Unable to delete student."), details?.details, details?.hint]
+          .filter(Boolean)
+          .join("\n"),
       );
     }
   }

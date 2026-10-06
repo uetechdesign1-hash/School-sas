@@ -98,6 +98,17 @@ function supabaseErrorMessage(
     : fallback;
 }
 
+function annualizedFeeAmount(amount: number, frequency: string) {
+  const multiplier: Record<string, number> = {
+    one_time: 1,
+    annual: 1,
+    monthly: 12,
+    quarterly: 4,
+    half_yearly: 2,
+  };
+  return Math.max(Number(amount) || 0, 0) * (multiplier[frequency] || 1);
+}
+
 const emptyItem = (): FeeItem => ({
   fee_category_id: "",
   amount: "",
@@ -617,6 +628,166 @@ export default function FeeStructurePage() {
     }
   }
 
+  async function handleEditCategory(category: FeeCategory) {
+    const name = window.prompt("Edit fee category name", category.name)?.trim();
+    if (!name || name === category.name) return;
+    setErrorMessage("");
+    setSuccessMessage("");
+    const { error: itemError } = await supabase
+      .from("fee_bill_items")
+      .update({ description: name })
+      .eq("school_id", schoolId)
+      .eq("fee_category_id", category.id);
+    if (itemError) { setErrorMessage(`Unable to update existing student fee labels: ${itemError.message}`); return; }
+    const { error } = await supabase.from("fee_categories").update({ name }).eq("id", category.id).eq("school_id", schoolId);
+    if (error) { setErrorMessage(`Unable to update category: ${error.message}`); return; }
+    setCategories((current) => current.map((item) => item.id === category.id ? { ...item, name } : item).sort((a, b) => a.name.localeCompare(b.name)));
+    setSuccessMessage("Fee category updated.");
+  }
+
+  async function syncAssignedBillsToStructure(structureId: string, updatedItems: FeeItem[]) {
+    const { data: directBillItems, error: billItemsError } = await supabase
+      .from("fee_bill_items")
+      .select("id, school_id, bill_id, fee_structure_id, fee_category_id, description, fee_type, amount, discount, net_amount")
+      .eq("school_id", schoolId)
+      .eq("fee_structure_id", structureId);
+    if (billItemsError) throw new Error(`Fee structure was saved, but assigned bills could not be loaded: ${billItemsError.message}`);
+
+    // Some older fee assignment paths saved the category line without its
+    // direct structure link. Find those rows through the structure's class,
+    // academic year, and category, while leaving rows linked to another
+    // structure untouched.
+    const { data: structureInfo, error: structureInfoError } = await supabase
+      .from("fee_structures")
+      .select("academic_year_id, class_id")
+      .eq("id", structureId)
+      .eq("school_id", schoolId)
+      .single();
+    if (structureInfoError) throw new Error(`Fee structure was saved, but its class and year could not be loaded: ${structureInfoError.message}`);
+
+    let studentIds: string[] | null = null;
+    if (structureInfo.class_id) {
+      const { data: classStudents, error: classStudentsError } = await supabase
+        .from("students")
+        .select("id")
+        .eq("school_id", schoolId)
+        .eq("class_id", structureInfo.class_id);
+      if (classStudentsError) throw new Error(`Fee structure was saved, but class students could not be loaded: ${classStudentsError.message}`);
+      studentIds = (classStudents || []).map((student) => student.id as string);
+    }
+
+    let legacyBillItems: typeof directBillItems = [];
+    if (structureInfo.class_id === null || studentIds?.length) {
+      let billsQuery = supabase
+        .from("fee_bills")
+        .select("id")
+        .eq("school_id", schoolId)
+        .eq("academic_year_id", structureInfo.academic_year_id)
+        .neq("status", "cancelled");
+      if (studentIds) billsQuery = billsQuery.in("student_id", studentIds);
+      const { data: classBills, error: classBillsError } = await billsQuery;
+      if (classBillsError) throw new Error(`Fee structure was saved, but class bills could not be loaded: ${classBillsError.message}`);
+      const classBillIds = (classBills || []).map((bill) => bill.id as string);
+      const categoryIds = updatedItems.map((item) => item.fee_category_id);
+      if (classBillIds.length && categoryIds.length) {
+        const { data: categoryBillItems, error: categoryBillItemsError } = await supabase
+          .from("fee_bill_items")
+          .select("id, school_id, bill_id, fee_structure_id, fee_category_id, description, fee_type, amount, discount, net_amount")
+          .eq("school_id", schoolId)
+          .in("bill_id", classBillIds)
+          .in("fee_category_id", categoryIds);
+        if (categoryBillItemsError) throw new Error(`Fee structure was saved, but older category bill lines could not be loaded: ${categoryBillItemsError.message}`);
+        legacyBillItems = (categoryBillItems || []).filter((line) => !line.fee_structure_id) as typeof directBillItems;
+      }
+    }
+
+    type SyncedBillItem = NonNullable<typeof directBillItems>[number];
+    const billItemsById = new Map<string, SyncedBillItem>();
+    for (const line of [...(directBillItems || []), ...(legacyBillItems || [])]) {
+      if (line?.id) billItemsById.set(line.id as string, line);
+    }
+    const billItems = Array.from(billItemsById.values());
+    if (!billItems.length) return { updatedBills: 0, updatedLines: 0, protectedLines: 0 };
+
+    const currentItems = await supabase
+      .from("fee_structure_items")
+      .select("id, fee_category_id, amount, frequency")
+      .eq("school_id", schoolId)
+      .eq("fee_structure_id", structureId);
+    if (currentItems.error) throw new Error(`Fee structure was saved, but its updated amounts could not be loaded: ${currentItems.error.message}`);
+    const structureItemByCategory = new Map((currentItems.data || []).map((item) => [item.fee_category_id as string, item]));
+    const feeItemByCategory = new Map(updatedItems.map((item) => [item.fee_category_id, item]));
+
+    const billIds = Array.from(new Set(billItems.map((item) => item.bill_id as string)));
+    const { data: bills, error: billsError } = await supabase
+      .from("fee_bills")
+      .select("id, status")
+      .eq("school_id", schoolId)
+      .in("id", billIds);
+    if (billsError) throw new Error(`Fee structure was saved, but assigned bill status could not be checked: ${billsError.message}`);
+    const editableBillIds = new Set((bills || []).filter((bill) => bill.status !== "cancelled").map((bill) => bill.id as string));
+    const activeLines = billItems.filter((line) => editableBillIds.has(line.bill_id as string) && line.fee_category_id);
+    if (!activeLines.length) return { updatedBills: 0, updatedLines: 0, protectedLines: 0 };
+
+    const lineIds = activeLines.map((line) => line.id as string);
+    const { data: allocations, error: allocationsError } = await supabase
+      .from("fee_payment_allocations")
+      .select("fee_bill_item_id, amount")
+      .eq("school_id", schoolId)
+      .in("fee_bill_item_id", lineIds);
+    if (allocationsError) throw new Error(`Fee structure was saved, but paid category amounts could not be loaded: ${allocationsError.message}`);
+    const paidByLine = new Map<string, number>();
+    for (const allocation of allocations || []) {
+      if (!allocation.fee_bill_item_id) continue;
+      paidByLine.set(allocation.fee_bill_item_id, (paidByLine.get(allocation.fee_bill_item_id) || 0) + Number(allocation.amount || 0));
+    }
+
+    let protectedLines = 0;
+    const updates = activeLines.flatMap((line) => {
+      const structureItem = structureItemByCategory.get(line.fee_category_id as string);
+      const formItem = feeItemByCategory.get(line.fee_category_id as string);
+      if (!structureItem || !formItem) return [];
+      const configuredAmount = annualizedFeeAmount(Number(structureItem.amount || 0), structureItem.frequency || "annual");
+      const discount = Math.max(Number(line.discount || 0), 0);
+      const paid = paidByLine.get(line.id as string) || 0;
+      const amount = Math.max(configuredAmount, paid + discount);
+      if (amount > configuredAmount + 0.005) protectedLines += 1;
+      const categoryName = categories.find((category) => category.id === line.fee_category_id)?.name;
+      return [{
+        ...line,
+        description: categoryName || line.description,
+        fee_type: structureItem.frequency,
+        amount,
+        discount,
+        net_amount: Math.max(0, amount - discount),
+      }];
+    });
+
+    if (updates.length) {
+      const { error: updateError } = await supabase
+        .from("fee_bill_items")
+        .upsert(updates, { onConflict: "id" });
+      if (updateError) throw new Error(`Fee structure was saved, but assigned student bills could not be updated: ${updateError.message}`);
+    }
+
+    const affectedBillIds = Array.from(new Set(updates.map((line) => line.bill_id as string)));
+    for (const billId of affectedBillIds) {
+      const { error: recalculateError } = await supabase.rpc("recalculate_fee_bill", { p_bill_id: billId });
+      if (recalculateError) throw new Error(`Student bill ${billId} items were updated, but its outstanding total could not be recalculated: ${recalculateError.message}`);
+    }
+    return { updatedBills: affectedBillIds.length, updatedLines: updates.length, protectedLines };
+  }
+
+  async function handleDeleteCategory(category: FeeCategory) {
+    if (!window.confirm(`Delete fee category “${category.name}”? Categories used by fee structures cannot be deleted.`)) return;
+    setErrorMessage("");
+    setSuccessMessage("");
+    const { error } = await supabase.from("fee_categories").delete().eq("id", category.id).eq("school_id", schoolId);
+    if (error) { setErrorMessage(`Unable to delete category. Remove it from any fee structures first. ${error.message}`); return; }
+    setCategories((current) => current.filter((item) => item.id !== category.id));
+    setSuccessMessage("Fee category deleted.");
+  }
+
   async function handleSave(
     event: React.FormEvent<HTMLFormElement>,
   ) {
@@ -810,9 +981,13 @@ export default function FeeStructurePage() {
         );
       }
 
+      const syncResult = editingId
+        ? await syncAssignedBillsToStructure(structureId, validItems)
+        : { updatedBills: 0, updatedLines: 0, protectedLines: 0 };
+
       setSuccessMessage(
         editingId
-          ? "Fee structure updated successfully."
+          ? `Fee structure updated. ${syncResult.updatedLines} assigned category line(s) across ${syncResult.updatedBills} student bill(s) were recalculated. Recorded payments and accounting entries were left unchanged.${syncResult.protectedLines ? ` ${syncResult.protectedLines} fee line(s) were kept high enough to cover amounts already paid and concessions.` : ""}`
           : "Fee structure created successfully.",
       );
 
@@ -1659,9 +1834,11 @@ export default function FeeStructurePage() {
                 {categories.map((category) => (
                   <span
                     key={category.id}
-                    className="rounded-full border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-700"
+                    className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-700"
                   >
                     {category.name}
+                    <button type="button" onClick={() => void handleEditCategory(category)} className="font-bold text-blue-700 hover:text-blue-900" aria-label={`Edit ${category.name}`}>Edit</button>
+                    <button type="button" onClick={() => void handleDeleteCategory(category)} className="font-bold text-red-600 hover:text-red-800" aria-label={`Delete ${category.name}`}>Delete</button>
                   </span>
                 ))}
               </div>
