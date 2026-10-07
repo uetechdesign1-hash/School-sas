@@ -28,7 +28,7 @@ import {
 
 import { createClient } from "@/lib/supabase/client";
 import { getCurrentSchoolId } from "@/lib/supabase/current-school";
-import { generateReceiptPDF } from "@/lib/fees/generateReceipt";
+import { generateReceiptPDF, loadReceiptLogoDataUrl } from "@/lib/fees/generateReceipt";
 import { ensureSchoolAccountingSetup } from "@/lib/accounting/canonical-accounting";
 import { listInventoryItems, type InventoryItemRecord } from "@/lib/inventory/inventory-items";
 import { getStockSummary } from "@/lib/inventory/valuation";
@@ -266,6 +266,8 @@ export default function ReceiptPage() {
   const supabase = useMemo(() => createClient(), []);
 
   const [schoolId, setSchoolId] = useState<string | null>(null);
+  const [schoolName, setSchoolName] = useState("School");
+  const [schoolLogoUrl, setSchoolLogoUrl] = useState<string | null>(null);
   const [schoolRole, setSchoolRole] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -1310,6 +1312,13 @@ export default function ReceiptPage() {
 
       setSchoolId(currentSchoolId);
 
+      const [schoolNameResult, schoolLogoResult] = await Promise.all([
+        supabase.from("schools").select("name").eq("id", currentSchoolId).maybeSingle(),
+        supabase.from("schools").select("logo_url").eq("id", currentSchoolId).maybeSingle(),
+      ]);
+      setSchoolName(schoolNameResult.data?.name || "School");
+      setSchoolLogoUrl(schoolLogoResult.error ? null : schoolLogoResult.data?.logo_url || null);
+
       const [inventoryRows, stockRows] = await Promise.all([
         listInventoryItems(supabase, currentSchoolId),
         getStockSummary(supabase, currentSchoolId),
@@ -2217,7 +2226,8 @@ export default function ReceiptPage() {
         const sectionName = selectedSection?.name || "";
 
         generateReceiptPDF({
-          schoolName: "School",
+          schoolName,
+          schoolLogoDataUrl: await loadReceiptLogoDataUrl(schoolLogoUrl),
           receiptNumber: manualReceiptNumber.trim(),
           receiptDate,
           studentName: getStudentName(selectedStudent!),
@@ -3912,6 +3922,8 @@ export default function ReceiptPage() {
             classes={classes}
             sections={sections}
             accounts={accounts}
+            schoolName={schoolName}
+            schoolLogoUrl={schoolLogoUrl}
           />
         )}
 
@@ -4012,6 +4024,8 @@ function ReceiptViewModal({
   classes,
   sections,
   accounts,
+  schoolName,
+  schoolLogoUrl,
 }: {
   transactionId: string;
   history: ReceiptHistoryRow[];
@@ -4033,6 +4047,8 @@ function ReceiptViewModal({
   classes: ClassRow[];
   sections: SectionRow[];
   accounts: Account[];
+  schoolName: string;
+  schoolLogoUrl: string | null;
 }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -4288,6 +4304,14 @@ function ReceiptViewModal({
             ) : transaction ? (
               <>
                 <div className="border-b pb-5 text-center">
+                  {schoolLogoUrl && (
+                    <img
+                      src={schoolLogoUrl}
+                      alt={`${schoolName} logo`}
+                      className="mx-auto mb-3 max-h-16 max-w-40 object-contain print:max-h-20"
+                    />
+                  )}
+                  <p className="mb-1 text-sm font-semibold text-slate-700">{schoolName}</p>
                   <div className="text-sm font-semibold text-blue-600">
                     ACCOUNTING RECEIPT
                   </div>

@@ -7,6 +7,7 @@ export type ReceiptFeeItem = {
 
 export type ReceiptData = {
   schoolName: string;
+  schoolLogoDataUrl?: string | null;
   schoolAddress?: string;
   schoolPhone?: string;
   schoolEmail?: string;
@@ -64,6 +65,34 @@ function safeText(value: string | null | undefined) {
   return (value || "—").trim() || "—";
 }
 
+export async function loadReceiptLogoDataUrl(logoUrl: string | null) {
+  if (!logoUrl) return null;
+
+  try {
+    const response = await fetch(logoUrl, { mode: "cors" });
+    if (!response.ok) return null;
+
+    const bitmap = await createImageBitmap(await response.blob());
+    const scale = Math.min(1, 512 / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+
+    const context = canvas.getContext("2d");
+    if (!context) {
+      bitmap.close();
+      return null;
+    }
+
+    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    bitmap.close();
+    return canvas.toDataURL("image/png");
+  } catch (error) {
+    console.warn("Unable to load school logo for receipt PDF:", error);
+    return null;
+  }
+}
+
 export function generateReceiptPDF(data: ReceiptData) {
   // EXACT A5 LANDSCAPE:
   // width  = 210 mm
@@ -99,6 +128,10 @@ export function generateReceiptPDF(data: ReceiptData) {
   );
 
   let y = 10;
+
+  if (data.schoolLogoDataUrl) {
+    pdf.addImage(data.schoolLogoDataUrl, "PNG", 8, 7, 18, 18);
+  }
 
   // ------------------------------------------------------------
   // SCHOOL HEADER

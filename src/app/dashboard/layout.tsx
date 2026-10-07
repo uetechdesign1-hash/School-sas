@@ -25,6 +25,8 @@ import {
   Wallet,
   Landmark,
   BarChart3,
+  CalendarRange,
+  School,
   LogOut,
 } from "lucide-react";
 
@@ -95,6 +97,16 @@ const PRINCIPAL_MENU: MenuItem[] = [
     href: "/dashboard/reports",
     icon: <BarChart3 size={18} />,
   },
+  {
+    name: "Daily Report",
+    href: "/dashboard/daily-report",
+    icon: <CalendarRange size={18} />,
+  },
+  {
+    name: "School Profile",
+    href: "/dashboard/school-settings",
+    icon: <School size={18} />,
+  },
 ];
 
 /* =========================================================
@@ -160,6 +172,16 @@ const SCHOOL_ADMIN_MENU: MenuItem[] = [
     href: "/dashboard/expenses",
     icon: <ReceiptText size={18} />,
   },
+  {
+    name: "Daily Report",
+    href: "/dashboard/daily-report",
+    icon: <CalendarRange size={18} />,
+  },
+  {
+    name: "School Profile",
+    href: "/dashboard/school-settings",
+    icon: <School size={18} />,
+  },
 ];
 
 /* =========================================================
@@ -199,7 +221,9 @@ function isSchoolAdminRouteAllowed(pathname: string) {
     pathname === "/dashboard/students" ||
     pathname === "/accounting/receipt" ||
     pathname === "/accounting/payment" ||
-    pathname === "/dashboard/expenses"
+    pathname === "/dashboard/expenses" ||
+    pathname === "/dashboard/daily-report" ||
+    pathname === "/dashboard/school-settings"
   );
 }
 
@@ -220,6 +244,9 @@ export default function DashboardLayout({
 
   const [schoolName, setSchoolName] =
     useState("SchoolFlow");
+
+  const [schoolLogo, setSchoolLogo] =
+    useState<string | null>(null);
 
   const [role, setRole] =
     useState("");
@@ -423,6 +450,13 @@ export default function DashboardLayout({
             "SchoolFlow"
         );
 
+        const { data: logoData, error: logoError } = await supabase
+          .from("schools")
+          .select("logo_url")
+          .eq("id", membership.school_id)
+          .maybeSingle();
+        setSchoolLogo(logoError ? null : logoData?.logo_url || null);
+
         setRole(
           currentRole
         );
@@ -554,6 +588,14 @@ export default function DashboardLayout({
     }
   }, [pathname, role, router]);
 
+  useEffect(() => {
+    function handleSchoolLogoUpdate(event: Event) {
+      setSchoolLogo((event as CustomEvent<string | null>).detail || null);
+    }
+    window.addEventListener("school-logo-updated", handleSchoolLogoUpdate);
+    return () => window.removeEventListener("school-logo-updated", handleSchoolLogoUpdate);
+  }, []);
+
   /* =======================================================
      SIGN OUT
      ======================================================= */
@@ -652,9 +694,17 @@ export default function DashboardLayout({
 
           <div className="flex items-center gap-3">
 
-            <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-500 via-indigo-500 to-purple-500 text-lg font-bold text-white shadow-lg shadow-indigo-500/40">
-              S
-            </div>
+            {schoolLogo ? (
+              <img
+                src={schoolLogo}
+                alt={`${schoolName} logo`}
+                className="h-10 w-10 rounded-2xl border border-slate-200 bg-white object-contain p-1"
+              />
+            ) : (
+              <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-500 via-indigo-500 to-purple-500 text-lg font-bold text-white shadow-lg shadow-indigo-500/40">
+                {schoolName.charAt(0).toUpperCase() || "S"}
+              </div>
+            )}
 
             <div>
 
