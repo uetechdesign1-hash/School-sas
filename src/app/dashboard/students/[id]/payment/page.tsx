@@ -53,7 +53,7 @@ export default function RecordPaymentPage() {
 
   const studentId = params.id as string;
 
-  const supabase = createClient();
+  const supabase = useMemo(() => createClient(), []);
 
   const [student, setStudent] =
     useState<Student | null>(null);
@@ -97,20 +97,17 @@ export default function RecordPaymentPage() {
 
   async function loadData() {
     try {
-      const studentResult =
-        await supabase
+      const [studentResult, billResult] =
+        await Promise.all([
+          supabase
           .from("students")
           .select(
             "id, school_id, first_name, last_name, admission_no"
           )
           .eq("id", studentId)
-          .single();
+          .single(),
 
-      if (studentResult.error)
-        throw studentResult.error;
-
-      const billResult =
-        await supabase
+          supabase
           .from("student_fee_bills")
           .select(
             "id, bill_number, description, bill_date, amount, discount"
@@ -119,7 +116,10 @@ export default function RecordPaymentPage() {
           .eq("cancelled", false)
           .order("bill_date", {
             ascending: true,
-          });
+          }),
+        ]);
+
+      if (studentResult.error) throw studentResult.error;
 
       if (billResult.error)
         throw billResult.error;

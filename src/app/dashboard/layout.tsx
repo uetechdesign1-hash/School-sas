@@ -537,10 +537,22 @@ export default function DashboardLayout({
       cancelled = true;
     };
   }, [
-    pathname,
     router,
     supabase,
   ]);
+
+  // Authentication and school metadata are shared by every dashboard route.
+  // Load them once while this persistent layout is mounted; only re-check the
+  // inexpensive role-based route policy when the pathname changes.
+  useEffect(() => {
+    if (!role) return;
+
+    if (role === "staff" && !isStaffRouteAllowed(pathname)) {
+      router.replace("/dashboard/staff/home");
+    } else if (role === "admin" && !isSchoolAdminRouteAllowed(pathname)) {
+      router.replace("/dashboard");
+    }
+  }, [pathname, role, router]);
 
   /* =======================================================
      SIGN OUT

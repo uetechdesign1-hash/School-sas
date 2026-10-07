@@ -982,17 +982,11 @@ export default function PaymentPage() {
         currentSchoolId
       );
 
-      await loadAccounts(
-        currentSchoolId
-      );
-
-      await loadPayments(
-        currentSchoolId
-      );
-
-      await loadVendorData(
-        currentSchoolId
-      );
+      await Promise.all([
+        loadAccounts(currentSchoolId),
+        loadPayments(currentSchoolId),
+        loadVendorData(currentSchoolId),
+      ]);
     } catch (err: any) {
       console.error(
         "PAYMENT PAGE LOAD ERROR:",

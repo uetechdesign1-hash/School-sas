@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 
@@ -30,8 +30,20 @@ export default function SchoolAccessGuard({
 }) {
   const pathname = usePathname();
   const router = useRouter();
+  const supabase = useMemo(() => createClient(), []);
+  const validatedAccess = useRef(false);
   const [checking, setChecking] = useState(true);
   const [allowed, setAllowed] = useState(true);
+
+  useEffect(() => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event) => {
+      if (event === "SIGNED_OUT" || event === "SIGNED_IN" || event === "USER_UPDATED") {
+        validatedAccess.current = false;
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, [supabase]);
 
   useEffect(() => {
     let cancelled = false;
@@ -46,9 +58,18 @@ export default function SchoolAccessGuard({
         return;
       }
 
-      try {
-        const supabase = createClient();
+      // School access is independent of the current route. Keep the result
+      // for this authenticated session so navigation does not block on the
+      // same auth, membership, and school requests every time.
+      if (validatedAccess.current) {
+        if (!cancelled) {
+          setAllowed(true);
+          setChecking(false);
+        }
+        return;
+      }
 
+      try {
         const {
           data: { user },
         } = await supabase.auth.getUser();
@@ -73,6 +94,7 @@ export default function SchoolAccessGuard({
 
         // Super Admin can access the platform regardless of school expiry.
         if (profile?.platform_role === "super_admin") {
+          validatedAccess.current = true;
           if (!cancelled) {
             setAllowed(true);
             setChecking(false);
@@ -155,6 +177,7 @@ export default function SchoolAccessGuard({
 
         // School access is valid.
         if (!cancelled) {
+          validatedAccess.current = true;
           setAllowed(true);
           setChecking(false);
         }
@@ -175,7 +198,7 @@ export default function SchoolAccessGuard({
     return () => {
       cancelled = true;
     };
-  }, [pathname, router]);
+  }, [pathname, router, supabase]);
 
   // Public pages render immediately.
   if (isPublicPath(pathname)) {

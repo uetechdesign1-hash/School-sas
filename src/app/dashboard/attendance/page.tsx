@@ -19,8 +19,16 @@ type Staff = {
   first_name: string;
   middle_name: string | null;
   last_name: string | null;
+  phone: string | null;
   designation: string | null;
   status: string;
+};
+
+type StaffSalaryExport = {
+  staff_id?: string | null;
+  employee_id?: string | null;
+  is_active?: boolean | null;
+  [key: string]: unknown;
 };
 
 type AttendanceRecord = {
@@ -122,11 +130,6 @@ function actualToStatus(record: AttendanceRecord | undefined): CellStatus {
   return "present";
 }
 
-function csvEscape(value: unknown) {
-  const text = String(value ?? "");
-  return `"${text.replaceAll('"', '""')}"`;
-}
-
 export default function AdminAttendancePage() {
   const supabase = useMemo(() => createClient(), []);
 
@@ -204,12 +207,22 @@ export default function AdminAttendancePage() {
 
       const schoolId = membership.school_id;
 
-      const { data: school } = await supabase
-        .from("schools")
-        .select("*")
-        .eq("id", schoolId)
-        .maybeSingle();
+      const [schoolResult, staffResult] = await Promise.all([
+        supabase
+          .from("schools")
+          .select("*")
+          .eq("id", schoolId)
+          .maybeSingle(),
+        supabase
+          .from("staff")
+          .select(
+            "id, employee_no, first_name, middle_name, last_name, phone, designation, status",
+          )
+          .eq("school_id", schoolId)
+          .order("first_name", { ascending: true }),
+      ]);
 
+      const school = schoolResult.data;
       const schoolRecord = (school || {}) as Record<string, unknown>;
       setSchoolName(
         String(
@@ -220,81 +233,55 @@ export default function AdminAttendancePage() {
         ).trim() || "School",
       );
 
-      const { data: staffData, error: staffError } = await supabase
-        .from("staff")
-        .select(
-          "id, employee_no, first_name, middle_name, last_name, designation, status",
-        )
-        .eq("school_id", schoolId)
-        .order("first_name", { ascending: true });
-
-      if (staffError) throw staffError;
+      if (staffResult.error) throw staffResult.error;
+      const staffData = staffResult.data;
 
       const firstDate = `${month}-01`;
       const lastDate = `${month}-${pad(monthDays(month))}`;
 
-      const { data: attendanceData, error: attendanceError } = await supabase
-        .from("staff_attendance")
-        .select(
-          "staff_id, attendance_date, status, check_in_at, check_out_at, working_minutes, is_late, is_early_checkout",
-        )
-        .eq("school_id", schoolId)
-        .gte("attendance_date", firstDate)
-        .lte("attendance_date", lastDate)
-        .order("attendance_date", { ascending: true });
+      const [attendanceResult, overrideResult, calendarResult, settingsResult] = await Promise.all([
+        supabase
+          .from("staff_attendance")
+          .select("staff_id, attendance_date, status, check_in_at, check_out_at, working_minutes, is_late, is_early_checkout")
+          .eq("school_id", schoolId)
+          .gte("attendance_date", firstDate)
+          .lte("attendance_date", lastDate)
+          .order("attendance_date", { ascending: true }),
+        supabase
+          .from("staff_attendance_overrides")
+          .select("id, staff_id, attendance_date, status, notes")
+          .eq("school_id", schoolId)
+          .gte("attendance_date", firstDate)
+          .lte("attendance_date", lastDate)
+          .order("attendance_date", { ascending: true }),
+        supabase
+          .from("school_attendance_calendar")
+          .select("id, school_id, attendance_date, type, title")
+          .eq("school_id", schoolId)
+          .gte("attendance_date", firstDate)
+          .lte("attendance_date", lastDate)
+          .order("attendance_date", { ascending: true }),
+        supabase
+          .from("school_attendance_settings")
+          .select("weekly_off_day")
+          .eq("school_id", schoolId)
+          .maybeSingle(),
+      ]);
 
-      if (attendanceError) throw attendanceError;
-
-      const { data: overrideData, error: overrideError } = await supabase
-        .from("staff_attendance_overrides")
-        .select("id, staff_id, attendance_date, status, notes")
-        .eq("school_id", schoolId)
-        .gte("attendance_date", firstDate)
-        .lte("attendance_date", lastDate)
-        .order("attendance_date", { ascending: true });
-
-      if (overrideError) throw overrideError;
-
-      const { data: calendarData, error: calendarError } = await supabase
-        .from("school_attendance_calendar")
-        .select("id, school_id, attendance_date, type, title")
-        .eq("school_id", schoolId)
-        .gte("attendance_date", firstDate)
-        .lte("attendance_date", lastDate)
-        .order("attendance_date", { ascending: true });
-
-      if (calendarError) throw calendarError;
-
-      const { data: settingsData, error: settingsError } = await supabase
-        .from("school_attendance_settings")
-        .select("weekly_off_day")
-        .eq("school_id", schoolId)
-        .maybeSingle();
-
-      if (settingsError) throw settingsError;
+      if (attendanceResult.error) throw attendanceResult.error;
+      if (overrideResult.error) throw overrideResult.error;
+      if (calendarResult.error) throw calendarResult.error;
+      if (settingsResult.error) throw settingsResult.error;
+      const attendanceData = attendanceResult.data;
+      const overrideData = overrideResult.data;
+      const calendarData = calendarResult.data;
+      const settingsData = settingsResult.data;
 
       const loadedStaff = (staffData || []) as Staff[];
       const loadedCalendar = (calendarData || []) as SchoolCalendarEntry[];
       const loadedAttendance = (attendanceData || []) as AttendanceRecord[];
       const loadedOverrides = (overrideData || []) as OverrideRecord[];
       const loadedWeeklyOffDay = Number(settingsData?.weekly_off_day ?? 0);
-
-      // Rebuild the monthly attendance snapshot from the same effective-status
-      // rules used by this page. This keeps Payroll in sync even when nobody
-      // created a GPS row for a completed working day. A summary-sync failure
-      // must not prevent the attendance screen itself from loading.
-      try {
-        await syncAllMonthlySummaries(
-          schoolId,
-          loadedCalendar,
-          loadedWeeklyOffDay,
-          loadedStaff,
-          loadedAttendance,
-          loadedOverrides,
-        );
-      } catch (summaryError) {
-        console.error("Unable to sync monthly attendance summary", summaryError);
-      }
 
       setSchoolId(schoolId);
       setWeeklyOffDay(loadedWeeklyOffDay);
@@ -877,62 +864,197 @@ export default function AdminAttendancePage() {
     setDetailsOpen(true);
   }
 
-  function exportCsv() {
-    const rows: string[][] = [];
+  async function exportAttendanceExcel() {
+    try {
+      setError("");
+      const { error: refreshError } = await supabase.rpc(
+        "refresh_staff_monthly_attendance",
+        { p_month: month },
+      );
+      if (refreshError) throw new Error(`Attendance refresh: ${refreshError.message}`);
 
-    rows.push([
-      schoolName,
-      "Staff Monthly Attendance",
-      month,
-    ]);
-
-    rows.push([
-      "Employee No",
-      "Staff Name",
-      ...days.map((day) => dateFor(month, day)),
-      "Present",
-      "Half Day",
-      "C/L Paid Leave",
-      "Absent",
-      "Holiday",
-      "Week Off",
-      "Working Days",
-      "Worked Days",
-    ]);
-
-    for (const item of filteredStaff) {
-      const summary = getSummary(item.id);
-      rows.push([
-        item.employee_no || "",
-        staffName(item),
-        ...days.map((day) => {
-          const date = dateFor(month, day);
-          const status = getCellStatus(item.id, date);
-          return status === "auto" ? "" : STATUS_LABEL[status];
-        }),
-        String(summary.present),
-        String(summary.halfDay),
-        String(summary.paidLeave),
-        String(summary.absent),
-        String(summary.holiday),
-        String(summary.weekOff),
-        String(summary.workingDays),
-        String(summary.workedDays),
+      const [attendanceResult, runResult, salaryResult] = await Promise.all([
+        supabase
+          .from("staff_monthly_attendance")
+          .select("staff_id, working_days, worked_days, paid_leave, unpaid_leave, school_holidays")
+          .eq("school_id", schoolId)
+          .eq("month", month),
+        supabase
+          .from("payroll_runs")
+          .select("id")
+          .eq("school_id", schoolId)
+          .eq("month", Number(month.split("-")[1]))
+          .eq("year", Number(month.split("-")[0]))
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle(),
+        supabase
+          .from("staff_salary_structures")
+          .select("*")
+          .eq("school_id", schoolId),
       ]);
-    }
+      if (attendanceResult.error) throw new Error(`Attendance: ${attendanceResult.error.message}`);
+      if (runResult.error) throw new Error(`Payroll run: ${runResult.error.message}`);
+      if (salaryResult.error) throw new Error(`Salary structure: ${salaryResult.error.message}`);
 
-    const csv = rows.map((row) => row.map(csvEscape).join(",")).join("\r\n");
-    const blob = new Blob([csv], {
-      type: "text/csv;charset=utf-8;",
-    });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = `${schoolName.replace(/\s+/g, "-")}-staff-attendance-${month}.csv`;
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    URL.revokeObjectURL(url);
+      let savedItemsData: Record<string, unknown>[] = [];
+      if (runResult.data?.id) {
+        const { data, error: savedItemsError } = await supabase
+          .from("payroll_items")
+          .select("employee_id, staff_id, working_days, paid_leave_days, unpaid_days, school_holidays")
+          .eq("school_id", schoolId)
+          .eq("payroll_run_id", runResult.data.id);
+        if (savedItemsError) throw new Error(`Payroll items: ${savedItemsError.message}`);
+        savedItemsData = (data || []) as Record<string, unknown>[];
+      }
+
+      const attendanceByStaff = new Map<string, Record<string, unknown>>();
+      for (const row of (attendanceResult.data || []) as Record<string, unknown>[]) {
+        if (row.staff_id) attendanceByStaff.set(String(row.staff_id), row);
+      }
+      const savedByStaff = new Map<string, Record<string, unknown>>();
+      for (const row of savedItemsData) {
+        const id = row.staff_id || row.employee_id;
+        if (id) savedByStaff.set(String(id), row);
+      }
+      const number = (value: unknown) => {
+        const result = Number(value);
+        return Number.isFinite(result) ? result : 0;
+      };
+      const firstNumber = (row: Record<string, unknown>, keys: string[]) => {
+        for (const key of keys) {
+          if (key in row && number(row[key]) !== 0) return number(row[key]);
+        }
+        return 0;
+      };
+      const salaryByStaff = new Map<string, { gross: number; deductions: number }>();
+      for (const row of (salaryResult.data || []) as StaffSalaryExport[]) {
+        const id = row.staff_id || row.employee_id;
+        if (!id || row.is_active === false) continue;
+        const raw = row as Record<string, unknown>;
+        const gross = firstNumber(raw, ["basic_salary", "basic", "base_salary"])
+          + firstNumber(raw, ["house_allowance", "housing_allowance", "hra"])
+          + firstNumber(raw, ["transport_allowance", "transport", "ta"])
+          + firstNumber(raw, ["medical_allowance", "medical", "ma"])
+          + firstNumber(raw, ["other_allowance", "other_allowances", "other"]);
+        const componentDeductions = firstNumber(raw, ["pf_deduction", "pf", "provident_fund"])
+          + firstNumber(raw, ["tax_deduction", "tax", "tds"])
+          + firstNumber(raw, ["other_deduction", "other_deductions"]);
+        const deductions = firstNumber(raw, ["total_deductions", "monthly_deductions", "deduction_total"])
+          || (componentDeductions > 0 ? componentDeductions : firstNumber(raw, ["deductions"]));
+        salaryByStaff.set(String(id), { gross, deductions });
+      }
+      const firstSavedItem = savedItemsData[0];
+      const firstAttendance = (attendanceResult.data || [])[0] as Record<string, unknown> | undefined;
+      const defaultWorkingDays = number(firstSavedItem?.working_days)
+        || number(firstAttendance?.working_days)
+        || monthDays(month);
+
+      const headers = [
+        "Employee No",
+        "Staff Name",
+        "Mobile Number",
+        "Gross Salary",
+        ...days.map((day) => dateFor(month, day)),
+        "Net Salary",
+        "Present",
+        "Half Day",
+        "C/L Paid Leave",
+        "Absent",
+        "Holiday",
+        "Week Off",
+        "Working Days",
+        "Worked Days",
+      ];
+      const columnCount = headers.length;
+      const xmlEscape = (value: unknown) => String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&apos;");
+      const cell = (value: unknown, style = "", numeric = false) =>
+        `<Cell${style ? ` ss:StyleID="${style}"` : ""}><Data ss:Type="${numeric ? "Number" : "String"}">${xmlEscape(value)}</Data></Cell>`;
+
+      const styleByStatus: Partial<Record<CellStatus, string>> = {
+        present: "Present",
+        absent: "Absent",
+        half_day: "HalfDay",
+        paid_leave: "CasualLeave",
+        holiday: "Holiday",
+        week_off: "WeekOff",
+      };
+      const styles = `
+        <Style ss:ID="Default" ss:Name="Normal"><Alignment ss:Vertical="Center"/><Font ss:FontName="Calibri" ss:Size="10"/></Style>
+        <Style ss:ID="Title"><Font ss:Bold="1" ss:Size="14" ss:Color="#FFFFFF"/><Interior ss:Color="#1E3A8A" ss:Pattern="Solid"/></Style>
+        <Style ss:ID="Header"><Font ss:Bold="1" ss:Color="#FFFFFF"/><Interior ss:Color="#334155" ss:Pattern="Solid"/><Alignment ss:Horizontal="Center" ss:Vertical="Center"/></Style>
+        <Style ss:ID="Present"><Font ss:Bold="1" ss:Color="#166534"/><Interior ss:Color="#DCFCE7" ss:Pattern="Solid"/></Style>
+        <Style ss:ID="Absent"><Font ss:Bold="1" ss:Color="#991B1B"/><Interior ss:Color="#FEE2E2" ss:Pattern="Solid"/></Style>
+        <Style ss:ID="HalfDay"><Font ss:Bold="1" ss:Color="#6B21A8"/><Interior ss:Color="#F3E8FF" ss:Pattern="Solid"/></Style>
+        <Style ss:ID="CasualLeave"><Font ss:Bold="1" ss:Color="#075985"/><Interior ss:Color="#E0F2FE" ss:Pattern="Solid"/></Style>
+        <Style ss:ID="Holiday"><Font ss:Bold="1" ss:Color="#92400E"/><Interior ss:Color="#FEF3C7" ss:Pattern="Solid"/></Style>
+        <Style ss:ID="WeekOff"><Font ss:Bold="1" ss:Color="#334155"/><Interior ss:Color="#E2E8F0" ss:Pattern="Solid"/></Style>
+        <Style ss:ID="Money"><NumberFormat ss:Format="#,##0.00"/></Style>`;
+
+      const reportTitle = `${schoolName} - Staff Monthly Attendance - ${month}`;
+      const rows: string[] = [];
+      rows.push(`<Row ss:Height="25">${cell(reportTitle, "Title")}</Row>`);
+      rows.push(`<Row>${headers.map((header) => cell(header, "Header")).join("")}</Row>`);
+
+      for (const item of filteredStaff) {
+        const summary = getSummary(item.id);
+        const salary = salaryByStaff.get(item.id);
+        const attendanceSummary = attendanceByStaff.get(item.id);
+        const saved = savedByStaff.get(item.id);
+        const workingDays = number(saved?.working_days)
+          || number(attendanceSummary?.working_days)
+          || defaultWorkingDays;
+        const paidLeave = saved
+          ? number(saved.paid_leave_days)
+          : number(attendanceSummary?.paid_leave);
+        const workedDays = saved
+          ? Math.max(0, workingDays - number(saved.paid_leave_days) - number(saved.unpaid_days))
+          : number(attendanceSummary?.worked_days)
+            || Math.max(workingDays - paidLeave - number(attendanceSummary?.unpaid_leave), 0);
+        const payableDays = Math.min(workingDays, workedDays + paidLeave);
+        const unpaidDays = Math.max(workingDays - payableDays, 0);
+        const gross = salary?.gross ?? "";
+        const net = salary
+          ? Math.max(
+              salary.gross - (workingDays > 0 ? salary.gross * unpaidDays / workingDays : 0) - salary.deductions,
+              0,
+            )
+          : "";
+        const values: unknown[] = [item.employee_no || "", staffName(item), item.phone || "", gross];
+        const dailyStatuses: CellStatus[] = [];
+        for (const day of days) {
+          const status = getCellStatus(item.id, dateFor(month, day));
+          dailyStatuses.push(status);
+          values.push(status === "auto" ? "" : STATUS_LABEL[status]);
+        }
+        values.push(net, summary.present, summary.halfDay, summary.paidLeave, summary.absent, summary.holiday, summary.weekOff, summary.workingDays, summary.workedDays);
+        const statusStyles = new Map<number, string>();
+        dailyStatuses.forEach((status, index) => {
+          const style = styleByStatus[status];
+          if (style) statusStyles.set(4 + index, style);
+        });
+        const salaryColumns = new Set([3, 4 + days.length]);
+        rows.push(`<Row>${values.map((value, index) => cell(value, statusStyles.get(index) || (salaryColumns.has(index) ? "Money" : ""), typeof value === "number")).join("")}</Row>`);
+      }
+
+      const xml = `<?xml version="1.0"?><Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet" xmlns:x="urn:schemas-microsoft-com:office:excel"><Styles>${styles}</Styles><Worksheet ss:Name="Attendance"><Table ss:ExpandedColumnCount="${columnCount}" ss:ExpandedRowCount="${rows.length}" x:FullColumns="1" x:FullRows="1">${rows.join("")}</Table><WorksheetOptions xmlns="urn:schemas-microsoft-com:office:excel"><FreezePanes/><FrozenNoSplit/><SplitHorizontal>2</SplitHorizontal><TopRowBottomPane>2</TopRowBottomPane><SplitVertical>4</SplitVertical><LeftColumnRightPane>4</LeftColumnRightPane><ActivePane>0</ActivePane></WorksheetOptions></Worksheet></Workbook>`;
+      const blob = new Blob(["\uFEFF", xml], { type: "application/vnd.ms-excel;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${schoolName.replace(/\s+/g, "-")}-staff-attendance-${month}.xls`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (exportError) {
+      setError(exportError instanceof Error ? exportError.message : "Unable to export attendance workbook.");
+    }
   }
 
   const selectedStaff = selectedStaffId
@@ -998,11 +1120,11 @@ export default function AdminAttendancePage() {
             </button>
             <button
               type="button"
-              onClick={exportCsv}
+              onClick={() => void exportAttendanceExcel()}
               className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-slate-800"
             >
               <Download size={16} />
-              Download CSV
+              Download Excel
             </button>
             <button
               type="button"
@@ -1442,7 +1564,7 @@ export default function AdminAttendancePage() {
                 </button>
               </div>
 
-              <div className="grid gap-3 p-6 sm:grid-cols-5">
+              <div className="grid gap-3 p-6 sm:grid-cols-3 lg:grid-cols-6">
                 {(() => {
                   const summary = getSummary(selectedStaff.id);
 
@@ -1486,6 +1608,14 @@ export default function AdminAttendancePage() {
                         </p>
                         <p className="mt-1 text-2xl font-black text-slate-800">
                           {summary.weekOff}
+                        </p>
+                      </div>
+                      <div className="rounded-xl bg-sky-50 p-4">
+                        <p className="text-xs font-bold text-sky-600">
+                          C/L · CASUAL LEAVE
+                        </p>
+                        <p className="mt-1 text-2xl font-black text-sky-800">
+                          {summary.paidLeave}
                         </p>
                       </div>
                     </>
@@ -1619,11 +1749,11 @@ export default function AdminAttendancePage() {
                 </button>
                 <button
                   type="button"
-                  onClick={exportCsv}
+                  onClick={() => void exportAttendanceExcel()}
                   className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white"
                 >
                   <Download size={16} />
-                  Download Monthly
+                  Download Monthly Excel
                 </button>
               </div>
             </div>
