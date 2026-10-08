@@ -296,7 +296,7 @@ export default function DashboardLayout({
            ----------------------------------------------- */
 
         const {
-          data: membership,
+          data: memberships,
           error: membershipError,
         } = await supabase
           .from("school_users")
@@ -314,9 +314,7 @@ export default function DashboardLayout({
           .eq(
             "is_active",
             true
-          )
-          .limit(1)
-          .maybeSingle();
+          );
 
         if (membershipError) {
           console.error(
@@ -328,7 +326,7 @@ export default function DashboardLayout({
           return;
         }
 
-        if (!membership) {
+        if (!memberships?.length) {
           console.error(
             "NO ACTIVE SCHOOL MEMBERSHIP"
           );
@@ -341,10 +339,18 @@ export default function DashboardLayout({
            ROLE
            ----------------------------------------------- */
 
-        const currentRole =
-          normalizeRole(
-            membership.role
-          );
+        // Keep role selection aligned with login: if the account has multiple
+        // active memberships, its staff portal membership takes precedence.
+        const membership = memberships.find((candidate) =>
+          ["staff", "teacher", "employee"].includes(
+            normalizeRole(candidate.role)
+          )
+        ) || memberships[0];
+
+        const rawRole = normalizeRole(membership.role);
+        const currentRole = ["teacher", "employee"].includes(rawRole)
+          ? "staff"
+          : rawRole;
 
         /* -----------------------------------------------
            STAFF ROUTE PROTECTION

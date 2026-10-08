@@ -85,7 +85,7 @@ export default function LoginPage() {
       // ==================================================
 
       const {
-        data: schoolUser,
+        data: schoolUsers,
         error: schoolUserError,
       } = await supabase
         .from("school_users")
@@ -102,9 +102,7 @@ export default function LoginPage() {
           "user_id",
           data.user.id
         )
-        .eq("is_active", true)
-        .limit(1)
-        .maybeSingle();
+        .eq("is_active", true);
 
       if (schoolUserError) {
         console.error(
@@ -119,7 +117,7 @@ export default function LoginPage() {
         );
       }
 
-      if (!schoolUser) {
+      if (!schoolUsers?.length) {
         await supabase.auth.signOut();
 
         throw new Error(
@@ -131,9 +129,20 @@ export default function LoginPage() {
       // NORMALIZE ROLE
       // ==================================================
 
-      const role = String(
+      // A user can have more than one active school membership. Prefer the
+      // staff membership so login never falls through to the Principal home.
+      const schoolUser = schoolUsers.find((membership) =>
+        ["staff", "teacher", "employee"].includes(
+          String(membership.role || "").trim().toLowerCase()
+        )
+      ) || schoolUsers[0];
+
+      const rawRole = String(
         schoolUser.role || ""
-      ).toLowerCase();
+      ).trim().toLowerCase();
+      const role = ["teacher", "employee"].includes(rawRole)
+        ? "staff"
+        : rawRole;
 
       console.log(
         "LOGIN USER:",
