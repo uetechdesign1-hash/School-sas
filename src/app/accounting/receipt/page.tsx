@@ -304,6 +304,8 @@ export default function ReceiptPage() {
   const [concessionsByBillId, setConcessionsByBillId] = useState<Record<string, number>>({});
   const [selectedBillId, setSelectedBillId] = useState("");
   const [receiptFeeItems, setReceiptFeeItems] = useState<FeeBillItem[]>([]);
+  const [optionalFeeChoices, setOptionalFeeChoices] = useState<Array<{ id: string; categoryId: string; name: string; amount: number; frequency: string }>>([]);
+  const [selectedOptionalFeeIds, setSelectedOptionalFeeIds] = useState<string[]>([]);
   const [receiptPaymentLines, setReceiptPaymentLines] = useState<ReceiptPaymentLine[]>([]);
   const [includeInventory, setIncludeInventory] = useState(false);
   const [inventoryItems, setInventoryItems] = useState<InventoryItemRecord[]>([]);
@@ -728,7 +730,7 @@ export default function ReceiptPage() {
       const { data: structureItems, error: structureItemsError } =
         await supabase
           .from("fee_structure_items")
-          .select("id, amount, mandatory")
+          .select("id, fee_category_id, amount, frequency, mandatory")
           .eq("school_id", schoolId)
           .eq("fee_structure_id", structure.id);
 
@@ -751,6 +753,17 @@ export default function ReceiptPage() {
           (total, item) => total + Math.max(Number(item.amount || 0), 0),
           0,
         );
+      const optionalItems = (structureItems || []).filter((item) => !Boolean(item.mandatory) && Boolean(item.fee_category_id));
+      const { data: optionalCategories, error: optionalCategoriesError } = optionalItems.length
+        ? await supabase.from("fee_categories").select("id, name").eq("school_id", schoolId).in("id", optionalItems.map((item) => item.fee_category_id).filter(Boolean))
+        : { data: [], error: null };
+      if (optionalCategoriesError) throw new Error(optionalCategoriesError.message);
+      const categoryNames = new Map((optionalCategories || []).map((category) => [category.id, category.name]));
+      setOptionalFeeChoices(optionalItems.map((item) => ({
+        id: item.id, categoryId: item.fee_category_id!, name: categoryNames.get(item.fee_category_id!) || "Optional fee",
+        amount: Number(item.amount || 0), frequency: item.frequency || "annual",
+      })));
+      setSelectedOptionalFeeIds([]);
 
       /*
        * Pending previous-year carry-forward is part of the student's
@@ -898,6 +911,32 @@ export default function ReceiptPage() {
     } finally {
       setLoadingBills(false);
     }
+  }
+
+  async function addSelectedOptionalFees() {
+    const bill = feeBills[0];
+    if (!schoolId || !bill || selectedOptionalFeeIds.length === 0) return;
+    setSaving(true); setError(""); setSuccess("");
+    try {
+      const selected = optionalFeeChoices.filter((item) => selectedOptionalFeeIds.includes(item.id));
+      const existingCategories = new Set(receiptFeeItems.map((item) => item.fee_category_id));
+      const fresh = selected.filter((item) => !existingCategories.has(item.categoryId));
+      if (!fresh.length) throw new Error("Selected optional fees are already on this bill.");
+      const rows = fresh.map((item) => {
+        const multiplier: Record<string, number> = { one_time: 1, annual: 1, monthly: 12, quarterly: 4, half_yearly: 2 };
+        const amount = Math.max(item.amount, 0) * (multiplier[item.frequency] || 1);
+        return { school_id: schoolId, bill_id: bill.id, fee_structure_id: null, fee_category_id: item.categoryId,
+          description: item.name, fee_type: item.frequency, amount, discount: 0, net_amount: amount };
+      });
+      const { error: insertError } = await supabase.from("fee_bill_items").insert(rows);
+      if (insertError) throw new Error(insertError.message);
+      const { error: recalcError } = await supabase.rpc("recalculate_fee_bill", { p_bill_id: bill.id });
+      if (recalcError) throw new Error(recalcError.message);
+      setSuccess("Optional fee added to this student’s bill. Outstanding balance recalculated.");
+      setSelectedOptionalFeeIds([]);
+      await loadStudentBills(selectedStudentId);
+    } catch (err: any) { setError(err?.message || "Unable to add optional fees."); }
+    finally { setSaving(false); }
   }
 
   async function loadHistory(currentSchoolId: string) {
@@ -3285,6 +3324,19 @@ export default function ReceiptPage() {
                           <button type="button" onClick={addInventoryToStudentBill} disabled={saving || !feeBills[0]} className="ml-2 rounded-lg bg-emerald-700 px-4 py-2 text-xs font-bold text-white disabled:opacity-50">{saving ? "Adding to bill…" : "Issue inventory & add optional fee"}</button>
                         </div>}
                       </div>
+
+                      {optionalFeeChoices.length > 0 && feeBills[0] && <div className="mt-4 rounded-xl border border-blue-200 bg-blue-50/50 p-4">
+                        <p className="text-sm font-bold text-slate-900">Optional Fees</p>
+                        <p className="mt-1 text-xs text-slate-600">Select optional fees to add to this student’s bill and outstanding balance.</p>
+                        <div className="mt-3 grid gap-2 sm:grid-cols-2">{optionalFeeChoices.map((item) => {
+                          const alreadyAssigned = receiptFeeItems.some((fee) => fee.fee_category_id === item.categoryId);
+                          const multiplier: Record<string, number> = { one_time: 1, annual: 1, monthly: 12, quarterly: 4, half_yearly: 2 };
+                          return <label key={item.id} className="flex items-center gap-2 rounded-lg bg-white p-3 text-sm">
+                          <input type="checkbox" checked={selectedOptionalFeeIds.includes(item.id)} disabled={alreadyAssigned} onChange={(event) => setSelectedOptionalFeeIds((current) => event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id))} />
+                          <span>{item.name}{alreadyAssigned ? " · Already assigned" : ""}</span><span className="ml-auto font-semibold">{money(item.amount * (multiplier[item.frequency] || 1))}</span>
+                        </label>})}</div>
+                        <button type="button" onClick={() => void addSelectedOptionalFees()} disabled={saving || !selectedOptionalFeeIds.length} className="mt-3 rounded-lg bg-blue-700 px-4 py-2 text-xs font-bold text-white disabled:opacity-50">{saving ? "Adding…" : "Add selected optional fees"}</button>
+                      </div>}
 
                       <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4">
                         <div className="flex items-start justify-between gap-3">

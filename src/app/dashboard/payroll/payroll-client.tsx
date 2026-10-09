@@ -203,6 +203,7 @@ function calculate(
   worked: number,
   paidLeave: number,
   holiday: number,
+  calendarDays: number,
 ) {
   if (!salary) {
     return { payable: 0, unpaid: workingDays, gross: 0, lop: 0, deductions: 0, net: 0 };
@@ -213,8 +214,9 @@ function calculate(
   const p = Math.max(0, n(paidLeave));
   const h = Math.max(0, n(holiday));
 
-  // working_days already excludes school holidays and weekly offs.
-  // Therefore holidays must not be added a second time to payable days.
+  // Scheduled working days exclude school holidays and weekly offs. Those
+  // calendar days are paid as part of the fixed monthly salary, so loss of pay
+  // is based on calendar days in the month, not scheduled working days.
   const payable = Math.min(wd, w + p);
   const unpaid = Math.max(wd - payable, 0);
 
@@ -223,8 +225,9 @@ function calculate(
   // the attendance-prorated amount; otherwise Gross incorrectly becomes Net
   // before deductions.
   const gross = salary.gross_salary;
-  const lop = wd > 0
-    ? salary.gross_salary * (unpaid / wd)
+  const monthDays = Math.max(1, n(calendarDays));
+  const lop = monthDays > 0
+    ? salary.gross_salary * (unpaid / monthDays)
     : 0;
   const deductions = salary.deductions;
   const net = Math.max(gross - lop - deductions, 0);
@@ -439,10 +442,11 @@ export default function PayrollPage() {
                 n(saved.paid_leave_days) -
                 n(saved.unpaid_days),
             )
-          : n(att?.worked_days) ||
-            Math.max(wd - paid - n(att?.unpaid_leave), 0);
+          : att?.worked_days != null
+            ? Math.max(0, n(att.worked_days))
+            : Math.max(wd - paid - n(att?.unpaid_leave), 0);
 
-        const result = calculate(salary, wd, worked, paid, holiday);
+        const result = calculate(salary, wd, worked, paid, holiday, defaultDays);
 
         return {
           staff: s,
@@ -501,7 +505,7 @@ export default function PayrollPage() {
           r.worked + r.paidLeave > workingDays
         ) {
           throw new Error(
-            `Invalid attendance for ${staffName(r.staff)}. Worked + paid leave + holiday cannot exceed ${workingDays}.`,
+            `Invalid attendance for ${staffName(r.staff)}. Worked days + paid leave cannot exceed ${workingDays}; holidays and weekly offs are already excluded from working days.`,
           );
         }
       }
@@ -1426,7 +1430,7 @@ export default function PayrollPage() {
                   setWorkingDays(value);
                   setRows((current) =>
                     current.map((r) => {
-                      const result = calculate(r.salary, value, r.worked, r.paidLeave, r.holiday);
+                      const result = calculate(r.salary, value, r.worked, r.paidLeave, r.holiday, daysInMonth(month));
                       return { ...r, worked: Math.min(r.worked, value), unpaid: result.unpaid, payable: result.payable, gross: result.gross, lopAmount: result.lop, deductions: result.deductions, net: result.net };
                     }),
                   );

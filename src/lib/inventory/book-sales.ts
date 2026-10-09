@@ -446,16 +446,22 @@ export async function saveStudentBookSale(
       );
     }
 
-    const cogsEntry = await postCogsJournal(supabase, {
-      schoolId: input.schoolId,
-      fiscalYearId: setup.fiscalYearId,
-      entryDate: input.saleDate,
-      sourceRecordId: saleId,
-      cogsLines,
-      totalCost: cogsAmount,
-      createdBy: input.createdBy,
-      saleReference: saleNumber,
-    });
+    // An inventory item can have no recorded cost basis (for example, an
+    // opening stock quantity entered without a unit cost). In that case
+    // there is no COGS journal to post; calling the canonical journal helper
+    // with no lines raises "Journal entry requires at least one line".
+    const cogsEntry = cogsAmount > 0
+      ? await postCogsJournal(supabase, {
+          schoolId: input.schoolId,
+          fiscalYearId: setup.fiscalYearId,
+          entryDate: input.saleDate,
+          sourceRecordId: saleId,
+          cogsLines,
+          totalCost: cogsAmount,
+          createdBy: input.createdBy,
+          saleReference: saleNumber,
+        })
+      : null;
 
     const { error: updateError } = await supabase
       .from("student_book_sales")

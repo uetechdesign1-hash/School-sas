@@ -173,16 +173,19 @@ export function generateReceiptPDF(data: ReceiptData) {
   // ------------------------------------------------------------
   // TITLE
   // ------------------------------------------------------------
+  // Keep the full-width title banner below the logo's 7–25 mm vertical
+  // footprint so the banner fill cannot cover the logo.
+  y = Math.max(y, data.schoolLogoDataUrl ? 28 : 22);
   pdf.setFillColor(245, 247, 250);
-  pdf.roundedRect(left, y, contentWidth, 8, 1.4, 1.4, "F");
+  pdf.roundedRect(left, y, contentWidth, 7, 1.2, 1.2, "F");
 
   pdf.setFont("helvetica", "bold");
   pdf.setFontSize(9.5);
-  pdf.text("FEE PAYMENT RECEIPT", pageWidth / 2, y + 5.3, {
+  pdf.text("FEE PAYMENT RECEIPT", pageWidth / 2, y + 4.7, {
     align: "center",
   });
 
-  y += 11;
+  y += 9;
 
   // ------------------------------------------------------------
   // RECEIPT / BILL / DATE

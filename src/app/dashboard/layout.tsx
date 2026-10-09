@@ -11,7 +11,6 @@ import {
 
 import {
   LayoutDashboard,
-  BadgeCheck,
   CalendarCheck,
   CalendarDays,
   WalletCards,
@@ -61,11 +60,6 @@ const PRINCIPAL_MENU: MenuItem[] = [
     name: "Fees",
     href: "/dashboard/fees/structure",
     icon: <IndianRupee size={18} />,
-  },
-  {
-    name: "Fee Assignment",
-    href: "/dashboard/fees/assign",
-    icon: <BadgeCheck size={18} />,
   },
   {
     name: "Attendance",
