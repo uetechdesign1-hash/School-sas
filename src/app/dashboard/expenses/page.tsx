@@ -139,6 +139,8 @@ type Expense = {
   invoice_number: string | null;
   description: string | null;
   created_at: string;
+  canonical_journal_entry_id?: string | null;
+  expense_account_id?: string | null;
 };
 
 type Entry = {
@@ -235,6 +237,7 @@ export default function ExpensesPage() {
   const [month, setMonth] = useState(currentMonth());
   const [search, setSearch] = useState("");
   const [accountFilter, setAccountFilter] = useState("");
+  const [expenseAccountFilter, setExpenseAccountFilter] = useState("");
 
   const [showAdd, setShowAdd] = useState(false);
 
@@ -440,9 +443,32 @@ export default function ExpensesPage() {
       (accountRes.data || []) as Account[],
     );
 
-    setExpenses(
-      (expenseRes.data || []) as Expense[],
-    );
+    const expenseRows = (expenseRes.data || []) as Expense[];
+    const expenseIds = expenseRows.map((expense) => expense.id);
+    let linkedExpenses = new Map<string, { journalId: string; accountId: string | null }>();
+    if (expenseIds.length) {
+      const { data: events, error: eventError } = await supabase
+        .from("accounting_events")
+        .select("source_record_id,journal_entry_id")
+        .eq("school_id", id)
+        .in("source_record_id", expenseIds);
+      if (eventError) throw eventError;
+      const eventRows = events || [];
+      const journalIds = Array.from(new Set(eventRows.map((event) => String(event.journal_entry_id)).filter(Boolean)));
+      const { data: lines, error: lineError } = journalIds.length
+        ? await supabase.from("journal_lines").select("journal_entry_id,account_id,debit,credit").eq("school_id", id).in("journal_entry_id", journalIds)
+        : { data: [], error: null };
+      if (lineError) throw lineError;
+      for (const event of eventRows) {
+        const debitLine = (lines || []).find((line) => String(line.journal_entry_id) === String(event.journal_entry_id) && Number(line.debit || 0) > 0);
+        linkedExpenses.set(String(event.source_record_id), { journalId: String(event.journal_entry_id), accountId: debitLine?.account_id || null });
+      }
+    }
+    setExpenses(expenseRows.map((expense) => ({
+      ...expense,
+      canonical_journal_entry_id: linkedExpenses.get(expense.id)?.journalId || null,
+      expense_account_id: linkedExpenses.get(expense.id)?.accountId || null,
+    })));
 
     setVendors(
       (vendorRes.data || []) as Vendor[],
@@ -620,6 +646,8 @@ export default function ExpensesPage() {
         return false;
       }
 
+      if (expenseAccountFilter && e.expense_account_id !== expenseAccountFilter) return false;
+
       if (!q) return true;
 
       return [
@@ -641,6 +669,7 @@ export default function ExpensesPage() {
     expenses,
     search,
     accountFilter,
+    expenseAccountFilter,
     accountMap,
   ]);
 
@@ -2345,6 +2374,13 @@ export default function ExpensesPage() {
               </select>
             </Field>
 
+            <Field label="Expense Account">
+              <select value={expenseAccountFilter} onChange={(e) => setExpenseAccountFilter(e.target.value)} className="input">
+                <option value="">All Expense Accounts</option>
+                {expenseAccounts.map((a) => <option key={a.id} value={a.id}>{a.code ? `${a.code} - ` : ""}{a.name}</option>)}
+              </select>
+            </Field>
+
             <Field label="Search">
               <input
                 value={search}
@@ -2467,7 +2503,7 @@ export default function ExpensesPage() {
                         </td>
 
                         <td className="px-5 py-4 text-center">
-                          {e.transaction_id ? (
+                          {e.transaction_id || e.canonical_journal_entry_id ? (
                             <button
                               onClick={() =>
                                 void openView(e)

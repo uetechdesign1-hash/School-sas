@@ -85,6 +85,7 @@ type PaymentRow = {
   description: string | null;
   reference_type: string | null;
   reference_id: string | null;
+  source_record_id?: string | null;
   created_at: string;
   entries: TransactionEntry[];
 };
@@ -340,6 +341,10 @@ export default function PaymentPage() {
   // DELETE CONFIRMATION
   const [deletePayment, setDeletePayment] =
     useState<PaymentRow | null>(null);
+
+  const [historyFrom, setHistoryFrom] = useState("");
+  const [historyTo, setHistoryTo] = useState("");
+  const [historyType, setHistoryType] = useState("all");
 
   /*
    * =====================================================
@@ -749,6 +754,7 @@ export default function PaymentPage() {
             transaction.reference_type,
           reference_id:
             transaction.reference_id,
+          source_record_id: null,
           created_at:
             transaction.created_at,
           entries:
@@ -815,6 +821,7 @@ export default function PaymentPage() {
               entry.source_record_id ||
               ""
           ) || null,
+        source_record_id: entry.source_record_id ? String(entry.source_record_id) : null,
         created_at: String(
           entry.created_at || ""
         ),
@@ -1262,6 +1269,24 @@ export default function PaymentPage() {
         EXPENSE_ACCOUNT_TYPES
       );
     }, [accounts]);
+
+  const filteredPayments = useMemo(() => payments.filter((payment) => {
+    if (historyFrom && payment.transaction_date < historyFrom) return false;
+    if (historyTo && payment.transaction_date > historyTo) return false;
+    if (historyType === "salary") {
+      return payment.entries.some((entry) => {
+        const account = accounts.find((item) => item.id === entry.account_id);
+        return Number(entry.debit) > 0 && ["payable", "liability"].includes(account?.account_type || "");
+      });
+    }
+    if (historyType === "expense") {
+      return payment.entries.some((entry) => {
+        const account = accounts.find((item) => item.id === entry.account_id);
+        return Number(entry.debit) > 0 && !["payable", "liability"].includes(account?.account_type || "");
+      });
+    }
+    return true;
+  }), [payments, historyFrom, historyTo, historyType, accounts]);
 
   /*
    * =====================================================
@@ -1993,6 +2018,84 @@ export default function PaymentPage() {
       }
 
       const description = descriptionParts.join(" | ");
+
+      if (editingId) {
+        const originalPayment = payments.find((item) => item.id === editingId);
+        if (!originalPayment) throw new Error("Payment could not be found. Refresh and try again.");
+
+        const expenseId = originalPayment.source_record_id || originalPayment.reference_id;
+        if (!expenseId) throw new Error("This payment is not linked to an expense record and cannot be edited safely.");
+
+        const { error: expenseUpdateError } = await supabase
+          .from("expenses")
+          .update({
+            expense_date: paymentDate,
+            amount: numericAmount,
+            paid_from_account_id: paidFromAccountId,
+            description: particulars.trim(),
+            invoice_number: referenceNumber.trim() || null,
+          })
+          .eq("id", expenseId)
+          .eq("school_id", schoolId);
+        if (expenseUpdateError) throw expenseUpdateError;
+
+        if (originalPayment.reference_type === "payment") {
+          const { error: journalUpdateError } = await supabase
+            .from("journal_entries")
+            .update({ entry_date: paymentDate, description })
+            .eq("id", editingId)
+            .eq("school_id", schoolId);
+          if (journalUpdateError) throw journalUpdateError;
+
+          const { data: lines, error: linesError } = await supabase
+            .from("journal_lines")
+            .select("id,debit,credit")
+            .eq("journal_entry_id", editingId)
+            .eq("school_id", schoolId);
+          if (linesError) throw linesError;
+          const debitLine = (lines || []).find((line) => Number(line.debit || 0) > 0);
+          const creditLine = (lines || []).find((line) => Number(line.credit || 0) > 0);
+          if (!debitLine || !creditLine) throw new Error("The existing accounting entry is incomplete.");
+
+          const { error: debitUpdateError } = await supabase
+            .from("journal_lines")
+            .update({ account_id: debitAccountId, debit: numericAmount, credit: 0, description })
+            .eq("id", debitLine.id).eq("school_id", schoolId);
+          if (debitUpdateError) throw debitUpdateError;
+          const { error: creditUpdateError } = await supabase
+            .from("journal_lines")
+            .update({ account_id: paidFromAccountId, debit: 0, credit: numericAmount, description })
+            .eq("id", creditLine.id).eq("school_id", schoolId);
+          if (creditUpdateError) throw creditUpdateError;
+        } else {
+          const { error: txnUpdateError } = await supabase
+            .from("transactions")
+            .update({ transaction_date: paymentDate, description })
+            .eq("id", editingId).eq("school_id", schoolId);
+          if (txnUpdateError) throw txnUpdateError;
+          const { data: lines, error: linesError } = await supabase
+            .from("transaction_entries")
+            .select("id,debit,credit")
+            .eq("transaction_id", editingId).eq("school_id", schoolId);
+          if (linesError) throw linesError;
+          const debitLine = (lines || []).find((line) => Number(line.debit || 0) > 0);
+          const creditLine = (lines || []).find((line) => Number(line.credit || 0) > 0);
+          if (!debitLine || !creditLine) throw new Error("The existing accounting transaction is incomplete.");
+          const { error: debitUpdateError } = await supabase.from("transaction_entries")
+            .update({ account_id: debitAccountId, debit: numericAmount, credit: 0, description })
+            .eq("id", debitLine.id).eq("school_id", schoolId);
+          if (debitUpdateError) throw debitUpdateError;
+          const { error: creditUpdateError } = await supabase.from("transaction_entries")
+            .update({ account_id: paidFromAccountId, debit: 0, credit: numericAmount, description })
+            .eq("id", creditLine.id).eq("school_id", schoolId);
+          if (creditUpdateError) throw creditUpdateError;
+        }
+
+        setSuccess("Payment updated. The existing expense and accounting entry were kept linked.");
+        resetForm();
+        await loadPayments(schoolId);
+        return;
+      }
 
       // Canonical accounting only: we post through journal_entries/journal_lines
       // and do NOT create legacy transactions/transaction_entries for the same
@@ -3716,7 +3819,7 @@ export default function PaymentPage() {
               </h2>
 
               <p className="text-xs text-slate-500">
-                {payments.length} payments
+                {filteredPayments.length} of {payments.length} payments
               </p>
             </div>
 
@@ -3738,7 +3841,13 @@ export default function PaymentPage() {
             </button>
           </div>
 
-          {payments.length ===
+          <div className="grid gap-3 border-b bg-slate-50 px-5 py-4 md:grid-cols-3">
+            <label className="text-xs font-medium text-slate-600">From date<input type="date" value={historyFrom} onChange={(event) => setHistoryFrom(event.target.value)} className="mt-1 block w-full rounded-lg border bg-white px-3 py-2 text-sm" /></label>
+            <label className="text-xs font-medium text-slate-600">To date<input type="date" value={historyTo} onChange={(event) => setHistoryTo(event.target.value)} className="mt-1 block w-full rounded-lg border bg-white px-3 py-2 text-sm" /></label>
+            <label className="text-xs font-medium text-slate-600">Payment type<select value={historyType} onChange={(event) => setHistoryType(event.target.value)} className="mt-1 block w-full rounded-lg border bg-white px-3 py-2 text-sm"><option value="all">All types</option><option value="expense">Expense</option><option value="salary">Salary</option></select></label>
+          </div>
+
+          {filteredPayments.length ===
           0 ? (
             <div className="p-12 text-center">
               <Banknote
@@ -3791,7 +3900,7 @@ export default function PaymentPage() {
                 </thead>
 
                 <tbody className="divide-y">
-                  {payments.map(
+                  {filteredPayments.map(
                     (payment) => {
                       const debitEntry =
                         payment.entries.find(
