@@ -1049,6 +1049,37 @@ function FeesCollectionPage() {
 
         </section>
 
+        {/* ASSIGN FEES CLASS-WISE */}
+
+        <section className="mt-6 rounded-2xl border border-emerald-200 bg-emerald-50 p-5 shadow-sm">
+
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+
+            <div>
+
+              <h2 className="font-bold text-emerald-900">
+                Assign Fees (Class-wise)
+              </h2>
+
+              <p className="mt-1 text-sm text-emerald-800">
+                One click assigns mandatory fees and unpaid
+                previous-year fees to every student of a class.
+              </p>
+
+            </div>
+
+            <Link
+              href="/dashboard/fees/assign"
+              className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-emerald-700"
+            >
+              Assign Fees
+              <ArrowRight size={16} />
+            </Link>
+
+          </div>
+
+        </section>
+
         {/* FEE STRUCTURE */}
 
         <section className="mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">

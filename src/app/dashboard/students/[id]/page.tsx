@@ -20,6 +20,7 @@ import {
   Wallet,
 } from "lucide-react";
 import { generateFeeLedgerPDF } from "@/lib/fees/generateFeeLedger";
+import { loadBillClassLabels, loadEnrollmentLabels, enrollmentKey } from "@/lib/students/enrollment-history";
 
 type Gender =
   | "male"
@@ -79,6 +80,7 @@ type Student = {
 
 type FeeSummary = {
   overall: number;
+  oldFee: number;
   collected: number;
   pending: number;
   concession: number;
@@ -99,6 +101,7 @@ export default function StudentDetailsPage() {
   const [feeSummary, setFeeSummary] =
     useState<FeeSummary>({
       overall: 0,
+      oldFee: 0,
       collected: 0,
       pending: 0,
       concession: 0,
@@ -106,6 +109,15 @@ export default function StudentDetailsPage() {
 
   const [feeSummaryLoading, setFeeSummaryLoading] =
     useState(true);
+
+  // Academic year the four/five fee boxes are showing. Defaults to the
+  // current year so a promoted student does not mix last year's fees in.
+  const [summaryYearId, setSummaryYearId] =
+    useState("");
+
+  // "Class 1 - A" the student belonged to in the selected year.
+  const [summaryYearClass, setSummaryYearClass] =
+    useState("");
 
   const [ledgerDownloading, setLedgerDownloading] =
     useState(false);
@@ -199,6 +211,32 @@ export default function StudentDetailsPage() {
       loadStudent();
     }
   }, [studentId]);
+
+  useEffect(() => {
+    if (!student || !summaryYearId) {
+      return;
+    }
+
+    const refreshFeeSummary = () => {
+      if (document.visibilityState !== "visible") return;
+
+      void loadFeeSummary(
+        createClient(),
+        student.school_id,
+        studentId,
+        summaryYearId
+      );
+    };
+
+    refreshFeeSummary();
+    window.addEventListener("focus", refreshFeeSummary);
+    document.addEventListener("visibilitychange", refreshFeeSummary);
+    return () => {
+      window.removeEventListener("focus", refreshFeeSummary);
+      document.removeEventListener("visibilitychange", refreshFeeSummary);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [student?.id, student?.school_id, summaryYearId, studentId]);
 
   async function getSchoolId(
     supabase: ReturnType<
@@ -430,6 +468,14 @@ export default function StudentDetailsPage() {
         setAcademicYearId(currentAcademicYear.id);
       }
 
+      setSummaryYearId(
+        (current) =>
+          current ||
+          currentAcademicYear?.id ||
+          loadedAcademicYears[0]?.id ||
+          ""
+      );
+
       const {
         data,
         error: studentError,
@@ -486,12 +532,6 @@ export default function StudentDetailsPage() {
 
       setStudent(record);
 
-      loadFeeSummary(
-        supabase,
-        schoolId,
-        studentId
-      );
-
       fillForm(record);
 
       setClassId(
@@ -539,7 +579,8 @@ export default function StudentDetailsPage() {
   async function loadFeeSummary(
     supabase: ReturnType<typeof createClient>,
     schoolId: string,
-    studentId: string
+    studentId: string,
+    academicYearId: string
   ) {
     setFeeSummaryLoading(true);
 
@@ -547,20 +588,29 @@ export default function StudentDetailsPage() {
       const [
         billsResult,
         concessionsResult,
+        carryForwardResult,
       ] = await Promise.all([
         supabase
           .from("fee_bills")
           .select(
-            "total_amount, paid_amount, balance_amount"
+            "id, academic_year_id, bill_date, total_amount, paid_amount, balance_amount"
           )
           .eq("school_id", schoolId)
           .eq("student_id", studentId),
 
         supabase
           .from("fee_concessions")
-          .select("amount")
+          .select("amount, bill_id")
           .eq("school_id", schoolId)
           .eq("student_id", studentId),
+
+        // Unpaid fee carried in from earlier years ("Old Fee").
+        supabase
+          .from("fee_carry_forwards")
+          .select("amount, status")
+          .eq("school_id", schoolId)
+          .eq("student_id", studentId)
+          .eq("to_academic_year_id", academicYearId),
       ]);
 
       if (billsResult.error) {
@@ -571,58 +621,123 @@ export default function StudentDetailsPage() {
         throw concessionsResult.error;
       }
 
-      const bills =
+      const selectedYear = academicYears.find(
+        (year) => year.id === academicYearId
+      );
+
+      // A bill saved without an academic year belongs to the year whose
+      // dates contain the bill date.
+      const bills = (
         (billsResult.data || []) as Array<{
+          id: string;
+          academic_year_id: string | null;
+          bill_date: string | null;
           total_amount: number | null;
           paid_amount: number | null;
           balance_amount: number | null;
-        }>;
+        }>
+      ).filter((bill) => {
+        if (bill.academic_year_id) {
+          return bill.academic_year_id === academicYearId;
+        }
+
+        return Boolean(
+          selectedYear &&
+            bill.bill_date &&
+            bill.bill_date >= selectedYear.start_date &&
+            bill.bill_date <= selectedYear.end_date
+        );
+      });
+
+      const billIds = new Set(bills.map((bill) => bill.id));
 
       const concessions =
         (concessionsResult.data ||
           []) as Array<{
           amount: number | null;
+          bill_id: string | null;
         }>;
 
-      let overall = 0;
+      // Carry-forward is optional: ignore a lookup error and show 0.
+      const carryForwards =
+        (carryForwardResult.error
+          ? []
+          : carryForwardResult.data || []) as Array<{
+          amount: number | null;
+          status: string | null;
+        }>;
+
+      let billed = 0;
       let collected = 0;
       let pending = 0;
       let concession = 0;
+      let oldFee = 0;
 
       for (const bill of bills) {
-        overall +=
-          Math.max(
-            Number(bill.total_amount || 0),
-            0
-          );
-
-        collected +=
-          Math.max(
-            Number(bill.paid_amount || 0),
-            0
-          );
-
-        pending +=
-          Math.max(
-            Number(bill.balance_amount || 0),
-            0
-          );
+        billed += Math.max(Number(bill.total_amount || 0), 0);
+        collected += Math.max(Number(bill.paid_amount || 0), 0);
+        pending += Math.max(Number(bill.balance_amount || 0), 0);
       }
 
       for (const item of concessions) {
-        concession +=
-          Math.max(
-            Number(item.amount || 0),
-            0
-          );
+        if (item.bill_id && billIds.has(item.bill_id)) {
+          concession += Math.max(Number(item.amount || 0), 0);
+        }
       }
+
+      for (const item of carryForwards) {
+        if (String(item.status || "").toLowerCase() === "cancelled") continue;
+        oldFee += Math.max(Number(item.amount || 0), 0);
+      }
+
+      // The bill total already contains the carried-forward lines, so
+      // "Overall" is this year's own fee and "Old Fee" is shown separately.
+      const overall = Math.max(billed - oldFee, 0);
 
       setFeeSummary({
         overall,
+        oldFee,
         collected,
         pending,
         concession,
       });
+
+      // Class the student had in the selected year.
+      let classLabel = "";
+      const labels = await loadBillClassLabels(
+        supabase,
+        schoolId,
+        bills.map((bill) => ({
+          id: bill.id,
+          student_id: studentId,
+          academic_year_id: bill.academic_year_id,
+        }))
+      );
+      const firstLabel = bills
+        .map((bill) => labels.get(bill.id))
+        .find(Boolean);
+
+      if (firstLabel?.className) {
+        classLabel = [firstLabel.className, firstLabel.sectionName]
+          .filter(Boolean)
+          .join(" - ");
+      } else {
+        const enrollments = await loadEnrollmentLabels(
+          supabase,
+          schoolId,
+          [studentId]
+        );
+        const enrollment = enrollments.get(
+          enrollmentKey(studentId, academicYearId)
+        );
+        if (enrollment?.className) {
+          classLabel = [enrollment.className, enrollment.sectionName]
+            .filter(Boolean)
+            .join(" - ");
+        }
+      }
+
+      setSummaryYearClass(classLabel);
     } catch (loadError) {
       console.error(
         "LOAD FEE SUMMARY ERROR:",
@@ -631,10 +746,12 @@ export default function StudentDetailsPage() {
 
       setFeeSummary({
         overall: 0,
+        oldFee: 0,
         collected: 0,
         pending: 0,
         concession: 0,
       });
+      setSummaryYearClass("");
     } finally {
       setFeeSummaryLoading(false);
     }
@@ -1685,14 +1802,61 @@ export default function StudentDetailsPage() {
 
             {/* FEE SUMMARY */}
 
-            <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <section className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-center gap-3">
+                <label
+                  htmlFor="summary-year"
+                  className="text-sm font-semibold text-slate-700"
+                >
+                  Academic Year
+                </label>
+
+                <select
+                  id="summary-year"
+                  value={summaryYearId}
+                  onChange={(event) =>
+                    setSummaryYearId(event.target.value)
+                  }
+                  className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm text-slate-900 outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+                >
+                  {academicYears.map((year) => (
+                    <option key={year.id} value={year.id}>
+                      {year.name}
+                      {year.is_current ? " (Current)" : ""}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <p className="text-sm text-slate-600">
+                Class in this year:{" "}
+                <span className="font-bold text-slate-900">
+                  {summaryYearClass ||
+                    (student.academic_year_id === summaryYearId
+                      ? classes.find((item) => item.id === student.class_id)
+                          ?.name || "—"
+                      : "—")}
+                </span>
+              </p>
+            </section>
+
+            <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
 
               <FeeSummaryBox
                 title="Overall"
                 value={formatINR(feeSummary.overall)}
-                subtitle="Total fee billed"
+                subtitle="This year's fee assigned"
                 icon={<Wallet size={20} />}
                 iconClassName="bg-blue-50 text-blue-600"
+                loading={feeSummaryLoading}
+              />
+
+              <FeeSummaryBox
+                title="Old Fee"
+                value={formatINR(feeSummary.oldFee)}
+                subtitle="Carried forward from earlier years"
+                icon={<Clock3 size={20} />}
+                iconClassName="bg-rose-50 text-rose-600"
                 loading={feeSummaryLoading}
               />
 
@@ -2028,36 +2192,27 @@ function FeeSummaryBox({
   loading: boolean;
 }) {
   return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition hover:shadow-md">
+    <div className="relative min-w-0 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition hover:shadow-md">
+      <div className="min-w-0">
+        <p className="min-h-10 pr-12 text-sm font-medium text-slate-500">
+          {title}
+        </p>
 
-      <div className="flex items-start justify-between gap-3">
+        <p className="mt-2 whitespace-nowrap text-[clamp(0.8rem,1.05vw,1.125rem)] font-bold leading-7 tracking-tight tabular-nums text-slate-900">
+          {loading
+            ? "—"
+            : value}
+        </p>
 
-        <div className="min-w-0">
-
-          <p className="text-sm font-medium text-slate-500">
-            {title}
-          </p>
-
-          <p className="mt-2 truncate text-2xl font-bold tracking-tight text-slate-900">
-            {loading
-              ? "—"
-              : value}
-          </p>
-
-          <p className="mt-1 text-xs text-slate-400">
-            {subtitle}
-          </p>
-
-        </div>
-
-        <div
-          className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl ${iconClassName}`}
-        >
-          {icon}
-        </div>
-
+        <p className="mt-1 min-h-8 text-xs text-slate-400">
+          {subtitle}
+        </p>
       </div>
-
+      <div
+        className={`absolute right-5 top-5 flex h-11 w-11 shrink-0 items-center justify-center rounded-xl ${iconClassName}`}
+      >
+        {icon}
+      </div>
     </div>
   );
 }

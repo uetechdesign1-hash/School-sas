@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowRight,
   BadgePercent,
@@ -82,12 +82,32 @@ export default function StudentsPage() {
 
   // Fee totals across ALL students of ALL classes (canonical fee_bills source,
   // same as the per-student dashboard boxes and the Fee Ledger).
-  const [feeTotals, setFeeTotals] = useState({
-    overall: 0,
-    collected: 0,
-    pending: 0,
-    concession: 0,
-  });
+  // Raw fee rows are kept so every box can be recomputed for the academic
+  // year chosen in the selector (current year by default).
+  const [feeYearId, setFeeYearId] = useState("");
+  const [yearBills, setYearBills] = useState<
+    Array<{
+      id: string;
+      student_id: string;
+      academic_year_id: string | null;
+      bill_date?: string | null;
+      total_amount: number;
+      paid_amount: number;
+      balance_amount: number;
+    }>
+  >([]);
+  const [yearConcessions, setYearConcessions] = useState<
+    Array<{ student_id: string; bill_id: string | null; amount: number }>
+  >([]);
+  const [yearCarryForwards, setYearCarryForwards] = useState<
+    Array<{ student_id: string; to_academic_year_id: string; amount: number; status: string | null }>
+  >([]);
+  // "studentId|yearId" -> class derived from the fee structure of that year's bill
+  const [billClassByYear, setBillClassByYear] = useState<Map<string, string>>(new Map());
+  // "studentId|yearId" -> class/section the student had in that year
+  const [enrollmentByYear, setEnrollmentByYear] = useState<
+    Map<string, { class_id: string | null; section_id: string | null }>
+  >(new Map());
 
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("all");
@@ -108,12 +128,29 @@ export default function StudentsPage() {
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const loadingStudents = useRef(false);
 
   useEffect(() => {
     void loadStudents();
+
+    const refreshStudents = () => {
+      if (document.visibilityState === "visible") {
+        void loadStudents();
+      }
+    };
+
+    window.addEventListener("focus", refreshStudents);
+    document.addEventListener("visibilitychange", refreshStudents);
+    return () => {
+      window.removeEventListener("focus", refreshStudents);
+      document.removeEventListener("visibilitychange", refreshStudents);
+    };
   }, []);
 
   async function loadStudents() {
+    if (loadingStudents.current) return;
+    loadingStudents.current = true;
+
     try {
       setLoading(true);
       setError("");
@@ -219,7 +256,7 @@ export default function StudentsPage() {
 
         supabase
           .from("fee_bills")
-          .select("id, student_id, academic_year_id, total_amount, paid_amount, balance_amount")
+          .select("id, student_id, academic_year_id, bill_date, total_amount, paid_amount, balance_amount")
           .eq("school_id", schoolId),
 
         supabase
@@ -311,6 +348,7 @@ export default function StudentsPage() {
         id: string;
         student_id: string;
         academic_year_id: string | null;
+        bill_date: string | null;
         total_amount: number;
         paid_amount: number;
         balance_amount: number;
@@ -407,29 +445,90 @@ export default function StudentsPage() {
       setAcademicYears(loadedYears);
       setOutstandingFees(feeMap);
 
-      // Aggregate fee totals across all students of all classes from the
-      // canonical fee_bills + fee_concessions tables.
-      let totalOverall = 0;
-      let totalCollected = 0;
-      let totalPending = 0;
-      let totalConcession = 0;
+      // Keep the raw rows; totals are computed per selected academic year.
+      // Bills saved without an academic year belong to the year whose dates
+      // contain the bill date.
+      const yearForBill = (bill: { academic_year_id: string | null; bill_date?: string | null }) =>
+        bill.academic_year_id ||
+        loadedYears.find(
+          (year) =>
+            bill.bill_date &&
+            String(bill.bill_date) >= year.start_date &&
+            String(bill.bill_date) <= year.end_date,
+        )?.id ||
+        null;
+      const normalizedBills = bills.map((bill) => ({
+        ...bill,
+        academic_year_id: yearForBill(bill as { academic_year_id: string | null; bill_date?: string | null }),
+      }));
+      setYearBills(normalizedBills);
 
-      for (const bill of bills) {
-        totalOverall += Math.max(Number(bill.total_amount || 0), 0);
-        totalCollected += Math.max(Number(bill.paid_amount || 0), 0);
-        totalPending += Math.max(Number(bill.balance_amount || 0), 0);
+      // Class of each student in a past year, taken from the fee structure the
+      // bill was built from (works for students promoted before history existed).
+      const structureClass = new Map<string, string>();
+      for (const structure of structures) {
+        if (structure.class_id) structureClass.set(structure.id, structure.class_id);
       }
-
-      for (const item of concessions) {
-        totalConcession += Math.max(Number(item.amount || 0), 0);
+      const billStructureClass = new Map<string, string>();
+      for (const item of (feeBillItemsResult.data || []) as Array<{ bill_id: string; fee_structure_id: string | null }>) {
+        const classOfStructure = item.fee_structure_id ? structureClass.get(item.fee_structure_id) : undefined;
+        if (classOfStructure && !billStructureClass.has(item.bill_id)) {
+          billStructureClass.set(item.bill_id, classOfStructure);
+        }
       }
+      const derived = new Map<string, string>();
+      for (const bill of normalizedBills) {
+        const classOfBill = billStructureClass.get(bill.id);
+        if (classOfBill && bill.academic_year_id) {
+          derived.set(`${bill.student_id}|${bill.academic_year_id}`, classOfBill);
+        }
+      }
+      setBillClassByYear(derived);
+      setYearConcessions(
+        (feeConcessionsResult.data || []) as Array<{
+          student_id: string;
+          bill_id: string | null;
+          amount: number;
+        }>,
+      );
 
-      setFeeTotals({
-        overall: totalOverall,
-        collected: totalCollected,
-        pending: totalPending,
-        concession: totalConcession,
-      });
+      // Every carry-forward (any status) so "Old Fee" stays visible after it
+      // has been applied to the new-year bill.
+      const allCarryResult = await supabase
+        .from("fee_carry_forwards")
+        .select("student_id, to_academic_year_id, amount, status")
+        .eq("school_id", schoolId);
+      setYearCarryForwards(
+        allCarryResult.error
+          ? []
+          : ((allCarryResult.data || []) as Array<{
+              student_id: string;
+              to_academic_year_id: string;
+              amount: number;
+              status: string | null;
+            }>),
+      );
+
+      // Class history per year. Optional: empty when the table is missing.
+      const enrollmentResult = await supabase
+        .from("student_enrollments")
+        .select("student_id, academic_year_id, class_id, section_id")
+        .eq("school_id", schoolId);
+      const enrollmentMap = new Map<
+        string,
+        { class_id: string | null; section_id: string | null }
+      >();
+      if (!enrollmentResult.error) {
+        for (const row of enrollmentResult.data || []) {
+          enrollmentMap.set(`${row.student_id}|${row.academic_year_id}`, {
+            class_id: row.class_id,
+            section_id: row.section_id,
+          });
+        }
+      }
+      setEnrollmentByYear(enrollmentMap);
+
+      setFeeYearId((current) => current || currentYear?.id || loadedYears[0]?.id || "");
 
       setSelectedStudentIds([]);
     } catch (loadError) {
@@ -440,6 +539,7 @@ export default function StudentsPage() {
           : "Unable to load students.",
       );
     } finally {
+      loadingStudents.current = false;
       setLoading(false);
     }
   }
@@ -469,6 +569,23 @@ export default function StudentsPage() {
     }
   }, [filteredSections, sectionId]);
 
+  const feeYearIsCurrent = useMemo(
+    () => academicYears.find((year) => year.id === feeYearId)?.is_current ?? true,
+    [academicYears, feeYearId],
+  );
+
+  // Class/section of a student in the selected academic year.
+  function classForYear(student: Student) {
+    const enrollment = enrollmentByYear.get(`${student.id}|${feeYearId}`);
+    if (enrollment) return enrollment;
+    const billDerivedClass = billClassByYear.get(`${student.id}|${feeYearId}`);
+    if (billDerivedClass) return { class_id: billDerivedClass, section_id: null };
+    if (!feeYearId || student.academic_year_id === feeYearId || feeYearIsCurrent) {
+      return { class_id: student.class_id, section_id: student.section_id };
+    }
+    return null;
+  }
+
   const filteredStudents = useMemo(() => {
     const query = search.trim().toLowerCase();
 
@@ -491,11 +608,16 @@ export default function StudentsPage() {
       const matchesStatus =
         status === "all" || student.status === status;
 
+      const yearClass = classForYear(student);
+
+      // Browsing a past year hides students who were not enrolled then.
+      if (!yearClass) return false;
+
       const matchesClass =
-        classId === "all" || student.class_id === classId;
+        classId === "all" || yearClass.class_id === classId;
 
       const matchesSection =
-        sectionId === "all" || student.section_id === sectionId;
+        sectionId === "all" || yearClass.section_id === sectionId;
 
       return (
         matchesSearch &&
@@ -504,7 +626,55 @@ export default function StudentsPage() {
         matchesSection
       );
     });
-  }, [students, search, status, classId, sectionId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [students, search, status, classId, sectionId, feeYearId, enrollmentByYear, billClassByYear, feeYearIsCurrent]);
+
+  const feeTotals = useMemo(() => {
+    const studentIds = new Set(filteredStudents.map((student) => student.id));
+    const billsOfYear = yearBills.filter(
+      (bill) =>
+        bill.academic_year_id === feeYearId &&
+        studentIds.has(bill.student_id),
+    );
+    const billIds = new Set(billsOfYear.map((bill) => bill.id));
+
+    let billed = 0;
+    let collected = 0;
+    let pending = 0;
+    for (const bill of billsOfYear) {
+      billed += Math.max(Number(bill.total_amount || 0), 0);
+      collected += Math.max(Number(bill.paid_amount || 0), 0);
+      pending += Math.max(Number(bill.balance_amount || 0), 0);
+    }
+
+    let concession = 0;
+    for (const item of yearConcessions) {
+      if (item.bill_id && billIds.has(item.bill_id)) {
+        concession += Math.max(Number(item.amount || 0), 0);
+      }
+    }
+
+    let oldFee = 0;
+    for (const item of yearCarryForwards) {
+      if (
+        item.to_academic_year_id !== feeYearId ||
+        !studentIds.has(item.student_id) ||
+        String(item.status || "").toLowerCase() === "cancelled"
+      ) {
+        continue;
+      }
+      oldFee += Math.max(Number(item.amount || 0), 0);
+    }
+
+    // Bill totals already include the carried-forward lines.
+    return {
+      overall: Math.max(billed - oldFee, 0),
+      oldFee,
+      collected,
+      pending,
+      concession,
+    };
+  }, [yearBills, yearConcessions, yearCarryForwards, feeYearId, filteredStudents]);
 
   const activeCount = students.filter(
     (student) => student.status === "active",
@@ -841,20 +1011,55 @@ export default function StudentsPage() {
           <Stat title="Inactive" value={inactiveCount} />
         </div>
 
-        {/* FEE SUMMARY (all students, all classes) */}
-        <div className="mt-4 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        {/* FEE SUMMARY (selected academic year, all classes) */}
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <label
+            htmlFor="fee-year"
+            className="text-sm font-semibold text-slate-700"
+          >
+            Academic Year
+          </label>
+
+          <select
+            id="fee-year"
+            value={feeYearId}
+            onChange={(event) => setFeeYearId(event.target.value)}
+            className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm text-slate-900 outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+          >
+            {academicYears.map((year) => (
+              <option key={year.id} value={year.id}>
+                {year.name}
+                {year.is_current ? " (Current)" : ""}
+              </option>
+            ))}
+          </select>
+
+          <p className="text-xs text-slate-500">
+            Fee boxes and each student&apos;s class follow this year.
+          </p>
+        </div>
+
+        <div className="mt-4 grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
           <FeeStat
             title="Overall Fee Assigned"
             value={formatINR(feeTotals.overall)}
-            subtitle="All students, all classes"
+            subtitle="This year's fee for shown students"
             icon={<IndianRupee size={20} />}
             iconClassName="bg-blue-50 text-blue-600"
           />
 
           <FeeStat
+            title="Old Fee"
+            value={formatINR(feeTotals.oldFee)}
+            subtitle="Carried forward for shown students"
+            icon={<Clock3 size={20} />}
+            iconClassName="bg-rose-50 text-rose-600"
+          />
+
+          <FeeStat
             title="Fee Collection"
             value={formatINR(feeTotals.collected)}
-            subtitle="Total fees collected"
+            subtitle="Collected from shown students"
             icon={<Check size={20} />}
             iconClassName="bg-green-50 text-green-600"
           />
@@ -862,7 +1067,7 @@ export default function StudentsPage() {
           <FeeStat
             title="Pending Collection"
             value={formatINR(feeTotals.pending)}
-            subtitle="Amount still pending"
+            subtitle="Pending from shown students"
             icon={<Clock3 size={20} />}
             iconClassName="bg-amber-50 text-amber-600"
           />
@@ -870,7 +1075,7 @@ export default function StudentsPage() {
           <FeeStat
             title="Concession Given"
             value={formatINR(feeTotals.concession)}
-            subtitle="Total concession applied"
+            subtitle="Concession for shown students"
             icon={<BadgePercent size={20} />}
             iconClassName="bg-purple-50 text-purple-600"
           />
@@ -1107,12 +1312,14 @@ export default function StudentsPage() {
 
                 <tbody className="divide-y divide-slate-100">
                   {filteredStudents.map((student) => {
-                    const schoolClass = student.class_id
-                      ? classMap.get(student.class_id)
+                    const yearClass = classForYear(student);
+
+                    const schoolClass = yearClass?.class_id
+                      ? classMap.get(yearClass.class_id)
                       : null;
 
-                    const section = student.section_id
-                      ? sectionMap.get(student.section_id)
+                    const section = yearClass?.section_id
+                      ? sectionMap.get(yearClass.section_id)
                       : null;
 
                     const outstanding = outstandingFees[student.id] || 0;
@@ -1336,7 +1543,9 @@ export default function StudentsPage() {
                   </p>
 
                   <p className="mt-1 text-xs text-slate-500">
-                    Previous-year enrollment history will remain preserved.
+                    Previous-year class history stays preserved, and any unpaid
+                    fee balance is carried forward automatically to the target
+                    year. The new class fee structure is assigned from Student Fees.
                   </p>
                 </div>
 
@@ -1584,23 +1793,23 @@ function FeeStat({
   iconClassName: string;
 }) {
   return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <p className="text-sm font-medium text-slate-500">{title}</p>
+    <div className="relative min-w-0 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+      <div className="min-w-0">
+        <p className="min-h-10 pr-12 text-sm font-medium text-slate-500">
+          {title}
+        </p>
 
-          <p className="mt-2 break-words text-lg font-bold leading-tight tracking-tight text-slate-900 sm:text-xl">
-            {value}
-          </p>
+        <p className="mt-2 whitespace-nowrap text-[clamp(0.8rem,1.05vw,1.125rem)] font-bold leading-7 tracking-tight tabular-nums text-slate-900">
+          {value}
+        </p>
 
-          <p className="mt-1 text-xs text-slate-400">{subtitle}</p>
-        </div>
+        <p className="mt-1 min-h-8 text-xs text-slate-400">{subtitle}</p>
+      </div>
 
-        <div
-          className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl ${iconClassName}`}
-        >
-          {icon}
-        </div>
+      <div
+        className={`absolute right-4 top-4 flex h-11 w-11 shrink-0 items-center justify-center rounded-xl ${iconClassName}`}
+      >
+        {icon}
       </div>
     </div>
   );

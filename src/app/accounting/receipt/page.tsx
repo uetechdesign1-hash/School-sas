@@ -27,6 +27,8 @@ import {
 } from "lucide-react";
 
 import { createClient } from "@/lib/supabase/client";
+import { enrollmentKey, loadBillClassLabels, loadEnrollmentLabels } from "@/lib/students/enrollment-history";
+import { applyCarryForwardToBill, ensureCarryForwardRecords } from "@/lib/fees/year-bill";
 import { getCurrentSchoolId } from "@/lib/supabase/current-school";
 import { generateReceiptPDF, loadReceiptLogoDataUrl } from "@/lib/fees/generateReceipt";
 import { ensureSchoolAccountingSetup } from "@/lib/accounting/canonical-accounting";
@@ -133,6 +135,7 @@ type ReceiptHistoryRow = {
   student_name?: string | null;
   class_name?: string | null;
   section_name?: string | null;
+  academic_year_name?: string | null;
   transaction_date: string;
   description: string | null;
   debit_account: string;
@@ -765,6 +768,10 @@ export default function ReceiptPage() {
       })));
       setSelectedOptionalFeeIds([]);
 
+      // Unpaid fees from earlier years become carry-forward records for this
+      // year (Tuition 1000, Bus 1000, ...). Idempotent.
+      await ensureCarryForwardRecords(supabase, schoolId, studentId, academicYear.id);
+
       /*
        * Pending previous-year carry-forward is part of the student's
        * current fee position in Student Fees.
@@ -818,6 +825,25 @@ export default function ReceiptPage() {
       );
 
       let bills: FeeBill[] = [];
+
+      // Put pending previous-year dues on this year's bill as separate
+      // "Tuition Fee - 2025-2026" style lines so they appear in the payment
+      // category dropdown and in the outstanding total.
+      if (structureBillIds.length > 0) {
+        const { data: yearBill } = await supabase
+          .from("fee_bills")
+          .select("id")
+          .eq("school_id", schoolId)
+          .eq("student_id", studentId)
+          .eq("academic_year_id", academicYear.id)
+          .neq("status", "cancelled")
+          .in("id", structureBillIds)
+          .limit(1)
+          .maybeSingle();
+        if (yearBill?.id) {
+          await applyCarryForwardToBill(supabase, schoolId, studentId, academicYear.id, yearBill.id as string);
+        }
+      }
 
       if (structureBillIds.length > 0) {
         const { data: billData, error: billError } = await supabase
@@ -973,15 +999,19 @@ export default function ReceiptPage() {
     }>;
     const billIds = Array.from(new Set(payments.map((payment) => payment.bill_id).filter(Boolean) as string[]));
     const billNumberMap = new Map<string, string>();
+    const billYearMap = new Map<string, string | null>();
 
     if (billIds.length > 0) {
       const { data: billData, error: billError } = await supabase
         .from("fee_bills")
-        .select("id, bill_number")
+        .select("id, bill_number, academic_year_id")
         .eq("school_id", currentSchoolId)
         .in("id", billIds);
       if (billError) throw new Error(billError.message);
-      for (const bill of billData || []) billNumberMap.set(bill.id, bill.bill_number);
+      for (const bill of billData || []) {
+        billNumberMap.set(bill.id, bill.bill_number);
+        billYearMap.set(bill.id, bill.academic_year_id || null);
+      }
     }
 
     const { data: allocationData, error: allocationError } = await supabase
@@ -1047,6 +1077,30 @@ export default function ReceiptPage() {
       }
     }
 
+    // Class/section the student had in the academic year of each bill, so a
+    // 2025-2026 receipt keeps showing Class 1 after promotion to Class 2.
+    const billClassLabels = await loadBillClassLabels(
+      supabase,
+      currentSchoolId,
+      payments
+        .filter((payment) => payment.bill_id && payment.student_id)
+        .map((payment) => ({
+          id: payment.bill_id as string,
+          student_id: payment.student_id,
+          academic_year_id: billYearMap.get(payment.bill_id as string) || null,
+        })),
+    );
+    // Payments without a bill: use the academic year that contains the paid date.
+    const { data: yearRanges } = await supabase
+      .from("academic_years")
+      .select("id, name, start_date, end_date")
+      .eq("school_id", currentSchoolId);
+    const dateEnrollmentLabels = await loadEnrollmentLabels(
+      supabase,
+      currentSchoolId,
+      Array.from(studentMap.keys()),
+    );
+
     const classIds = Array.from(
       new Set(
         Array.from(studentMap.values())
@@ -1094,12 +1148,24 @@ export default function ReceiptPage() {
         ? studentMap.get(payment.student_id)
         : undefined;
       const studentName = student ? getStudentName(student) : "Student";
-      const className = student?.class_id
-        ? classMap.get(student.class_id) || "Class"
-        : "Class";
-      const sectionName = student?.section_id
-        ? sectionMap.get(student.section_id) || ""
-        : "";
+      let enrollment = payment?.bill_id ? billClassLabels.get(payment.bill_id) : undefined;
+      if (!enrollment && payment?.student_id) {
+        const paidOn = String(row.transaction_date || "").slice(0, 10);
+        const paidYear = (yearRanges || []).find(
+          (year) => paidOn >= String(year.start_date) && paidOn <= String(year.end_date),
+        );
+        if (paidYear) enrollment = dateEnrollmentLabels.get(enrollmentKey(payment.student_id, paidYear.id));
+      }
+      const className = enrollment?.className
+        ? enrollment.className
+        : student?.class_id
+          ? classMap.get(student.class_id) || "Class"
+          : "Class";
+      const sectionName = enrollment
+        ? enrollment.sectionName
+        : student?.section_id
+          ? sectionMap.get(student.section_id) || ""
+          : "";
 
       const categoryAmounts = payment ? paymentCategoryAmountMap.get(payment.id) : undefined;
       const feeCategoryAmounts = categories.map((description) => ({
@@ -1117,6 +1183,7 @@ export default function ReceiptPage() {
         student_name: studentName,
         class_name: className,
         section_name: sectionName || null,
+        academic_year_name: enrollment?.academicYearName || null,
         description: particulars || row.description,
       };
     });

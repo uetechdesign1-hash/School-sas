@@ -2,6 +2,8 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
+import { isCarryForwardDescription } from "@/lib/fees/carry-forward";
+import { assignYearFeesToStudent, listStudentsForClassYear } from "@/lib/fees/year-bill";
 
 type AcademicYear = {
   id: string;
@@ -645,7 +647,11 @@ export default function FeeStructurePage() {
     setSuccessMessage("Fee category updated.");
   }
 
-  async function syncAssignedBillsToStructure(structureId: string, updatedItems: FeeItem[]) {
+  async function syncAssignedBillsToStructure(
+    structureId: string,
+    updatedItems: FeeItem[],
+    previousMandatory: Map<string, boolean> = new Map(),
+  ) {
     const { data: directBillItems, error: billItemsError } = await supabase
       .from("fee_bill_items")
       .select("id, school_id, bill_id, fee_structure_id, fee_category_id, description, fee_type, amount, discount, net_amount")
@@ -697,7 +703,7 @@ export default function FeeStructurePage() {
           .in("bill_id", classBillIds)
           .in("fee_category_id", categoryIds);
         if (categoryBillItemsError) throw new Error(`Fee structure was saved, but older category bill lines could not be loaded: ${categoryBillItemsError.message}`);
-        legacyBillItems = (categoryBillItems || []).filter((line) => !line.fee_structure_id) as typeof directBillItems;
+        legacyBillItems = (categoryBillItems || []).filter((line) => !line.fee_structure_id && !isCarryForwardDescription(line.description)) as typeof directBillItems;
       }
     }
 
@@ -743,18 +749,41 @@ export default function FeeStructurePage() {
     }
 
     let protectedLines = 0;
+    const removeLineIds: string[] = [];
+    const reducedBillIds = new Set<string>();
     const updates = activeLines.flatMap((line) => {
-      const structureItem = structureItemByCategory.get(line.fee_category_id as string);
-      const formItem = feeItemByCategory.get(line.fee_category_id as string);
-      if (!structureItem || !formItem) return [];
-      const configuredAmount = annualizedFeeAmount(Number(structureItem.amount || 0), structureItem.frequency || "annual");
+      const category = line.fee_category_id as string;
+      const structureItem = structureItemByCategory.get(category);
+      const formItem = feeItemByCategory.get(category);
+      const wasMandatory = previousMandatory.get(category) === true;
       const discount = Math.max(Number(line.discount || 0), 0);
       const paid = paidByLine.get(line.id as string) || 0;
-      const amount = structureItem.mandatory
-        ? Math.max(configuredAmount, paid + discount)
-        : paid + discount;
+
+      // Fee removed from the structure, or "Mandatory" was un-ticked:
+      // take it off the student's bill so the fee goes DOWN. Anything
+      // already paid or discounted is kept so payments stay consistent.
+      const noLongerCharged = !structureItem || !formItem || (!structureItem.mandatory && wasMandatory);
+      if (noLongerCharged) {
+        if (!wasMandatory) return []; // an optional fee the student chose: leave alone
+        const keep = paid + discount;
+        reducedBillIds.add(line.bill_id as string);
+        if (keep <= 0.005) {
+          removeLineIds.push(line.id as string);
+          return [];
+        }
+        protectedLines += 1;
+        return [{
+          ...line,
+          amount: keep,
+          discount,
+          net_amount: Math.max(0, keep - discount),
+        }];
+      }
+
+      const configuredAmount = annualizedFeeAmount(Number(structureItem.amount || 0), structureItem.frequency || "annual");
+      const amount = Math.max(configuredAmount, paid + discount);
       if (amount > configuredAmount + 0.005) protectedLines += 1;
-      const categoryName = categories.find((category) => category.id === line.fee_category_id)?.name;
+      const categoryName = categories.find((entry) => entry.id === line.fee_category_id)?.name;
       return [{
         ...line,
         description: categoryName || line.description,
@@ -765,6 +794,15 @@ export default function FeeStructurePage() {
       }];
     });
 
+    if (removeLineIds.length) {
+      const { error: removeError } = await supabase
+        .from("fee_bill_items")
+        .delete()
+        .eq("school_id", schoolId)
+        .in("id", removeLineIds);
+      if (removeError) throw new Error(`Fee structure was saved, but un-ticked fees could not be removed from student bills: ${removeError.message}`);
+    }
+
     if (updates.length) {
       const { error: updateError } = await supabase
         .from("fee_bill_items")
@@ -772,12 +810,12 @@ export default function FeeStructurePage() {
       if (updateError) throw new Error(`Fee structure was saved, but assigned student bills could not be updated: ${updateError.message}`);
     }
 
-    const affectedBillIds = Array.from(new Set(updates.map((line) => line.bill_id as string)));
+    const affectedBillIds = Array.from(new Set([...updates.map((line) => line.bill_id as string), ...reducedBillIds]));
     for (const billId of affectedBillIds) {
       const { error: recalculateError } = await supabase.rpc("recalculate_fee_bill", { p_bill_id: billId });
       if (recalculateError) throw new Error(`Student bill ${billId} items were updated, but its outstanding total could not be recalculated: ${recalculateError.message}`);
     }
-    return { updatedBills: affectedBillIds.length, updatedLines: updates.length, protectedLines };
+    return { updatedBills: affectedBillIds.length, updatedLines: updates.length + removeLineIds.length, protectedLines };
   }
 
   async function handleDeleteCategory(category: FeeCategory) {
@@ -879,6 +917,14 @@ export default function FeeStructurePage() {
       setSaving(true);
 
       let structureId = editingId;
+
+      // Remember which fees were mandatory BEFORE this edit so un-ticking
+      // Mandatory (or removing a fee) lowers the students' bills.
+      const previousMandatory = new Map<string, boolean>(
+        (structures.find((entry) => entry.id === editingId)?.items || []).map(
+          (item) => [item.fee_category_id, Boolean(item.mandatory)] as [string, boolean],
+        ),
+      );
 
       if (editingId) {
         const { error: updateError } = await supabase
@@ -984,9 +1030,13 @@ export default function FeeStructurePage() {
       }
 
       const syncResult = editingId
-        ? await syncAssignedBillsToStructure(structureId, validItems)
+        ? await syncAssignedBillsToStructure(structureId, validItems, previousMandatory)
         : { updatedBills: 0, updatedLines: 0, protectedLines: 0 };
-      const assignmentResult = await assignMandatoryFeesToClass(structureId, validItems);
+      const assignmentResult = await assignMandatoryFeesToClass(structureId, validItems, {
+        classId: classId || null,
+        academicYearId,
+        structureName: structureName.trim(),
+      });
       syncResult.updatedBills += assignmentResult.updatedBills;
       syncResult.updatedLines += assignmentResult.updatedLines;
 
@@ -1017,58 +1067,98 @@ export default function FeeStructurePage() {
     }
   }
 
-  async function assignMandatoryFeesToClass(structureId: string, items: FeeItem[]) {
+  /*
+   * Assign this structure's MANDATORY fees to every active student of the
+   * structure's class and academic year. Optional fees are never assigned
+   * here; they are chosen per student on the receipt page.
+   *
+   * - Creates the student's bill for the year when it does not exist.
+   * - Adds mandatory fees the bill is missing.
+   * - Adds pending previous-year carry-forward as "<Category> - <Old Year>"
+   *   lines (e.g. "Tuition Fee - 2025-2026") and marks them applied.
+   */
+  async function assignMandatoryFeesToClass(
+    structureId: string,
+    items: FeeItem[],
+    target: { classId: string | null; academicYearId: string; structureName: string },
+  ) {
     const mandatoryItems = items.filter((item) => item.mandatory);
-    if (!classId || mandatoryItems.length === 0) return { updatedBills: 0, updatedLines: 0, protectedLines: 0 };
-    const { data: students, error: studentsError } = await supabase
-      .from("students").select("id").eq("school_id", schoolId).eq("class_id", classId).eq("status", "active");
-    if (studentsError) throw new Error(`Structure saved, but students could not be loaded: ${studentsError.message}`);
-    const today = new Date().toISOString().slice(0, 10);
+    const empty = { updatedBills: 0, updatedLines: 0, protectedLines: 0 };
+    if (mandatoryItems.length === 0) return empty;
+
+    // Students of this class IN THIS ACADEMIC YEAR (current + enrollment history).
+    const studentIds = await listStudentsForClassYear(supabase, schoolId, target.classId, target.academicYearId);
+    if (studentIds.length === 0) return empty;
+
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) throw new Error("Your session expired. Sign in again to assign fees.");
+
+    const categoryNames = new Map<string, string>(categories.map((entry) => [entry.id, entry.name] as [string, string]));
+    const structureItems = items.map((item) => ({
+      fee_category_id: item.fee_category_id,
+      amount: Number(item.amount),
+      frequency: item.frequency,
+      mandatory: item.mandatory,
+    }));
+
     let updatedBills = 0;
     let updatedLines = 0;
-    for (const student of students || []) {
-      const { data: existing, error: billLoadError } = await supabase.from("fee_bills")
-        .select("id").eq("school_id", schoolId).eq("student_id", student.id)
-        .eq("academic_year_id", academicYearId).neq("status", "cancelled").limit(1).maybeSingle();
-      if (billLoadError) throw new Error(`Could not check existing student bills: ${billLoadError.message}`);
-      let billId = existing?.id as string | undefined;
-      if (!billId) {
-        const total = mandatoryItems.reduce((sum, item) => sum + annualizedFeeAmount(Number(item.amount), item.frequency), 0);
-        const { data: bill, error: createError } = await supabase.from("fee_bills").insert({
-          school_id: schoolId, student_id: student.id, academic_year_id: academicYearId,
-          bill_number: `BILL-${today.replace(/-/g, "")}-${crypto.randomUUID().slice(0, 8).toUpperCase()}`,
-          bill_date: today, due_date: null, status: "unpaid", subtotal: total, discount: 0,
-          late_fee: 0, total_amount: total, paid_amount: 0, balance_amount: total,
-          notes: `Mandatory fees from ${structureName.trim()}`,
-          created_by: user.id,
-        }).select("id").single();
-        if (createError || !bill?.id) throw new Error(createError?.message || "Unable to create student fee bill.");
-        billId = bill.id;
-      }
-      const { data: currentLines, error: lineLoadError } = await supabase.from("fee_bill_items")
-        .select("fee_category_id").eq("school_id", schoolId).eq("bill_id", billId);
-      if (lineLoadError) throw new Error(`Could not check assigned fees: ${lineLoadError.message}`);
-      const existingCategories = new Set((currentLines || []).map((line) => line.fee_category_id));
-      const missing = mandatoryItems.filter((item) => !existingCategories.has(item.fee_category_id));
-      if (missing.length) {
-        const rows = missing.map((item) => {
-          const category = categories.find((entry) => entry.id === item.fee_category_id);
-          const amount = annualizedFeeAmount(Number(item.amount), item.frequency);
-          return { school_id: schoolId, bill_id: billId, fee_structure_id: structureId,
-            fee_category_id: item.fee_category_id, description: category?.name || "Fee",
-            fee_type: item.frequency, amount, discount: 0, net_amount: amount };
-        });
-        const { error: insertError } = await supabase.from("fee_bill_items").insert(rows);
-        if (insertError) throw new Error(`Could not add mandatory fees to student bill: ${insertError.message}`);
-        const { error: recalcError } = await supabase.rpc("recalculate_fee_bill", { p_bill_id: billId });
-        if (recalcError) throw new Error(`Could not recalculate student bill: ${recalcError.message}`);
-        updatedLines += rows.length;
-      }
-      updatedBills += 1;
+    for (const studentId of studentIds) {
+      const result = await assignYearFeesToStudent(supabase, {
+        schoolId,
+        studentId,
+        academicYearId: target.academicYearId,
+        structureId,
+        structureName: target.structureName,
+        items: structureItems,
+        categoryNames,
+        userId: user.id,
+      });
+      const lines = result.mandatoryLinesAdded + result.carryLinesAdded;
+      updatedLines += lines;
+      if (lines > 0 || result.createdBill) updatedBills += 1;
     }
     return { updatedBills, updatedLines, protectedLines: 0 };
+  }
+
+  // "Assign to all students" button on a saved fee structure.
+  const [assigningStructureId, setAssigningStructureId] = useState<string | null>(null);
+
+  async function handleAssignToAllStudents(structure: FeeStructure) {
+    const mandatory = (structure.items || []).filter((item) => item.mandatory);
+    if (mandatory.length === 0) {
+      setErrorMessage("This structure has no mandatory fees to assign. Tick Mandatory on at least one fee first.");
+      return;
+    }
+    const where = structure.school_class?.name || "all classes";
+    if (!window.confirm(`Assign the mandatory fees of "${structure.name}" to all active students of ${where} for ${structure.academic_year?.name || "this year"}?`)) return;
+
+    setErrorMessage("");
+    setSuccessMessage("");
+    try {
+      setAssigningStructureId(structure.id);
+      const asItems: FeeItem[] = (structure.items || []).map((item) => ({
+        id: item.id,
+        fee_category_id: item.fee_category_id,
+        amount: String(item.amount ?? ""),
+        frequency: item.frequency,
+        mandatory: item.mandatory,
+      }));
+      const result = await assignMandatoryFeesToClass(structure.id, asItems, {
+        classId: structure.class_id,
+        academicYearId: structure.academic_year_id,
+        structureName: structure.name,
+      });
+      setSuccessMessage(
+        result.updatedBills === 0
+          ? "Every student already has these mandatory fees. Nothing new to assign."
+          : `Mandatory fees assigned: ${result.updatedLines} fee line(s) added across ${result.updatedBills} student bill(s). Pending previous-year fees were included as "Category - Year" lines.`,
+      );
+    } catch (error) {
+      setErrorMessage(supabaseErrorMessage(error, "Unable to assign fees to students."));
+    } finally {
+      setAssigningStructureId(null);
+    }
   }
 
   async function handleDelete(
@@ -1195,6 +1285,12 @@ export default function FeeStructurePage() {
           </div>
 
           <div className="flex items-center gap-3">
+            <Link
+              href="/dashboard/fees/assign"
+              className="inline-flex items-center justify-center rounded-xl bg-emerald-600 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700"
+            >
+              Assign Fees (Class-wise)
+            </Link>
             <button
               type="button"
               onClick={openCreateForm}
@@ -2032,7 +2128,18 @@ export default function FeeStructurePage() {
                         </div>
                       )}
 
-                      <div className="mt-5 flex gap-3">
+                      <button
+                        type="button"
+                        onClick={() => void handleAssignToAllStudents(structure)}
+                        disabled={assigningStructureId === structure.id}
+                        className="mt-5 w-full rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60"
+                      >
+                        {assigningStructureId === structure.id
+                          ? "Assigning..."
+                          : "Assign Mandatory Fees to All Students"}
+                      </button>
+
+                      <div className="mt-3 flex gap-3">
                         <button
                           type="button"
                           onClick={() =>

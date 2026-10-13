@@ -62,6 +62,11 @@ const PRINCIPAL_MENU: MenuItem[] = [
     icon: <IndianRupee size={18} />,
   },
   {
+    name: "Assign Fees",
+    href: "/dashboard/fees/assign",
+    icon: <IndianRupee size={18} />,
+  },
+  {
     name: "Attendance",
     href: "/dashboard/attendance",
     icon: <CalendarCheck size={18} />,

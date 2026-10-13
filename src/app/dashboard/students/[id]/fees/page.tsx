@@ -4,6 +4,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type FormEvent,
   type ReactNode,
@@ -27,6 +28,9 @@ import {
 } from "lucide-react";
 
 import { createClient } from "@/lib/supabase/client";
+import { loadBillClassLabels } from "@/lib/students/enrollment-history";
+import { applyCarryForwardToBill, ensureCarryForwardRecords } from "@/lib/fees/year-bill";
+import { isCarryForwardDescription } from "@/lib/fees/carry-forward";
 import { generateReceiptPDF } from "@/lib/fees/generateReceipt";
 import { ensureSchoolAccountingSetup } from "@/lib/accounting/canonical-accounting";
 import { listInventoryItems, type InventoryItemRecord } from "@/lib/inventory/inventory-items";
@@ -296,11 +300,14 @@ export default function FeesPage() {
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
 
   const [bills, setBills] = useState<FeeBill[]>([]);
+  // billId -> "2025-2026 • Class 1 - A" (class the student had in that bill's year)
+  const [billYearClass, setBillYearClass] = useState<Record<string, string>>({});
   const [billItems, setBillItems] = useState<FeeBillItem[]>([]);
   const [paymentAllocations, setPaymentAllocations] = useState<FeePaymentAllocation[]>([]);
   const [payments, setPayments] = useState<FeePayment[]>([]);
   const [concessions, setConcessions] = useState<FeeConcession[]>([]);
   const [loadingLedger, setLoadingLedger] = useState(false);
+  const lastLedgerFocusRefresh = useRef(0);
 
   const [assignmentPreview, setAssignmentPreview] =
     useState<AssignmentPreview | null>(null);
@@ -734,6 +741,24 @@ export default function FeesPage() {
         const loadedBills = (billData || []) as FeeBill[];
         setBills(loadedBills);
 
+        const billLabels = await loadBillClassLabels(
+          supabase,
+          schoolId,
+          loadedBills.map((bill) => ({
+            id: bill.id,
+            student_id: student.id,
+            academic_year_id: bill.academic_year_id || null,
+          })),
+        );
+        const yearClassLabels: Record<string, string> = {};
+        for (const bill of loadedBills) {
+          const label = billLabels.get(bill.id);
+          if (!label) continue;
+          const classPart = [label.className, label.sectionName].filter(Boolean).join(" - ");
+          yearClassLabels[bill.id] = [label.academicYearName, classPart].filter(Boolean).join(" • ");
+        }
+        setBillYearClass(yearClassLabels);
+
         const billIds = loadedBills.map((bill) => bill.id);
 
         if (billIds.length > 0) {
@@ -913,6 +938,10 @@ export default function FeesPage() {
             .filter((year) => year.end_date < academicYear.start_date)
             .sort((a, b) => b.end_date.localeCompare(a.end_date))[0] || null;
 
+        // Unpaid fees from earlier years become carry-forward records for
+        // this year (category-wise). Idempotent.
+        await ensureCarryForwardRecords(supabase, schoolId, student.id, academicYear.id);
+
         const { data: pendingCarryData, error: pendingCarryError } =
           await supabase
             .from("fee_carry_forwards")
@@ -1084,9 +1113,32 @@ export default function FeesPage() {
         let existingCategoryIds: string[] = [];
 
         if (existingBill) {
+          // This year's bill already exists: add pending previous-year dues as
+          // "Tuition Fee - 2025-2026" lines so the outstanding total is complete.
+          if (existingBill.status !== "cancelled") {
+            const addedCarryLines = await applyCarryForwardToBill(
+              supabase,
+              schoolId,
+              student.id,
+              academicYear.id,
+              existingBill.id,
+            );
+            if (addedCarryLines > 0) {
+              const { data: refreshedAfterCarry } = await supabase
+                .from("fee_bills")
+                .select(
+                  "id, academic_year_id, bill_number, bill_date, due_date, discount, total_amount, paid_amount, balance_amount, status",
+                )
+                .eq("school_id", schoolId)
+                .eq("id", existingBill.id)
+                .maybeSingle();
+              existingBill = (refreshedAfterCarry as FeeBill | null) || existingBill;
+            }
+          }
+
           const { data: existingItemData, error: existingItemError } = await supabase
             .from("fee_bill_items")
-            .select("fee_category_id")
+            .select("fee_category_id, description")
             .eq("school_id", schoolId)
             .eq("bill_id", existingBill.id);
 
@@ -1099,6 +1151,7 @@ export default function FeesPage() {
           existingCategoryIds = Array.from(
             new Set(
               (existingItemData || [])
+                .filter((row) => !isCarryForwardDescription(row.description as string | null))
                 .map((row) => row.fee_category_id as string | null)
                 .filter((id): id is string => Boolean(id)),
             ),
@@ -1188,7 +1241,8 @@ export default function FeesPage() {
           existingBill,
           existingCategoryIds,
           previousAcademicYear,
-          pendingCarryForwards,
+          // Already applied to the existing bill above; do not show twice.
+          pendingCarryForwards: existingBill ? [] : pendingCarryForwards,
         });
       } finally {
         setLoadingAssignment(false);
@@ -1945,11 +1999,82 @@ export default function FeesPage() {
     selectedStudent,
   ]);
 
+  useEffect(() => {
+    if (!selectedStudent) return;
+
+    let refreshing = false;
+    const refreshLedger = () => {
+      if (document.visibilityState !== "visible" || refreshing) return;
+
+      const now = Date.now();
+      if (now - lastLedgerFocusRefresh.current < 1000) return;
+      lastLedgerFocusRefresh.current = now;
+      refreshing = true;
+
+      void loadLedger(selectedStudent)
+        .catch((error: unknown) => {
+          console.error("FEE LEDGER REFRESH ERROR:", error);
+          setMessage({
+            type: "error",
+            text:
+              error instanceof Error
+                ? error.message
+                : "Unable to refresh the fee ledger.",
+          });
+        })
+        .finally(() => {
+          refreshing = false;
+        });
+    };
+
+    window.addEventListener("focus", refreshLedger);
+    document.addEventListener("visibilitychange", refreshLedger);
+    return () => {
+      window.removeEventListener("focus", refreshLedger);
+      document.removeEventListener("visibilitychange", refreshLedger);
+    };
+  }, [loadLedger, selectedStudent]);
+
   /*
    * --------------------------------------------------
    * TOTALS
    * --------------------------------------------------
+   * DO NOT trust fee_bills.balance_amount blindly: bills saved while the
+   * concession was double-deducted still carry the wrong header (e.g.
+   * 10000 fee - 1000 concession stored as 8000). Recompute Outstanding
+   * from items (net_amount already excludes the item discount) minus
+   * actual allocations, so the Student Fees screen self-heals.
    */
+  const paidByItemId = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const allocation of paymentAllocations) {
+      if (!allocation.fee_bill_item_id) continue;
+      map.set(
+        allocation.fee_bill_item_id,
+        (map.get(allocation.fee_bill_item_id) || 0) + Number(allocation.amount || 0),
+      );
+    }
+    return map;
+  }, [paymentAllocations]);
+
+  const outstandingByBillId = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const bill of bills) {
+      const items = billItems.filter((item) => item.bill_id === bill.id);
+      if (items.length === 0) {
+        map.set(bill.id, Math.max(Number(bill.balance_amount || 0), 0));
+        continue;
+      }
+      let due = 0;
+      for (const item of items) {
+        const net = Number(item.net_amount ?? (Number(item.amount || 0) - Number(item.discount || 0)));
+        due += Math.max(net - (paidByItemId.get(item.id) || 0), 0);
+      }
+      map.set(bill.id, Math.max(Number(due.toFixed(2)), 0));
+    }
+    return map;
+  }, [bills, billItems, paidByItemId]);
+
   const totalBilled = bills.reduce(
     (sum, bill) => sum + Number(bill.total_amount || 0),
     0,
@@ -1961,7 +2086,7 @@ export default function FeesPage() {
   );
 
   const totalOutstanding = bills.reduce(
-    (sum, bill) => sum + Number(bill.balance_amount || 0),
+    (sum, bill) => sum + Number(outstandingByBillId.get(bill.id) ?? bill.balance_amount ?? 0),
     0,
   );
 
@@ -2236,8 +2361,12 @@ export default function FeesPage() {
     setMessage(null);
 
     try {
-      // Concession is stored as its own ledger adjustment. The database
-      // recalculation includes fee_concessions in fee_bills.discount.
+      // Concession is stored as its own ledger adjustment AND mirrored into
+      // the category item (fee_bill_items.discount -> net_amount).
+      // recalculate_fee_bill derives the bill header ONLY from the items,
+      // so the item must be updated FIRST and recalculated ONCE after.
+      // Doing recalc before the item update double-deducts
+      // (10000 - 1000 concession showed 8000 instead of 9000).
       let { data: concessionData, error: concessionError } = await supabase
         .from("fee_concessions")
         .insert({
@@ -2283,25 +2412,7 @@ export default function FeesPage() {
         throw new Error("Concession was not saved.");
       }
 
-      const { error: recalculateError } = await supabase.rpc(
-        "recalculate_fee_bill",
-        { p_bill_id: selectedBill.id },
-      );
-
-      if (recalculateError) {
-        // Best-effort rollback so a failed recalculation never leaves an
-        // orphaned concession record.
-        await supabase
-          .from("fee_concessions")
-          .delete()
-          .eq("id", concessionData.id)
-          .eq("school_id", schoolId);
-
-        throw new Error(
-          `Concession could not be applied because the bill could not be recalculated: ${recalculateError.message}`,
-        );
-      }
-
+      // 1) Mirror the concession into the category item first.
       const { error: itemAdjustmentError } = await supabase
         .from("fee_bill_items")
         .update({
@@ -2313,8 +2424,35 @@ export default function FeesPage() {
 
       if (itemAdjustmentError) {
         await supabase.from("fee_concessions").delete().eq("id", concessionData.id).eq("school_id", schoolId);
-        await supabase.rpc("recalculate_fee_bill", { p_bill_id: selectedBill.id });
-        throw new Error(`Bill outstanding was recalculated, but the category balance could not be updated: ${itemAdjustmentError.message}`);
+        throw new Error(`Bill outstanding was not updated, concession rolled back: ${itemAdjustmentError.message}`);
+      }
+
+      // 2) Single recalculation from the updated items (never before).
+      const { error: recalculateError } = await supabase.rpc(
+        "recalculate_fee_bill",
+        { p_bill_id: selectedBill.id },
+      );
+
+      if (recalculateError) {
+        // Best-effort rollback so a failed recalculation never leaves an
+        // orphaned concession record or a half-updated item.
+        await supabase
+          .from("fee_bill_items")
+          .update({
+            discount: Number(targetItem.discount || 0),
+            net_amount: Number(targetItem.net_amount ?? targetItem.amount),
+          })
+          .eq("id", targetItem.id)
+          .eq("school_id", schoolId);
+        await supabase
+          .from("fee_concessions")
+          .delete()
+          .eq("id", concessionData.id)
+          .eq("school_id", schoolId);
+
+        throw new Error(
+          `Concession could not be applied because the bill could not be recalculated: ${recalculateError.message}`,
+        );
       }
       setBillItems((current) => current.map((item) => item.id === targetItem.id ? {
         ...item,
@@ -2697,7 +2835,7 @@ export default function FeesPage() {
       return;
     }
 
-    const outstanding = Number(selectedBill.balance_amount || 0);
+    const outstanding = Number(outstandingByBillId.get(selectedBill.id) ?? selectedBill.balance_amount ?? 0);
     const totalPayment = rows.reduce((sum, row) => sum + row.amount, 0);
 
     if (outstanding <= 0) {
@@ -3610,6 +3748,11 @@ export default function FeesPage() {
                             <div className="font-semibold text-slate-900">
                               {bill.bill_number}
                             </div>
+                            {billYearClass[bill.id] && (
+                              <div className="mt-0.5 text-xs font-medium text-blue-700">
+                                {billYearClass[bill.id]}
+                              </div>
+                            )}
 
                             {bill.due_date && (
                               <div className="mt-1 text-xs text-slate-500">
@@ -3694,7 +3837,7 @@ export default function FeesPage() {
                           </td>
 
                           <td className="px-5 py-4 text-right font-bold text-red-600">
-                            {formatMoney(Number(bill.balance_amount))}
+                            {formatMoney(Number(outstandingByBillId.get(bill.id) ?? bill.balance_amount ?? 0))}
                           </td>
 
                           <td className="px-5 py-4">
