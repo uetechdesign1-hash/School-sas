@@ -1757,16 +1757,75 @@ export default function ReceiptPage() {
         setReceiptDate(payment.payment_date);
         setAmount(Number(payment.amount || 0).toFixed(2));
         setManualReceiptNumber(payment.receipt_number || "");
-        setPaymentMethod(payment.payment_method);
-        setCollectionType("single");
-        setCashCollectionAmount("");
-        setBankCollectionAmount("");
-        setCashCollectionAccountId("");
-        setBankCollectionAccountId("");
-        if (!payment.account_id && payment.payment_method === "other") {
-          throw new Error("This is a split receipt. Split receipt editing is not enabled yet; use View or Delete and create a corrected receipt if required.");
+        setPaymentMethod(payment.payment_method === "other" ? "cash" : payment.payment_method);
+        // Split receipts store account_id = NULL with legs in fee_payment_splits.
+        // Load the legs so Cash/Bank amounts and accounts can be edited.
+        const isSplitReceipt = !payment.account_id && payment.payment_method === "other";
+        if (isSplitReceipt) {
+          let splitRows: Array<{ account_id: string | null; payment_mode: string | null; amount: number | null }> = [];
+          try {
+            const { data: splitsData, error: splitsError } = await supabase
+              .from("fee_payment_splits")
+              .select("account_id, payment_mode, amount")
+              .eq("school_id", schoolId)
+              .eq("payment_id", payment.id);
+            if (splitsError) throw splitsError;
+            splitRows = (splitsData || []) as typeof splitRows;
+          } catch {
+            // Older databases may not have the splits table yet.
+            // Fall back to the canonical journal debit lines below.
+            splitRows = [];
+          }
+          if (splitRows.length === 0) {
+            try {
+              const { data: journal } = await supabase
+                .from("journal_entries")
+                .select("id")
+                .eq("school_id", schoolId)
+                .eq("reference_type", "fee_payment")
+                .eq("reference_id", payment.id)
+                .order("created_at", { ascending: false })
+                .limit(1)
+                .maybeSingle();
+              if (journal?.id) {
+                const { data: lines } = await supabase
+                  .from("journal_lines")
+                  .select("account_id, debit, description")
+                  .eq("school_id", schoolId)
+                  .eq("journal_entry_id", journal.id)
+                  .gt("debit", 0);
+                splitRows = (lines || []).map((line: any) => ({
+                  account_id: line.account_id,
+                  payment_mode: /cash/i.test(String(line.description || ""))
+                    ? "cash"
+                    : "bank_transfer",
+                  amount: Number(line.debit || 0),
+                }));
+              }
+            } catch {
+              splitRows = [];
+            }
+          }
+          const cashLeg = splitRows.find(
+            (leg) => String(leg.payment_mode || "").toLowerCase() === "cash"
+          );
+          const bankLeg = splitRows.find(
+            (leg) => String(leg.payment_mode || "").toLowerCase() !== "cash"
+          );
+          setCollectionType("split");
+          setCashCollectionAmount(cashLeg ? Number(cashLeg.amount || 0).toFixed(2) : "");
+          setBankCollectionAmount(bankLeg ? Number(bankLeg.amount || 0).toFixed(2) : "");
+          setCashCollectionAccountId(cashLeg?.account_id || "");
+          setBankCollectionAccountId(bankLeg?.account_id || "");
+          setReceiveIntoAccountId("");
+        } else {
+          setCollectionType("single");
+          setCashCollectionAmount("");
+          setBankCollectionAmount("");
+          setCashCollectionAccountId("");
+          setBankCollectionAccountId("");
+          setReceiveIntoAccountId(payment.account_id || receiveIntoAccountId);
         }
-        setReceiveIntoAccountId(payment.account_id || receiveIntoAccountId);
         setReferenceNumber(payment.reference_number || "");
         setNotes(payment.notes || "");
 
@@ -1974,11 +2033,11 @@ export default function ReceiptPage() {
       }
       const cashAccount = accounts.find((account) => account.id === cashCollectionAccountId);
       const bankAccount = accounts.find((account) => account.id === bankCollectionAccountId);
-      if (!cashAccount || cashAccount.account_type !== "cash") {
+      if (!cashAccount || accountType(cashAccount) !== "cash") {
         setError("Selected Cash account is invalid.");
         return false;
       }
-      if (!bankAccount || bankAccount.account_type !== "bank") {
+      if (!bankAccount || accountType(bankAccount) !== "bank") {
         setError("Selected Bank account is invalid.");
         return false;
       }
@@ -1994,7 +2053,7 @@ export default function ReceiptPage() {
       setError("Selected Cash/Bank account was not found.");
       return false;
     }
-    if (receiveAccount.account_type !== "cash" && receiveAccount.account_type !== "bank") {
+    if (accountType(receiveAccount) !== "cash" && accountType(receiveAccount) !== "bank") {
       setError("Receive Into must be a Cash or Bank account.");
       return false;
     }
@@ -2586,36 +2645,67 @@ export default function ReceiptPage() {
           throw new Error("Fee payment could not be found.");
         }
 
-        if (!receiveIntoAccountId) {
+        if (!receiveIntoAccountId && collectionType === "single") {
           throw new Error("Select the Cash or Bank account receiving the money.");
         }
 
-        const { data, error: rpcError } = await supabase.rpc(
-          "update_fee_payment_collection",
-          {
-            p_payment_id: payment.id,
-            p_amount: receiptPaymentTotal,
-            p_payment_mode: paymentMethod,
-            p_account_id: receiveIntoAccountId,
-            p_payment_date: receiptDate,
-            p_receipt_number: manualReceiptNumber.trim(),
-            p_reference_number: referenceNumber.trim() || null,
-            p_remarks: notes.trim() || null,
-            p_allocations: receiptPaymentLines.map((line) => ({
-              fee_bill_item_id: line.feeBillItemId,
-              amount: Number(line.amount),
-            })),
-          }
-        );
+        const allocationPayload = receiptPaymentLines.map((line) => ({
+          fee_bill_item_id: line.feeBillItemId,
+          amount: Number(line.amount),
+        }));
 
-        if (rpcError) {
-          throw new Error(rpcError.message);
-        }
-
-        if (data?.success === false) {
-          throw new Error(
-            data?.message || "Unable to update fee payment."
+        if (collectionType === "split") {
+          const { data, error: rpcError } = await supabase.rpc(
+            "update_fee_payment_collection_split",
+            {
+              p_payment_id: payment.id,
+              p_amount: receiptPaymentTotal,
+              p_payment_date: receiptDate,
+              p_receipt_number: manualReceiptNumber.trim(),
+              p_reference_number: referenceNumber.trim() || null,
+              p_remarks: notes.trim() || null,
+              p_allocations: allocationPayload,
+              p_splits: [
+                { account_id: cashCollectionAccountId, payment_mode: "cash", amount: cashSplit },
+                { account_id: bankCollectionAccountId, payment_mode: "bank_transfer", amount: bankSplit },
+              ],
+            }
           );
+
+          if (rpcError) {
+            throw new Error(rpcError.message);
+          }
+
+          if (data?.success === false) {
+            throw new Error(
+              data?.message || "Unable to update fee payment."
+            );
+          }
+        } else {
+          const { data, error: rpcError } = await supabase.rpc(
+            "update_fee_payment_collection",
+            {
+              p_payment_id: payment.id,
+              p_amount: receiptPaymentTotal,
+              p_payment_mode: paymentMethod,
+              p_account_id: receiveIntoAccountId,
+              p_payment_date: receiptDate,
+              p_receipt_number: manualReceiptNumber.trim(),
+              p_reference_number: referenceNumber.trim() || null,
+              p_remarks: notes.trim() || null,
+              p_allocations: allocationPayload,
+            }
+          );
+
+          if (rpcError) {
+            throw new Error(rpcError.message);
+          }
+
+          if (data?.success === false) {
+            throw new Error(
+              data?.message || "Unable to update fee payment."
+            );
+          }
         }
 
         if (payment.bill_id) {
@@ -3146,8 +3236,8 @@ export default function ReceiptPage() {
                           <p className="mt-1 text-xs text-slate-500">One receipt can be paid partly in Cash and partly through Bank/Online.</p>
                         </div>
                         <div className="flex gap-2">
-                          <button type="button" disabled={!!editingId} onClick={() => setCollectionType("single")} className={`rounded-lg border px-4 py-2 text-sm font-semibold ${collectionType === "single" ? "border-blue-500 bg-blue-50 text-blue-700" : "border-slate-200 text-slate-600"}`}>Single Payment</button>
-                          <button type="button" disabled={!!editingId} onClick={() => setCollectionType("split")} className={`rounded-lg border px-4 py-2 text-sm font-semibold ${collectionType === "split" ? "border-blue-500 bg-blue-50 text-blue-700" : "border-slate-200 text-slate-600"}`}>Split — Cash + Bank</button>
+                          <button type="button" onClick={() => setCollectionType("single")} className={`rounded-lg border px-4 py-2 text-sm font-semibold ${collectionType === "single" ? "border-blue-500 bg-blue-50 text-blue-700" : "border-slate-200 text-slate-600"}`}>Single Payment</button>
+                          <button type="button" onClick={() => setCollectionType("split")} className={`rounded-lg border px-4 py-2 text-sm font-semibold ${collectionType === "split" ? "border-blue-500 bg-blue-50 text-blue-700" : "border-slate-200 text-slate-600"}`}>Split — Cash + Bank</button>
                         </div>
                       </div>
                       {collectionType === "split" && (
