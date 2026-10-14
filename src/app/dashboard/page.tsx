@@ -1189,7 +1189,7 @@ function StatCard({
             {title}
           </p>
 
-          <p className="mt-2 truncate text-3xl font-bold tracking-tight text-slate-900">
+          <p className="mt-2 truncate text-2xl font-bold tracking-tight text-slate-900">
             {value}
           </p>
 
