@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { getCurrentSchoolId } from "@/lib/supabase/current-school";
+import { inBatches } from "@/lib/supabase/in-batches";
 
 const supabase = createClient();
 
@@ -208,11 +209,17 @@ const schoolId = await getCurrentSchoolId();
     );
 
     if (referenceIds.length > 0) {
-      const { data: paymentData, error: paymentError } = await supabase
-        .from("fee_payments")
-        .select("id, receipt_number, student_id")
-        .eq("school_id", schoolId)
-        .in("id", referenceIds);
+      // Batched: books can reference 600+ payments, which overflows the URL
+      // limit for a single `in.()` filter ("Bad Request" 400).
+      const { data: paymentData, error: paymentError } = await inBatches(
+        referenceIds,
+        (batch) =>
+          supabase
+            .from("fee_payments")
+            .select("id, receipt_number, student_id")
+            .eq("school_id", schoolId)
+            .in("id", batch),
+      );
 
       if (paymentError) throw paymentError;
 
@@ -240,11 +247,15 @@ const schoolId = await getCurrentSchoolId();
       >();
 
       if (studentIds.length > 0) {
-        const { data: studentData, error: studentError } = await supabase
-          .from("students")
-          .select("id, first_name, middle_name, last_name, class_id")
-          .eq("school_id", schoolId)
-          .in("id", studentIds);
+        const { data: studentData, error: studentError } = await inBatches(
+          studentIds,
+          (batch) =>
+            supabase
+              .from("students")
+              .select("id, first_name, middle_name, last_name, class_id")
+              .eq("school_id", schoolId)
+              .in("id", batch),
+        );
 
         if (studentError) throw studentError;
 

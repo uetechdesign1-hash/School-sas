@@ -25,6 +25,8 @@ import {
   Package,
   Pencil,
   Trash2,
+  Lock,
+  Unlock,
 } from "lucide-react";
 
 import { createClient } from "@/lib/supabase/client";
@@ -342,6 +344,9 @@ export default function FeesPage() {
   const [editConcessionReason, setEditConcessionReason] = useState("");
   const [savingConcessionEdit, setSavingConcessionEdit] = useState(false);
   const [deletingConcessionId, setDeletingConcessionId] = useState<string | null>(null);
+
+  const [unlockingFeeItems, setUnlockingFeeItems] = useState<string[]>([]);
+  const [unlockingFeeItemIds, setUnlockingFeeItemIds] = useState<string[]>([]);
 
   const [manualBillNumber, setManualBillNumber] = useState("");
   const [manualReceiptNumber, setManualReceiptNumber] = useState("");
@@ -1369,6 +1374,144 @@ export default function FeesPage() {
       });
     } finally {
       setChangingAssignment(false);
+    }
+  }
+
+  async function handleUnlockFeeItems() {
+    if (!selectedStudent || !schoolId || !assignmentPreview?.existingBill) {
+      return;
+    }
+
+    const existingBill = assignmentPreview.existingBill;
+    const existingCategoryIds = new Set(assignmentPreview.existingCategoryIds);
+    
+    // Find the fee bill items that correspond to the selected locked categories
+    const itemsToUnlock = assignmentPreview.items.filter(
+      (item) =>
+        unlockingFeeItemIds.includes(item.id) &&
+        existingCategoryIds.has(item.fee_category_id),
+    );
+
+    if (itemsToUnlock.length === 0) {
+      setMessage({
+        type: "error",
+        text: "Select at least one locked fee category to unlock.",
+      });
+      return;
+    }
+
+    if (existingBill.status === "cancelled") {
+      setMessage({
+        type: "error",
+        text: "Cannot unlock fees from a cancelled bill.",
+      });
+      return;
+    }
+
+    // Get the fee_bill_item_ids for the categories to unlock
+    const feeBillItemIds = billItems
+      .filter((billItem) => 
+        billItem.bill_id === existingBill.id &&
+        itemsToUnlock.some(item => item.fee_category_id === billItem.fee_category_id)
+      )
+      .map((billItem) => billItem.id);
+
+    if (feeBillItemIds.length === 0) {
+      setMessage({
+        type: "error",
+        text: "Could not find the fee bill items to unlock.",
+      });
+      return;
+    }
+
+    // Check if any of these items have payments allocated
+    const { data: allocations, error: allocError } = await supabase
+      .from("fee_payment_allocations")
+      .select("fee_bill_item_id, amount")
+      .eq("school_id", schoolId)
+      .in("fee_bill_item_id", feeBillItemIds);
+
+    if (allocError) {
+      throw new Error(`Unable to check payment allocations: ${allocError.message}`);
+    }
+
+    const itemsWithPayments = allocations?.filter(a => Number(a.amount || 0) > 0) || [];
+    if (itemsWithPayments.length > 0) {
+      const itemDescriptions = itemsWithPayments.map(a => {
+        const item = billItems.find(b => b.id === a.fee_bill_item_id);
+        return item?.description || "Unknown";
+      }).join(", ");
+      setMessage({
+        type: "error",
+        text: `Cannot unlock fee categories with payments: ${itemDescriptions}. Remove payments first.`,
+      });
+      return;
+    }
+
+    setUnlockingFeeItems(feeBillItemIds);
+    setMessage(null);
+
+    try {
+      // Calculate total amount to remove
+      const itemsToRemove = billItems.filter(item => feeBillItemIds.includes(item.id));
+      const totalRemovedAmount = itemsToRemove.reduce((sum, item) => 
+        sum + Number(item.net_amount ?? item.amount ?? 0), 0);
+
+      // Delete the fee bill items
+      const { error: deleteError } = await supabase
+        .from("fee_bill_items")
+        .delete()
+        .eq("school_id", schoolId)
+        .in("id", feeBillItemIds);
+
+      if (deleteError) {
+        throw new Error(`Unable to remove fee items: ${deleteError.message}`);
+      }
+
+      // Recalculate bill totals
+      const newTotalAmount = Math.max(Number(existingBill.total_amount || 0) - totalRemovedAmount, 0);
+      const newPaidAmount = Math.max(Number(existingBill.paid_amount || 0) - totalRemovedAmount, 0);
+      const newBalanceAmount = Math.max(newTotalAmount - newPaidAmount, 0);
+      
+      let newStatus = "unpaid";
+      if (newBalanceAmount <= 0.005) newStatus = "paid";
+      else if (newPaidAmount > 0) newStatus = "partial";
+
+      const { error: updateError } = await supabase
+        .from("fee_bills")
+        .update({
+          total_amount: newTotalAmount,
+          paid_amount: newPaidAmount,
+          balance_amount: newBalanceAmount,
+          status: newStatus,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", existingBill.id)
+        .eq("school_id", schoolId);
+
+      if (updateError) {
+        throw new Error(`Unable to update bill totals: ${updateError.message}`);
+      }
+
+      setUnlockingFeeItemIds([]);
+      await loadLedger(selectedStudent);
+      await loadAssignmentPreview(selectedStudent);
+
+      setMessage({
+        type: "success",
+        text: `${itemsToUnlock.length} fee categor${itemsToUnlock.length === 1 ? "y" : "ies"} unlocked from ${existingBill.bill_number}. Outstanding reduced by ${formatMoney(totalRemovedAmount)}.`,
+      });
+    } catch (error) {
+      console.error("UNLOCK FEE CATEGORIES ERROR:", error);
+      setMessage({
+        type: "error",
+        text:
+          error instanceof Error
+            ? error.message
+            : "Unable to unlock fee categories.",
+      });
+    } finally {
+      setUnlockingFeeItems([]);
     }
   }
 
@@ -3496,7 +3639,7 @@ export default function FeesPage() {
                     </div>
 
                     {assignmentPreview.existingBill ? (
-                      <div className="flex flex-col items-stretch gap-2 sm:items-end">
+                      <div className="flex flex-col items-stretch gap-2 sm:items-end sm:flex-row sm:flex-wrap">
                         <div className="rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm">
                           <div className="font-bold text-green-700">
                             Fees Already Assigned
@@ -3531,6 +3674,27 @@ export default function FeesPage() {
                             </>
                           )}
                         </button>
+
+                        {unlockingFeeItemIds.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => void handleUnlockFeeItems()}
+                            disabled={unlockingFeeItems.length > 0}
+                            className="inline-flex items-center justify-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm font-bold text-amber-700 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {unlockingFeeItems.length > 0 ? (
+                              <>
+                                <Loader2 size={16} className="animate-spin" />
+                                Unlocking...
+                              </>
+                            ) : (
+                              <>
+                                <Unlock size={16} />
+                                Unlock Selected ({unlockingFeeItemIds.length})
+                              </>
+                            )}
+                          </button>
+                        )}
                       </div>
                     ) : (
                       <button
@@ -3570,12 +3734,14 @@ export default function FeesPage() {
                     {assignmentPreview.items.map((item) => {
                       const selected =
                         selectedAssignmentItemIds.includes(item.id);
+                      const isLocked = assignmentPreview.existingCategoryIds.includes(item.fee_category_id);
+                      const isUnlocking = unlockingFeeItems.includes(item.id);
 
                       return (
                         <div
                           key={item.id}
-                          className={`grid grid-cols-[1fr_auto_auto] items-center border-b border-slate-100 px-4 py-3 last:border-b-0 ${
-                            !selected && !item.mandatory
+                          className={`grid grid-cols-[1fr_auto_auto_auto] items-center border-b border-slate-100 px-4 py-3 last:border-b-0 ${
+                            !selected && !item.mandatory && !isLocked
                               ? "bg-slate-50/70"
                               : ""
                           }`}
@@ -3583,16 +3749,22 @@ export default function FeesPage() {
                           <div className="flex items-center gap-3">
                             <input
                               type="checkbox"
-                              checked={selected}
+                              checked={selected || isLocked}
                               disabled={
                                 item.mandatory ||
-                                assignmentPreview.existingCategoryIds.includes(
-                                  item.fee_category_id,
-                                )
+                                (!isLocked && assignmentPreview.existingCategoryIds.includes(item.fee_category_id))
                               }
-                              onChange={() =>
-                                toggleAssignmentItem(item.id)
-                              }
+                              onChange={() => {
+                                if (isLocked) {
+                                  setUnlockingFeeItemIds(prev => 
+                                    prev.includes(item.id)
+                                      ? prev.filter(id => id !== item.id)
+                                      : [...prev, item.id]
+                                  );
+                                } else {
+                                  toggleAssignmentItem(item.id);
+                                }
+                              }}
                               className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-70"
                             />
 
@@ -3602,10 +3774,12 @@ export default function FeesPage() {
                               </div>
 
                               <div className="mt-0.5 text-xs text-slate-400">
-                                {assignmentPreview.existingCategoryIds.includes(item.fee_category_id)
-                                  ? "Already assigned • Locked"
-                                  : item.mandatory
-                                    ? "Mandatory • Included"
+                                {item.mandatory
+                                  ? "Mandatory • Included"
+                                  : isLocked
+                                    ? isUnlocking
+                                      ? "Unlocking... • Click to confirm"
+                                      : "Already assigned • Locked • Check to unlock"
                                     : selected
                                       ? "New • Selected"
                                       : "New • Not selected"}
@@ -3619,7 +3793,7 @@ export default function FeesPage() {
 
                           <div
                             className={`text-right text-sm font-bold ${
-                              selected
+                              selected || isLocked
                                 ? "text-slate-900"
                                 : "text-slate-400 line-through"
                             }`}
@@ -3637,6 +3811,16 @@ export default function FeesPage() {
                                 </div>
                               )}
                           </div>
+
+                          {isLocked && !item.mandatory && (
+                            <div className="flex items-center justify-center">
+                              {isUnlocking ? (
+                                <span className="text-xs text-amber-600 font-medium">Selected for unlock</span>
+                              ) : (
+                                <span className="text-xs text-slate-400">Check to unlock</span>
+                              )}
+                            </div>
+                          )}
                         </div>
                       );
                     })}

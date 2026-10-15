@@ -17,6 +17,7 @@ import {
   CreditCard,
   IndianRupee,
   Loader2,
+  Plus,
 } from "lucide-react";
 
 import { createClient } from "@/lib/supabase/client";
@@ -73,6 +74,9 @@ export default function RecordPaymentPage() {
   const [error, setError] =
     useState("");
 
+  const [success, setSuccess] =
+    useState("");
+
   const [amount, setAmount] =
     useState("");
 
@@ -90,6 +94,10 @@ export default function RecordPaymentPage() {
 
   const [selectedBill, setSelectedBill] =
     useState("");
+
+  const [showOtherFee, setShowOtherFee] = useState(false);
+  const [otherFeeDescription, setOtherFeeDescription] = useState("");
+  const [otherFeeAmount, setOtherFeeAmount] = useState("");
 
   useEffect(() => {
     loadData();
@@ -356,6 +364,12 @@ export default function RecordPaymentPage() {
         </div>
       )}
 
+      {success && (
+        <div className="mt-6 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-medium text-emerald-700">
+          {success}
+        </div>
+      )}
+
       <div className="mt-6 grid max-w-5xl gap-6 lg:grid-cols-[1fr_340px]">
         <form onSubmit={submit}>
           <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
@@ -518,6 +532,124 @@ export default function RecordPaymentPage() {
                   unless the parent specifically paid a
                   particular bill.
                 </p>
+              </div>
+
+              {/* Other Fee Option - Admin can add custom fee with comment */}
+              <div className="sm:col-span-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-sm font-semibold text-slate-700">
+                    Other Fee (Admin Entry)
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setShowOtherFee(!showOtherFee)}
+                    className="text-xs font-semibold text-amber-700 hover:text-amber-900"
+                  >
+                    {showOtherFee ? "Hide" : "Add Other Fee"} <Plus size={14} />
+                  </button>
+                </div>
+                {showOtherFee && (
+                  <div className="mt-3 grid gap-3 md:grid-cols-2 rounded-xl border border-amber-200 bg-amber-50/50 p-4">
+                    <div>
+                      <label className="mb-2 block text-sm font-semibold text-slate-700">
+                        Fee Description / Comment <span className="text-red-500">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={otherFeeDescription}
+                        onChange={(e) => setOtherFeeDescription(e.target.value)}
+                        placeholder="e.g., Late fee, Exam fee, Activity fee, etc."
+                        className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50"
+                        maxLength={200}
+                      />
+                    </div>
+                    <div>
+                      <label className="mb-2 block text-sm font-semibold text-slate-700">
+                        Amount <span className="text-red-500">*</span>
+                      </label>
+                      <div className="relative">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">₹</span>
+                        <input
+                          type="number"
+                          min="0.01"
+                          step="0.01"
+                          value={otherFeeAmount}
+                          onChange={(e) => setOtherFeeAmount(e.target.value)}
+                          placeholder="0.00"
+                          className="w-full rounded-xl border border-slate-300 bg-white pl-10 pr-4 py-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50"
+                        />
+                      </div>
+                    </div>
+                    <div className="md:col-span-2">
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          if (!otherFeeDescription.trim() || !otherFeeAmount || Number(otherFeeAmount) <= 0) {
+                            setError("Enter both description and amount for Other Fee.");
+                            return;
+                          }
+                          setSaving(true);
+                          setError("");
+                          try {
+                            const userResult = await supabase.auth.getUser();
+                            if (userResult.error || !userResult.data.user) throw new Error("No authenticated user found.");
+                            
+                            // Get the school_id from the student
+                            const schoolId = student?.school_id;
+                            if (!schoolId) throw new Error("School not found.");
+                            
+                            // Get the bill to add the fee to
+                            const billId = selectedBill || billBalances[0]?.id;
+                            if (!billId) throw new Error("No bill selected or available.");
+                            
+                            // Add the other fee as a new fee bill item
+                            const newItem = {
+                              school_id: schoolId,
+                              bill_id: billId,
+                              fee_structure_id: null,
+                              fee_category_id: null,
+                              description: `Other Fee: ${otherFeeDescription.trim()}`,
+                              fee_type: "one_time",
+                              amount: Number(otherFeeAmount),
+                              discount: 0,
+                              net_amount: Number(otherFeeAmount),
+                            };
+                            
+                            const { data: insertedItem, error: insertError } = await supabase
+                              .from("fee_bill_items")
+                              .insert(newItem)
+                              .select()
+                              .single();
+                            
+                            if (insertError) throw new Error(insertError.message);
+                            
+                            // Recalculate bill totals
+                            const { error: recalcError } = await supabase.rpc("recalculate_fee_bill", { p_bill_id: billId });
+                            if (recalcError) throw new Error(recalcError.message);
+                            
+                            // Clear the form
+                            setOtherFeeDescription("");
+                            setOtherFeeAmount("");
+                            setShowOtherFee(false);
+                            
+                            // Reload data to update outstanding
+                            await loadData();
+                            
+                            setSuccess(`Other Fee "${otherFeeDescription.trim()}" of ${formatCurrency(Number(otherFeeAmount))} added to bill. Outstanding increased.`);
+                          } catch (err: any) {
+                            setError(err?.message || "Unable to add Other Fee.");
+                          } finally {
+                            setSaving(false);
+                          }
+                        }}
+                        disabled={saving || !otherFeeDescription.trim() || !otherFeeAmount}
+                        className="rounded-lg bg-amber-700 px-4 py-2 text-xs font-bold text-white disabled:opacity-50"
+                      >
+                        {saving ? "Adding…" : "Add Other Fee to Bill"}
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div>

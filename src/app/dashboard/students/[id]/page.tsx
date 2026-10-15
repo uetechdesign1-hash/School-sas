@@ -761,7 +761,7 @@ export default function StudentDetailsPage() {
    * Download the student's fee ledger as a PDF.
    *
    * Entries are built from the same canonical sources the Fee Ledger uses:
-   * - fee_bills        -> Debit (fee assigned)
+   * - fee_bill_items   -> Debit (fee assigned per category)
    * - fee_concessions  -> Credit (concession given)
    * - fee_payments     -> Credit (payment received)
    */
@@ -781,20 +781,33 @@ export default function StudentDetailsPage() {
         return;
       }
 
-      const [billsResult, concessionsResult, paymentsResult, schoolResult] =
+      const [billsResult, billItemsResult, concessionsResult, paymentsResult, schoolResult] =
         await Promise.all([
           supabase
             .from("fee_bills")
             .select(
-              "bill_number, bill_date, total_amount, paid_amount, balance_amount"
+              "id, bill_number, bill_date, total_amount, paid_amount, balance_amount"
             )
             .eq("school_id", schoolId)
             .eq("student_id", studentId)
             .order("bill_date", { ascending: true }),
 
           supabase
+            .from("fee_bill_items")
+            .select(
+              "id, bill_id, fee_category_id, description, amount, discount, net_amount"
+            )
+            .eq("school_id", schoolId)
+            .in("bill_id", (await supabase
+              .from("fee_bills")
+              .select("id")
+              .eq("school_id", schoolId)
+              .eq("student_id", studentId)
+            ).data?.map(b => b.id) || []),
+
+          supabase
             .from("fee_concessions")
-            .select("amount, created_at")
+            .select("amount, created_at, fee_category_id, bill_id")
             .eq("school_id", schoolId)
             .eq("student_id", studentId)
             .order("created_at", { ascending: true }),
@@ -817,6 +830,10 @@ export default function StudentDetailsPage() {
         throw billsResult.error;
       }
 
+      if (billItemsResult.error) {
+        throw billItemsResult.error;
+      }
+
       if (concessionsResult.error) {
         throw concessionsResult.error;
       }
@@ -826,6 +843,7 @@ export default function StudentDetailsPage() {
       }
 
       type BillRow = {
+        id: string;
         bill_number: string;
         bill_date: string;
         total_amount: number | null;
@@ -833,9 +851,21 @@ export default function StudentDetailsPage() {
         balance_amount: number | null;
       };
 
+      type BillItemRow = {
+        id: string;
+        bill_id: string;
+        fee_category_id: string | null;
+        description: string;
+        amount: number | null;
+        discount: number | null;
+        net_amount: number | null;
+      };
+
       type ConcessionRow = {
         amount: number | null;
         created_at: string | null;
+        fee_category_id: string | null;
+        bill_id: string | null;
       };
 
       type PaymentRow = {
@@ -846,6 +876,7 @@ export default function StudentDetailsPage() {
       };
 
       const bills = (billsResult.data || []) as BillRow[];
+      const billItems = (billItemsResult.data || []) as BillItemRow[];
       const concessions = (concessionsResult.data || []) as ConcessionRow[];
       const payments = (paymentsResult.data || []) as PaymentRow[];
       const school = (schoolResult.data || null) as {
@@ -854,6 +885,9 @@ export default function StudentDetailsPage() {
         phone: string | null;
         email: string | null;
       } | null;
+
+      // Build a map of bill_id -> bill for reference
+      const billMap = new Map(bills.map(bill => [bill.id, bill]));
 
       type LedgerEntry = {
         sortDate: string;
@@ -866,23 +900,35 @@ export default function StudentDetailsPage() {
 
       const entries: LedgerEntry[] = [];
 
-      for (const bill of bills) {
+      // Add fee bill items (categories) as individual debit entries
+      for (const item of billItems) {
+        const bill = billMap.get(item.bill_id);
+        if (!bill) continue;
+
+        const netAmount = Number(item.net_amount ?? (Number(item.amount || 0) - Number(item.discount || 0)));
+        if (netAmount <= 0) continue;
+
         entries.push({
           sortDate: bill.bill_date || "",
           date: bill.bill_date || "",
-          particulars: "Fee Bill Assigned",
+          particulars: item.description || "Fee Category",
           reference: bill.bill_number || "—",
-          debit: Math.max(Number(bill.total_amount || 0), 0),
+          debit: netAmount,
           credit: 0,
         });
       }
 
       for (const item of concessions) {
+        const bill = item.bill_id ? billMap.get(item.bill_id) : null;
+        const categoryName = item.fee_category_id 
+          ? billItems.find(bi => bi.id === item.fee_category_id)?.description || "Concession"
+          : "Concession Given";
+        
         entries.push({
           sortDate: item.created_at || "",
           date: (item.created_at || "").slice(0, 10),
-          particulars: "Concession Given",
-          reference: "—",
+          particulars: `Concession - ${categoryName}`,
+          reference: bill?.bill_number || "—",
           debit: 0,
           credit: Math.max(Number(item.amount || 0), 0),
         });

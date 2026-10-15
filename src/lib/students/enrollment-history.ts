@@ -2,6 +2,36 @@ import type { createClient } from "@/lib/supabase/client";
 
 type SupabaseBrowserClient = ReturnType<typeof createClient>;
 
+/**
+ * PostgREST `in.()` filters travel in the request URL, so a few hundred UUIDs
+ * push the query string past proxy URL limits ("Bad Request" 400) — receipt
+ * history can hand these loaders 600+ student/bill ids. Kept local because
+ * this module is imported directly by tests/academic-year-history.test.mjs
+ * under plain Node, which cannot resolve the `@/` alias for a shared helper.
+ */
+const ID_BATCH_SIZE = 100;
+
+async function selectInIdBatches<TRow>(
+  supabase: SupabaseBrowserClient,
+  runBatch: (
+    batch: string[],
+  ) => PromiseLike<{ data: TRow[] | null; error?: { message: string } | null }>,
+  ids: string[],
+): Promise<{ data: TRow[] | null; error: { message: string } | null }> {
+  const uniqueIds = Array.from(new Set(ids));
+  const rows: TRow[] = [];
+
+  for (let index = 0; index < uniqueIds.length; index += ID_BATCH_SIZE) {
+    const { data, error } = await runBatch(
+      uniqueIds.slice(index, index + ID_BATCH_SIZE),
+    );
+    if (error) return { data: null, error };
+    rows.push(...(data || []));
+  }
+
+  return { data: rows, error: null };
+}
+
 export type EnrollmentLabel = {
   academicYearId: string;
   academicYearName: string;
@@ -30,11 +60,18 @@ export async function loadEnrollmentLabels(
   const ids = Array.from(new Set(studentIds.filter(Boolean)));
   if (!schoolId || ids.length === 0) return result;
 
-  const { data: rows, error } = await supabase
-    .from("student_enrollments")
-    .select("student_id, academic_year_id, class_id, section_id")
-    .eq("school_id", schoolId)
-    .in("student_id", ids);
+  // Batched: receipt history can pass 600+ student ids, which overflows the
+  // URL limit for a single `in.()` filter ("Bad Request" 400).
+  const { data: rows, error } = await selectInIdBatches(
+    supabase,
+    (batch) =>
+      supabase
+        .from("student_enrollments")
+        .select("student_id, academic_year_id, class_id, section_id")
+        .eq("school_id", schoolId)
+        .in("student_id", batch),
+    ids,
+  );
 
   if (error || !rows?.length) return result;
 
@@ -110,12 +147,18 @@ export async function loadBillClassLabels(
   }
   if (missing.length === 0) return result;
 
-  const { data: items } = await supabase
-    .from("fee_bill_items")
-    .select("bill_id, fee_structure_id")
-    .eq("school_id", schoolId)
-    .in("bill_id", missing.map((bill) => bill.id))
-    .not("fee_structure_id", "is", null);
+  // Batched: bill lists from receipt history can hold 600+ ids.
+  const { data: items } = await selectInIdBatches(
+    supabase,
+    (batch) =>
+      supabase
+        .from("fee_bill_items")
+        .select("bill_id, fee_structure_id")
+        .eq("school_id", schoolId)
+        .in("bill_id", batch)
+        .not("fee_structure_id", "is", null),
+    missing.map((bill) => bill.id),
+  );
 
   const structureIds = Array.from(
     new Set((items || []).map((item) => item.fee_structure_id).filter(Boolean)),

@@ -27,6 +27,7 @@ import {
 } from "lucide-react";
 
 import { createClient } from "@/lib/supabase/client";
+import { inBatches } from "@/lib/supabase/in-batches";
 import { enrollmentKey, loadBillClassLabels, loadEnrollmentLabels } from "@/lib/students/enrollment-history";
 import { applyCarryForwardToBill, ensureCarryForwardRecords } from "@/lib/fees/year-bill";
 import { getCurrentSchoolId } from "@/lib/supabase/current-school";
@@ -314,6 +315,8 @@ export default function ReceiptPage() {
   const [inventoryItems, setInventoryItems] = useState<InventoryItemRecord[]>([]);
   const [inventoryStock, setInventoryStock] = useState<Record<string, number>>({});
   const [inventoryIssueLines, setInventoryIssueLines] = useState<InventoryIssueLine[]>([{ inventoryItemId: "", quantity: "1" }]);
+  const [otherFeeDescription, setOtherFeeDescription] = useState("");
+  const [otherFeeAmount, setOtherFeeAmount] = useState("");
   const [feeManagementName, setFeeManagementName] = useState("");
   const [feeManagementAcademicYear, setFeeManagementAcademicYear] = useState("");
   const [feeManagementAmount, setFeeManagementAmount] = useState(0);
@@ -982,13 +985,19 @@ export default function ReceiptPage() {
       return;
     }
 
-    const { data: paymentData, error: paymentError } = await supabase
-      .from("fee_payments")
-      .select("id, student_id, receipt_number, manual_bill_number, bill_id")
-      .eq("school_id", currentSchoolId)
-      .in("id", paymentIds);
+    // Batched lookups: hundreds of receipt rows would otherwise build a
+    // single `in.()` URL past the ~8 KB proxy limit ("Bad Request" 400).
+    const { data: paymentData, error: paymentError } = await inBatches(
+      paymentIds,
+      (batch) =>
+        supabase
+          .from("fee_payments")
+          .select("id, student_id, receipt_number, manual_bill_number, bill_id")
+          .eq("school_id", currentSchoolId)
+          .in("id", batch),
+    );
 
-    if (paymentError) throw new Error(paymentError.message);
+    if (paymentError) throw new Error(paymentError?.message || "Failed to fetch payment data");
 
     const payments = (paymentData || []) as Array<{
       id: string;
@@ -1002,36 +1011,48 @@ export default function ReceiptPage() {
     const billYearMap = new Map<string, string | null>();
 
     if (billIds.length > 0) {
-      const { data: billData, error: billError } = await supabase
-        .from("fee_bills")
-        .select("id, bill_number, academic_year_id")
-        .eq("school_id", currentSchoolId)
-        .in("id", billIds);
-      if (billError) throw new Error(billError.message);
+      const { data: billData, error: billError } = await inBatches(
+        billIds,
+        (batch) =>
+          supabase
+            .from("fee_bills")
+            .select("id, bill_number, academic_year_id")
+            .eq("school_id", currentSchoolId)
+            .in("id", batch),
+      );
+      if (billError) throw new Error(billError?.message || "Failed to fetch bill data");
       for (const bill of billData || []) {
         billNumberMap.set(bill.id, bill.bill_number);
         billYearMap.set(bill.id, bill.academic_year_id || null);
       }
     }
 
-    const { data: allocationData, error: allocationError } = await supabase
-      .from("fee_payment_allocations")
-      .select("payment_id, fee_bill_item_id, amount")
-      .eq("school_id", currentSchoolId)
-      .in("payment_id", paymentIds);
+    const { data: allocationData, error: allocationError } = await inBatches(
+      paymentIds,
+      (batch) =>
+        supabase
+          .from("fee_payment_allocations")
+          .select("payment_id, fee_bill_item_id, amount")
+          .eq("school_id", currentSchoolId)
+          .in("payment_id", batch),
+    );
 
-    if (allocationError) throw new Error(allocationError.message);
+    if (allocationError) throw new Error(allocationError?.message || "Failed to fetch allocation data");
 
     const itemIds = Array.from(new Set((allocationData || []).map((item) => item.fee_bill_item_id).filter(Boolean) as string[]));
     let itemData: Array<{ id: string; description: string }> = [];
 
     if (itemIds.length > 0) {
-      const { data, error: itemError } = await supabase
-        .from("fee_bill_items")
-        .select("id, description")
-        .eq("school_id", currentSchoolId)
-        .in("id", itemIds);
-      if (itemError) throw new Error(itemError.message);
+      const { data, error: itemError } = await inBatches(
+        itemIds,
+        (batch) =>
+          supabase
+            .from("fee_bill_items")
+            .select("id, description")
+            .eq("school_id", currentSchoolId)
+            .in("id", batch),
+      );
+      if (itemError) throw new Error(itemError?.message || "Failed to fetch fee bill items");
       itemData = (data || []) as Array<{ id: string; description: string }>;
     }
 
@@ -1066,12 +1087,16 @@ export default function ReceiptPage() {
 
     const studentMap = new Map<string, Student>();
     if (studentIds.length > 0) {
-      const { data: studentData, error: studentError } = await supabase
-        .from("students")
-        .select("id, school_id, admission_no, roll_no, first_name, middle_name, last_name, class_id, section_id, status")
-        .eq("school_id", currentSchoolId)
-        .in("id", studentIds);
-      if (studentError) throw new Error(studentError.message);
+      const { data: studentData, error: studentError } = await inBatches(
+        studentIds,
+        (batch) =>
+          supabase
+            .from("students")
+            .select("id, school_id, admission_no, roll_no, first_name, middle_name, last_name, class_id, section_id, status")
+            .eq("school_id", currentSchoolId)
+            .in("id", batch),
+      );
+      if (studentError) throw new Error(studentError?.message || "Failed to fetch student data");
       for (const student of (studentData || []) as Student[]) {
         studentMap.set(student.id, student);
       }
@@ -3495,7 +3520,109 @@ export default function ReceiptPage() {
                         <button type="button" onClick={() => void addSelectedOptionalFees()} disabled={saving || !selectedOptionalFeeIds.length} className="mt-3 rounded-lg bg-blue-700 px-4 py-2 text-xs font-bold text-white disabled:opacity-50">{saving ? "Adding…" : "Add selected optional fees"}</button>
                       </div>}
 
-                      <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4">
+                                            {/* Other Fee Option - Admin can add custom fee with comment */}
+                                            {feeBills[0] && <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50/50 p-4">
+                                              <div className="flex items-center gap-2">
+                                                <span className="text-sm font-bold text-slate-900">Other Fee</span>
+                                                <span className="text-xs text-amber-700 bg-amber-100 px-2 py-0.5 rounded">Admin Entry</span>
+                                              </div>
+                                              <p className="mt-1 text-xs text-slate-600">Add a custom fee with comment. Amount entered by admin during collection increases student's outstanding.</p>
+                                              <div className="mt-3 grid gap-3 md:grid-cols-2">
+                                                <Field label="Fee Description / Comment *">
+                                                  <input
+                                                    type="text"
+                                                    value={otherFeeDescription}
+                                                    onChange={(e) => setOtherFeeDescription(e.target.value)}
+                                                    placeholder="e.g., Late fee, Exam fee, Activity fee, etc."
+                                                    className="input"
+                                                    maxLength={200}
+                                                  />
+                                                </Field>
+                                                <Field label="Amount *">
+                                                  <div className="relative">
+                                                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">₹</span>
+                                                    <input
+                                                      type="number"
+                                                      min="0.01"
+                                                      step="0.01"
+                                                      value={otherFeeAmount}
+                                                      onChange={(e) => setOtherFeeAmount(e.target.value)}
+                                                      placeholder="0.00"
+                                                      className="input pl-8"
+                                                    />
+                                                  </div>
+                                                </Field>
+                                              </div>
+                                              <button
+                                                type="button"
+                                                onClick={async () => {
+                                                  if (!otherFeeDescription.trim() || !otherFeeAmount || Number(otherFeeAmount) <= 0) {
+                                                    setError("Enter both description and amount for Other Fee.");
+                                                    return;
+                                                  }
+                                                  if (!schoolId || !selectedStudentId || !feeBills[0]) {
+                                                    setError("Select a student with a current fee bill first.");
+                                                    return;
+                                                  }
+                                                  setSaving(true);
+                                                  setError("");
+                                                  try {
+                                                    const userResult = await supabase.auth.getUser();
+                                                    if (userResult.error || !userResult.data.user) throw new Error("No authenticated user found.");
+                              
+                                                    // Add the other fee as a new fee bill item
+                                                    const newItem = {
+                                                      school_id: schoolId,
+                                                      bill_id: feeBills[0].id,
+                                                      fee_structure_id: null,
+                                                      fee_category_id: null,
+                                                      description: `Other Fee: ${otherFeeDescription.trim()}`,
+                                                      fee_type: "one_time",
+                                                      amount: Number(otherFeeAmount),
+                                                      discount: 0,
+                                                      net_amount: Number(otherFeeAmount),
+                                                    };
+                              
+                                                    const { data: insertedItem, error: insertError } = await supabase
+                                                      .from("fee_bill_items")
+                                                      .insert(newItem)
+                                                      .select()
+                                                      .single();
+                              
+                                                    if (insertError) throw new Error(insertError.message);
+                              
+                                                    // Recalculate bill totals
+                                                    const { error: recalcError } = await supabase.rpc("recalculate_fee_bill", { p_bill_id: feeBills[0].id });
+                                                    if (recalcError) throw new Error(recalcError.message);
+                              
+                                                    // Refresh the fee items
+                                                    await loadReceiptFeeItems(feeBills[0].id);
+                              
+                                                    // Add to payment lines automatically
+                                                    setReceiptPaymentLines((current) => [...current, { feeBillItemId: insertedItem.id, amount: otherFeeAmount }]);
+                              
+                                                    // Clear the form
+                                                    setOtherFeeDescription("");
+                                                    setOtherFeeAmount("");
+                              
+                                                    // Reload student bills to update outstanding
+                                                    await loadStudentBills(selectedStudentId);
+                              
+                                                    setSuccess(`Other Fee "${otherFeeDescription.trim()}" of ${money(Number(otherFeeAmount))} added to bill. Outstanding increased.`);
+                                                  } catch (err: any) {
+                                                    setError(err?.message || "Unable to add Other Fee.");
+                                                  } finally {
+                                                    setSaving(false);
+                                                  }
+                                                }}
+                                                disabled={saving || !otherFeeDescription.trim() || !otherFeeAmount}
+                                                className="mt-3 rounded-lg bg-amber-700 px-4 py-2 text-xs font-bold text-white disabled:opacity-50"
+                                              >
+                                                {saving ? "Adding…" : "Add Other Fee to Bill"}
+                                              </button>
+                                            </div>}
+
+                                            <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4">
                         <div className="flex items-start justify-between gap-3">
                           <div>
                             <h4 className="text-sm font-bold text-slate-900">Fee Categories & Payment Amounts</h4>
