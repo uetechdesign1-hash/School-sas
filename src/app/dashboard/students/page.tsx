@@ -973,36 +973,47 @@ export default function StudentsPage() {
             </p>
           </div>
 
-          {isPrincipal && (
-            <div className="flex flex-wrap gap-2">
-              {isPrincipal && selectedStudentIds.length > 0 && (
-                <button
-                  type="button"
-                  onClick={() => openPromotion(selectedStudentIds)}
-                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700"
+          <div className="flex flex-wrap gap-2">
+            <Link
+              href={`/dashboard/students/fee-structure?classId=${encodeURIComponent(classId)}&sectionId=${encodeURIComponent(sectionId)}&yearId=${encodeURIComponent(feeYearId)}`}
+              className="inline-flex items-center justify-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-5 py-3 text-sm font-semibold text-blue-700 shadow-sm transition hover:bg-blue-100"
+            >
+              <IndianRupee size={17} />
+              Fee Structure
+            </Link>
+
+            {isPrincipal && (
+              <>
+                {selectedStudentIds.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => openPromotion(selectedStudentIds)}
+                    className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700"
+                  >
+                    <ArrowRight size={17} />
+                    Promote {selectedStudentIds.length} Student
+                    {selectedStudentIds.length === 1 ? "" : "s"}
+                  </button>
+                )}
+
+                <Link
+                  href="/dashboard/students/import"
+                  className="inline-flex items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-5 py-3 text-sm font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-100"
                 >
-                  <ArrowRight size={17} />
-                  Promote {selectedStudentIds.length} Student
-                  {selectedStudentIds.length === 1 ? "" : "s"}
-                </button>
-              )}
+                  <FileSpreadsheet size={17} />
+                  Import from Excel
+                </Link>
 
-              <Link
-                href="/dashboard/students/import"
-                className="inline-flex items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-5 py-3 text-sm font-semibold text-emerald-700 shadow-sm transition hover:bg-emerald-100"
-              >
-                <FileSpreadsheet size={17} />
-                Import from Excel
-              </Link>
+                <Link
+                  href="/dashboard/students/new"
+                  className="inline-flex items-center justify-center rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700"
+                >
+                  + Add Student
+                </Link>
+              </>
+            )}
+          </div>
 
-              <Link
-                href="/dashboard/students/new"
-                className="inline-flex items-center justify-center rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700"
-              >
-                + Add Student
-              </Link>
-            </div>
-          )}
         </div>
 
         <div className="mt-6 grid gap-4 sm:grid-cols-3">
