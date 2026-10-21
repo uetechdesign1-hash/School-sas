@@ -814,7 +814,7 @@ export default function StudentDetailsPage() {
 
           supabase
             .from("fee_payments")
-            .select("receipt_number, payment_date, amount, payment_method")
+            .select("id, bill_id, receipt_number, manual_bill_number, payment_date, amount, payment_method")
             .eq("school_id", schoolId)
             .eq("student_id", studentId)
             .order("payment_date", { ascending: true }),
@@ -869,7 +869,10 @@ export default function StudentDetailsPage() {
       };
 
       type PaymentRow = {
+        id: string;
+        bill_id?: string | null;
         receipt_number: string;
+        manual_bill_number?: string | null;
         payment_date: string;
         amount: number | null;
         payment_method: string | null;
@@ -889,6 +892,62 @@ export default function StudentDetailsPage() {
       // Build a map of bill_id -> bill for reference
       const billMap = new Map(bills.map(bill => [bill.id, bill]));
 
+      // Category names so Particulars always shows the Fee Category used
+      // (e.g. "Tuition Fee", "Transport Fee"). Falls back to item description.
+      const categoryById = new Map<string, string>();
+      try {
+        const catResult = await supabase
+          .from("fee_categories")
+          .select("id, name")
+          .eq("school_id", schoolId);
+        if (!catResult.error) {
+          for (const cat of (catResult.data || []) as Array<{ id: string; name: string }>) {
+            if (cat?.id) categoryById.set(cat.id, cat.name || "");
+          }
+        }
+      } catch {
+        /* categories optional - description fallback below covers it */
+      }
+
+      const categoryNameForItem = (item: BillItemRow): string => {
+        if (item.fee_category_id && categoryById.get(item.fee_category_id)) {
+          return categoryById.get(item.fee_category_id) as string;
+        }
+        const raw = (item.description || "").trim();
+        // "Other Fee: Late fee" -> keep full text; "Tuition Fee - 2024-2025"
+        // (carry-forward) -> keep full text so year stays visible.
+        return raw || "Fee Category";
+      };
+
+      // Payment -> per-category split so one receipt with 2 categories
+      // produces 2 ledger rows (one Particular per Fee Category used).
+      const allocationsByPayment = new Map<string, Array<{ itemId: string; amount: number }>>();
+      try {
+        const paymentIds = payments.map((p) => p.id).filter(Boolean);
+        if (paymentIds.length > 0) {
+          const allocResult = await supabase
+            .from("fee_payment_allocations")
+            .select("payment_id, fee_bill_item_id, amount")
+            .eq("school_id", schoolId)
+            .in("payment_id", paymentIds);
+          if (!allocResult.error) {
+            for (const row of (allocResult.data || []) as Array<{ payment_id: string; fee_bill_item_id: string | null; amount: number | null }>) {
+              if (!row?.payment_id) continue;
+              const list = allocationsByPayment.get(row.payment_id) || [];
+              list.push({
+                itemId: (row.fee_bill_item_id || "") as string,
+                amount: Math.max(Number(row.amount || 0), 0),
+              });
+              allocationsByPayment.set(row.payment_id, list);
+            }
+          }
+        }
+      } catch {
+        /* allocations optional - falls back to single payment row below */
+      }
+
+      const itemById = new Map(billItems.map((item) => [item.id, item]));
+
       type LedgerEntry = {
         sortDate: string;
         date: string;
@@ -900,18 +959,18 @@ export default function StudentDetailsPage() {
 
       const entries: LedgerEntry[] = [];
 
-      // Add fee bill items (categories) as individual debit entries
+      // Debit side: one row per Fee Category assigned (Date = Bill Date).
       for (const item of billItems) {
         const bill = billMap.get(item.bill_id);
         if (!bill) continue;
 
         const netAmount = Number(item.net_amount ?? (Number(item.amount || 0) - Number(item.discount || 0)));
-        if (netAmount <= 0) continue;
+        if (!(netAmount > 0)) continue;
 
         entries.push({
           sortDate: bill.bill_date || "",
           date: bill.bill_date || "",
-          particulars: item.description || "Fee Category",
+          particulars: categoryNameForItem(item),
           reference: bill.bill_number || "—",
           debit: netAmount,
           credit: 0,
@@ -920,10 +979,10 @@ export default function StudentDetailsPage() {
 
       for (const item of concessions) {
         const bill = item.bill_id ? billMap.get(item.bill_id) : null;
-        const categoryName = item.fee_category_id 
-          ? billItems.find(bi => bi.id === item.fee_category_id)?.description || "Concession"
+        const categoryName = item.fee_category_id
+          ? categoryById.get(item.fee_category_id) || "Concession"
           : "Concession Given";
-        
+
         entries.push({
           sortDate: item.created_at || "",
           date: (item.created_at || "").slice(0, 10),
@@ -934,15 +993,37 @@ export default function StudentDetailsPage() {
         });
       }
 
+      // Credit side: one row per Fee Category paid (Date = Payment Date,
+      // Reference = Manual Receipt Number).
       for (const payment of payments) {
-        entries.push({
-          sortDate: payment.payment_date || "",
-          date: payment.payment_date || "",
-          particulars: `Fee Payment${payment.payment_method ? ` (${payment.payment_method})` : ""}`,
-          reference: payment.receipt_number || "—",
-          debit: 0,
-          credit: Math.max(Number(payment.amount || 0), 0),
-        });
+        const receiptRef = (payment.receipt_number || "").trim() || "—";
+        const paymentDate = payment.payment_date || "";
+        const splits = allocationsByPayment.get(payment.id) || [];
+        const namedSplits = splits.filter((s) => s.itemId && itemById.get(s.itemId));
+
+        if (namedSplits.length > 0) {
+          for (const split of namedSplits) {
+            if (!(split.amount > 0)) continue;
+            const item = itemById.get(split.itemId);
+            entries.push({
+              sortDate: paymentDate,
+              date: paymentDate,
+              particulars: item ? categoryNameForItem(item) : "Fee Collection",
+              reference: receiptRef,
+              debit: 0,
+              credit: split.amount,
+            });
+          }
+        } else {
+          entries.push({
+            sortDate: paymentDate,
+            date: paymentDate,
+            particulars: "Fee Collection",
+            reference: receiptRef,
+            debit: 0,
+            credit: Math.max(Number(payment.amount || 0), 0),
+          });
+        }
       }
 
       entries.sort((a, b) => a.sortDate.localeCompare(b.sortDate));

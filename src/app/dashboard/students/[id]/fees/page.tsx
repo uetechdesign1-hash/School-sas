@@ -348,6 +348,16 @@ export default function FeesPage() {
   const [unlockingFeeItems, setUnlockingFeeItems] = useState<string[]>([]);
   const [unlockingFeeItemIds, setUnlockingFeeItemIds] = useState<string[]>([]);
 
+  // Other Fee (Admin Entry) inline edit/remove. These are fee_bill_items rows
+  // with fee_category_id = NULL ("Other Fee: ..."). Amount changes flow
+  // through recalculate_fee_bill, so Student page, Fees page, Receipt page
+  // and reports reading fee_bills.balance_amount all update together.
+  const [editingOtherFee, setEditingOtherFee] = useState<FeeBillItem | null>(null);
+  const [editOtherFeeDescription, setEditOtherFeeDescription] = useState("");
+  const [editOtherFeeAmount, setEditOtherFeeAmount] = useState("");
+  const [savingOtherFeeEdit, setSavingOtherFeeEdit] = useState(false);
+  const [deletingOtherFeeId, setDeletingOtherFeeId] = useState<string | null>(null);
+
   const [manualBillNumber, setManualBillNumber] = useState("");
   const [manualReceiptNumber, setManualReceiptNumber] = useState("");
   const [paymentMode, setPaymentMode] = useState("cash");
@@ -2470,6 +2480,197 @@ export default function FeesPage() {
     }
   }
 
+  function isOtherFeeItem(item: FeeBillItem) {
+    if (item.fee_category_id) return false;
+    return (item.description || "").trim().toLowerCase().startsWith("other fee");
+  }
+
+  function openEditOtherFee(item: FeeBillItem) {
+    setEditingOtherFee(item);
+    const raw = (item.description || "").replace(/^other fee\s*:?\s*/i, "").trim();
+    setEditOtherFeeDescription(raw || item.description || "");
+    setEditOtherFeeAmount(String(Number(item.amount || 0)));
+    setMessage(null);
+  }
+
+  function closeEditOtherFee() {
+    if (savingOtherFeeEdit) return;
+    setEditingOtherFee(null);
+    setEditOtherFeeDescription("");
+    setEditOtherFeeAmount("");
+  }
+
+  async function saveOtherFeeEdit() {
+    if (!schoolId || !selectedStudent || !editingOtherFee || savingOtherFeeEdit) return;
+    const label = editOtherFeeDescription.trim();
+    const amount = Number(editOtherFeeAmount);
+    if (!label) {
+      setMessage({ type: "error", text: "Enter the Other Fee description." });
+      return;
+    }
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setMessage({ type: "error", text: "Enter a valid Other Fee amount." });
+      return;
+    }
+    const paidForItem = paymentAllocations
+      .filter((allocation) => allocation.fee_bill_item_id === editingOtherFee.id)
+      .reduce((sum, allocation) => sum + Number(allocation.amount || 0), 0);
+    if (amount + 0.005 < paidForItem) {
+      setMessage({
+        type: "error",
+        text: `Cannot reduce below already-paid ${formatMoney(paidForItem)} for this entry.`,
+      });
+      return;
+    }
+    setSavingOtherFeeEdit(true);
+    setMessage(null);
+    try {
+      const target = editingOtherFee;
+      let rpcMissing = false;
+      try {
+        const { data, error } = await supabase.rpc("update_other_fee_item", {
+          p_fee_bill_item_id: target.id,
+          p_description: `Other Fee: ${label}`,
+          p_amount: Math.round(amount * 100) / 100,
+        });
+        if (error) {
+          if (
+            error.message?.includes("schema cache") ||
+            error.message?.includes("Could not find the function")
+          ) {
+            rpcMissing = true;
+          } else {
+            throw new Error(`Unable to update Other Fee: ${error.message}`);
+          }
+        } else if (!data?.success) {
+          throw new Error(data?.message || "Other Fee was not updated.");
+        }
+      } catch (rpcError) {
+        const msg = rpcError instanceof Error ? rpcError.message : "";
+        if (msg.includes("schema cache") || msg.includes("Could not find the function")) {
+          rpcMissing = true;
+        } else {
+          throw rpcError;
+        }
+      }
+      if (rpcMissing) {
+        // Fallback until the redeploy migration is applied in Supabase.
+        const { error: directError } = await supabase
+          .from("fee_bill_items")
+          .update({
+            description: `Other Fee: ${label}`,
+            amount: Math.round(amount * 100) / 100,
+            discount: 0,
+            net_amount: Math.round(amount * 100) / 100,
+          })
+          .eq("id", target.id)
+          .eq("school_id", schoolId);
+        if (directError) throw new Error(`Unable to update Other Fee: ${directError.message}`);
+        const { error: recalcError } = await supabase.rpc("recalculate_fee_bill", {
+          p_bill_id: target.bill_id,
+        });
+        if (recalcError) throw new Error(`Other Fee saved but bill total could not be recalculated: ${recalcError.message}`);
+      }
+      await loadLedger(selectedStudent);
+      setEditingOtherFee(null);
+      setEditOtherFeeDescription("");
+      setEditOtherFeeAmount("");
+      setMessage({
+        type: "success",
+        text: `Other Fee updated. Linked bill, Student page and reports recalculated.`,
+      });
+    } catch (error) {
+      console.error("UPDATE OTHER FEE ERROR:", error);
+      setMessage({
+        type: "error",
+        text: error instanceof Error ? error.message : "Unable to update Other Fee.",
+      });
+    } finally {
+      setSavingOtherFeeEdit(false);
+    }
+  }
+
+  async function deleteOtherFee(item: FeeBillItem) {
+    if (!schoolId || !selectedStudent || deletingOtherFeeId) return;
+    const label = item.description || "Other Fee";
+    const value = formatMoney(Number(item.net_amount ?? item.amount ?? 0));
+    const ok = window.confirm(`Remove ${label} (${value})? Bill outstanding decreases on all linked pages.`);
+    if (!ok) return;
+    setDeletingOtherFeeId(item.id);
+    setMessage(null);
+    try {
+      // Prefer the guarded RPC (blocks removal when payments are allocated).
+      let rpcMissing = false;
+      let removedAmount = Number(item.net_amount ?? item.amount ?? 0);
+      try {
+        const { data, error } = await supabase.rpc("remove_fee_items_from_bill", {
+          p_bill_id: item.bill_id,
+          p_fee_bill_item_ids: [item.id],
+        });
+        if (error) {
+          if (
+            error.message?.includes("schema cache") ||
+            error.message?.includes("Could not find the function")
+          ) {
+            rpcMissing = true;
+          } else {
+            throw new Error(`Unable to remove Other Fee: ${error.message}`);
+          }
+        } else if (!data?.success) {
+          throw new Error(data?.message || "Other Fee was not removed.");
+        } else {
+          removedAmount = Number(data.removed_amount ?? removedAmount);
+        }
+      } catch (rpcError) {
+        const msg = rpcError instanceof Error ? rpcError.message : "";
+        if (msg.includes("schema cache") || msg.includes("Could not find the function")) {
+          rpcMissing = true;
+        } else {
+          throw rpcError;
+        }
+      }
+      if (rpcMissing) {
+        // Fallback until the redeploy migration is applied in Supabase:
+        // block removal when payments are allocated, then delete + recalc.
+        const { data: allocRows, error: allocError } = await supabase
+          .from("fee_payment_allocations")
+          .select("amount")
+          .eq("school_id", schoolId)
+          .eq("fee_bill_item_id", item.id);
+        if (allocError) throw new Error(`Unable to verify payments: ${allocError.message}`);
+        const paid = (allocRows || []).reduce((sum, row) => sum + Number((row as { amount: number }).amount || 0), 0);
+        if (paid > 0.005) {
+          throw new Error(`Cannot remove "${label}" - ${formatMoney(paid)} is already paid against it.`);
+        }
+        const { error: deleteError } = await supabase
+          .from("fee_bill_items")
+          .delete()
+          .eq("id", item.id)
+          .eq("school_id", schoolId);
+        if (deleteError) throw new Error(`Unable to remove Other Fee: ${deleteError.message}`);
+        const { error: recalcError } = await supabase.rpc("recalculate_fee_bill", {
+          p_bill_id: item.bill_id,
+        });
+        if (recalcError) throw new Error(`Other Fee removed but bill total could not be recalculated: ${recalcError.message}`);
+      }
+      await loadLedger(selectedStudent);
+      if (editingOtherFee?.id === item.id) {
+        setEditingOtherFee(null);
+        setEditOtherFeeDescription("");
+        setEditOtherFeeAmount("");
+      }
+      setMessage({
+        type: "success",
+        text: `Other Fee removed (${formatMoney(removedAmount)}). Bill outstanding reduced on all linked pages.`,
+      });
+    } catch (error) {
+      console.error("DELETE OTHER FEE ERROR:", error);
+      setMessage({ type: "error", text: error instanceof Error ? error.message : "Unable to remove Other Fee." });
+    } finally {
+      setDeletingOtherFeeId(null);
+    }
+  }
+
   async function applyConcession() {
     if (!schoolId || !selectedStudent || !selectedBill) return;
 
@@ -3967,6 +4168,30 @@ export default function FeesPage() {
                                     <span>{formatMoney(itemTotal)}</span>
                                     {paidForItem > 0 && <span className="text-green-600">Paid {formatMoney(paidForItem)}</span>}
                                     {itemBalance > 0.005 && <span className="text-red-500">Due {formatMoney(itemBalance)}</span>}
+                                    {isOtherFeeItem(item) && (
+                                      <>
+                                        <button
+                                          type="button"
+                                          onClick={() => openEditOtherFee(item)}
+                                          disabled={savingOtherFeeEdit || Boolean(deletingOtherFeeId)}
+                                          className="inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 font-bold text-amber-700 hover:bg-amber-100 disabled:opacity-50"
+                                          title="Edit Other Fee - amount updates bill and all linked pages"
+                                        >
+                                          <Pencil size={12} />
+                                          Edit
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => void deleteOtherFee(item)}
+                                          disabled={deletingOtherFeeId === item.id || Boolean(deletingOtherFeeId) || savingOtherFeeEdit}
+                                          className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-white px-2 py-1 font-bold text-red-600 hover:bg-red-50 disabled:opacity-50"
+                                          title="Remove Other Fee - bill outstanding decreases on all linked pages"
+                                        >
+                                          <Trash2 size={12} />
+                                          {deletingOtherFeeId === item.id ? "Removing..." : "Remove"}
+                                        </button>
+                                      </>
+                                    )}
                                   </div>
                                 );
                               })}
@@ -4305,6 +4530,77 @@ export default function FeesPage() {
                   className="rounded-lg bg-blue-600 px-4 py-2.5 text-xs font-bold text-white hover:bg-blue-700 disabled:opacity-50"
                 >
                   {savingConcessionEdit ? "Saving..." : "Save Correction"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {editingOtherFee && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-3 backdrop-blur-sm">
+          <div className="w-full max-w-md overflow-hidden rounded-2xl bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
+              <div>
+                <h2 className="font-bold text-slate-900">
+                  Edit Other Fee (Admin Entry)
+                </h2>
+                <p className="mt-1 text-xs text-slate-500">
+                  Amount change updates the bill and all linked pages.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closeEditOtherFee}
+                disabled={savingOtherFeeEdit}
+                className="rounded-lg p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+              >
+                <X size={20} />
+              </button>
+            </div>
+            <div className="space-y-4 p-5">
+              <div>
+                <label className="mb-2 block text-sm font-semibold text-slate-700">
+                  Fee description
+                </label>
+                <input
+                  value={editOtherFeeDescription}
+                  onChange={(event) => setEditOtherFeeDescription(event.target.value)}
+                  disabled={savingOtherFeeEdit}
+                  placeholder="e.g. Late fee"
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                />
+              </div>
+              <div>
+                <label className="mb-2 block text-sm font-semibold text-slate-700">
+                  Amount
+                </label>
+                <input
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  value={editOtherFeeAmount}
+                  onChange={(event) => setEditOtherFeeAmount(event.target.value)}
+                  disabled={savingOtherFeeEdit}
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                />
+              </div>
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={closeEditOtherFee}
+                  disabled={savingOtherFeeEdit}
+                  className="rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void saveOtherFeeEdit()}
+                  disabled={savingOtherFeeEdit || !editOtherFeeDescription.trim() || !editOtherFeeAmount}
+                  className="rounded-lg bg-amber-600 px-4 py-2.5 text-xs font-bold text-white hover:bg-amber-700 disabled:opacity-50"
+                >
+                  {savingOtherFeeEdit ? "Saving..." : "Save Other Fee"}
                 </button>
               </div>
             </div>

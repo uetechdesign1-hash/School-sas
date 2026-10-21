@@ -80,6 +80,10 @@ type Journal = {
   id: string;
   entry_date: string;
   reference_id: string | null;
+  source_module?: string | null;
+  source_table?: string | null;
+  source_record_id?: string | null;
+  reference_type?: string | null;
 };
 
 type JournalLine = {
@@ -111,6 +115,7 @@ type Slice = {
   amount: number;
   percentage: number;
   color: string;
+  kind: "income" | "expense";
 };
 
 type Bucket = {
@@ -240,6 +245,33 @@ function share(part: number, whole: number) {
 
 function clamp(value: number, min = 0, max = 100) {
   return Math.min(max, Math.max(min, value));
+}
+
+/* Fee collection vs other income: fee money comes only through the Student
+ * Fees income head(s); everything else (donations, rent, interest, sale of
+ * books/uniforms) is Other income. Expenditure is every expense head. */
+function isFeeCollectionHead(name: string) {
+  const lower = (name || "").toLowerCase();
+  return (
+    lower.includes("student fee") ||
+    lower === "fees" ||
+    (lower.includes("fee") &&
+      (lower.includes("tuition") ||
+        lower.includes("transport") ||
+        lower.includes("admission")))
+  );
+}
+
+function feeCollectionTotal(heads: Slice[]) {
+  return heads
+    .filter((head) => isFeeCollectionHead(head.name))
+    .reduce((sum, head) => sum + head.amount, 0);
+}
+
+function otherIncomeTotal(heads: Slice[]) {
+  return heads
+    .filter((head) => !isFeeCollectionHead(head.name))
+    .reduce((sum, head) => sum + head.amount, 0);
 }
 
 function toISO(date: Date) {
@@ -417,13 +449,13 @@ function summarize(
     .map((entry) => bucketMap.get(entry.key) as Bucket)
     .map((bucket) => ({ ...bucket, net: bucket.income - bucket.expense }));
 
-  const toSlices = (map: Map<string, number>): Slice[] => {
+  const toSlices = (map: Map<string, number>, kind: "income" | "expense"): Slice[] => {
     /* Only heads that net out positive can be drawn as a slice; a net
      * contra head (returns exceeding charges) stays inside the grand total. */
     const rows = [...map.entries()]
       .filter(([, amount]) => amount > 0)
       .sort((a, b) => b[1] - a[1])
-      .map(([name, amount]) => ({ name, amount }));
+      .map(([name, amount]) => ({ name, amount, kind }));
 
     const total = rows.reduce((sum, row) => sum + row.amount, 0);
     const top = rows.slice(0, 7);
@@ -441,6 +473,7 @@ function summarize(
               {
                 name: "Other heads",
                 amount: rest,
+                kind,
                 color: "#94A3B8",
                 percentage: share(rest, total),
               },
@@ -462,8 +495,8 @@ function summarize(
       1,
       ...buckets.map((bucket) => Math.max(bucket.income, bucket.expense)),
     ),
-    incomeHeads: toSlices(incomeHeads),
-    expenseHeads: toSlices(expenseHeads),
+    incomeHeads: toSlices(incomeHeads, "income"),
+    expenseHeads: toSlices(expenseHeads, "expense"),
     incomeVouchers: incomeVouchers.size,
     expenseVouchers: expenseVouchers.size,
     elapsedBuckets: focusKey
@@ -538,7 +571,7 @@ export default function StatisticsPage() {
 
         supabase
           .from("journal_entries")
-          .select("id, entry_date, reference_id")
+          .select("id, entry_date, reference_id, source_module, source_table, source_record_id, reference_type")
           .eq("school_id", schoolId),
 
         supabase
@@ -656,6 +689,69 @@ export default function StatisticsPage() {
 
     const rows: Posting[] = [];
 
+    // Modules whose journals are the same cash movement written twice
+    // (salary Payment page posts Dr Salary Payable / Cr Cash AND the Expenses
+    // page posts Dr Salary Expense / Cr Cash for the same payout). Count each
+    // event once: prefer the expense-side posting and drop the pure
+    // payable-settlement twin. Same for vendor bills paid via vendor_payments.
+    const expenseLikeEntryIds = new Set<string>();
+    const expenseLikeSources = new Set<string>();
+    for (const journal of journals) {
+      const module = (journal.source_module || "").toLowerCase();
+      const table = (journal.source_table || "").toLowerCase();
+      const ref = (journal.reference_type || "").toLowerCase();
+      if (
+        module === "expenses" ||
+        table === "expenses" ||
+        ref === "expense" ||
+        module === "vendor_purchases" ||
+        table === "purchase_bills" ||
+        ref === "purchase_bill" ||
+        module === "payroll" ||
+        table === "payroll_runs" ||
+        ref === "payroll"
+      ) {
+        expenseLikeEntryIds.add(journal.id);
+        if (journal.source_record_id) {
+          expenseLikeSources.add(
+            `${module}|${table}|${String(journal.source_record_id)}`,
+          );
+        }
+      }
+    }
+    const isCashSettlementTwin = (journalId: string) => {
+      const journal = journals.find((entry) => entry.id === journalId);
+      if (!journal) return false;
+      const module = (journal.source_module || "").toLowerCase();
+      const table = (journal.source_table || "").toLowerCase();
+      const ref = (journal.reference_type || "").toLowerCase();
+      if (
+        !(
+          module === "salary_payment" ||
+          table === "salary_payments" ||
+          ref === "salary_payment" ||
+          module === "vendor_purchases" ||
+          table === "vendor_payments" ||
+          ref === "vendor_payment"
+        )
+      ) {
+        return false;
+      }
+      if (expenseLikeEntryIds.has(journalId)) return false;
+      if (
+        journal.source_record_id &&
+        expenseLikeSources.has(
+          `${module}|${table}|${String(journal.source_record_id)}`,
+        )
+      ) {
+        return true;
+      }
+      // Payroll accrue-then-pay twins share no record id: when an expense-side
+      // payroll posting already exists for the same date/amount, the cash-only
+      // settlement twin is the duplicate.
+      return false;
+    };
+
     const pushRow = (
       kind: "income" | "expense",
       accountId: string,
@@ -701,6 +797,7 @@ export default function StatisticsPage() {
     for (const line of journalLines) {
       const date = journalDate.get(line.journal_entry_id);
       if (!date) continue;
+      if (isCashSettlementTwin(line.journal_entry_id)) continue;
 
       pushRow(
         "income",
@@ -1051,8 +1148,8 @@ export default function StatisticsPage() {
                 </h1>
 
                 <p className="mt-1.5 max-w-md text-[13px] leading-relaxed text-slate-500 sm:text-sm">
-                  The year-wise and month-wise money story, counted from every
-                  entry in the books.
+                  Income = fee collection (paid by students) + other income.
+                  Expenditure = every expense head. Net = income - expenditure.
                 </p>
               </div>
             </div>
@@ -1305,24 +1402,36 @@ export default function StatisticsPage() {
             </Glass>
 
             {/* ----------------------------------------------- breakdowns */}
-            <section className="grid gap-3 lg:grid-cols-2">
+            <section className="grid gap-3 lg:grid-cols-3">
+              <Glass className="p-5 sm:p-6">
+                <PanelHead
+                  icon={GraduationCap}
+                  tone="from-[#0A84FF] to-[#64D2FF]"
+                  title="Fee collection"
+                  subtitle="Student fees paid"
+                  right={<Chip tone="blue">{shortMoney(feeCollectionTotal(summary.incomeHeads))}</Chip>}
+                />
+
+                <Breakdown
+                  slices={summary.incomeHeads.filter((slice) => isFeeCollectionHead(slice.name))}
+                  ringLabel="fee collection"
+                  empty="No fee collection in this period"
+                />
+              </Glass>
+
               <Glass className="p-5 sm:p-6">
                 <PanelHead
                   icon={Coins}
                   tone="from-[#30D158] to-[#00B389]"
-                  title="Where money comes from"
-                  subtitle={
-                    facts.topIncome
-                      ? `Led by ${facts.topIncome.name}`
-                      : "No income recorded"
-                  }
-                  right={<Chip tone="mint">{shortMoney(facts.income)}</Chip>}
+                  title="Other income"
+                  subtitle="All non-fee income"
+                  right={<Chip tone="mint">{shortMoney(otherIncomeTotal(summary.incomeHeads))}</Chip>}
                 />
 
                 <Breakdown
-                  slices={summary.incomeHeads}
-                  ringLabel="income"
-                  empty="No income in this period"
+                  slices={summary.incomeHeads.filter((slice) => !isFeeCollectionHead(slice.name))}
+                  ringLabel="other income"
+                  empty="No other income in this period"
                 />
               </Glass>
 
@@ -1330,19 +1439,19 @@ export default function StatisticsPage() {
                 <PanelHead
                   icon={Banknote}
                   tone="from-[#FF453A] to-[#FF9F0A]"
-                  title="Where money goes"
+                  title="Expenditure"
                   subtitle={
                     facts.topExpense
                       ? `Led by ${facts.topExpense.name}`
-                      : "No spending recorded"
+                      : "No expenditure recorded"
                   }
                   right={<Chip tone="rose">{shortMoney(facts.expense)}</Chip>}
                 />
 
                 <Breakdown
                   slices={summary.expenseHeads}
-                  ringLabel="spending"
-                  empty="No spending in this period"
+                  ringLabel="expenditure"
+                  empty="No expenditure in this period"
                 />
               </Glass>
             </section>
