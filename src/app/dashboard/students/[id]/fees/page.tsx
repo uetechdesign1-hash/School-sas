@@ -54,6 +54,7 @@ type Student = {
   section_id?: string | null;
   class_name?: string | null;
   section?: string | null;
+  status?: string | null;
 };
 
 type SchoolClass = {
@@ -474,7 +475,7 @@ export default function FeesPage() {
       const { data: studentData, error: studentError } = await supabase
         .from("students")
         .select(
-          "id, school_id, first_name, middle_name, last_name, admission_no, roll_no, class_id, section_id",
+          "id, school_id, first_name, middle_name, last_name, admission_no, roll_no, class_id, section_id, status",
         )
         .eq("school_id", currentSchoolId)
         .order("first_name", { ascending: true })
@@ -2212,6 +2213,10 @@ export default function FeesPage() {
 
   const outstandingByBillId = useMemo(() => {
     const map = new Map<string, number>();
+    if ((selectedStudent?.status || "active").toLowerCase() !== "active") {
+      for (const bill of bills) map.set(bill.id, 0);
+      return map;
+    }
     for (const bill of bills) {
       const items = billItems.filter((item) => item.bill_id === bill.id);
       if (items.length === 0) {
@@ -2226,7 +2231,7 @@ export default function FeesPage() {
       map.set(bill.id, Math.max(Number(due.toFixed(2)), 0));
     }
     return map;
-  }, [bills, billItems, paidByItemId]);
+  }, [bills, billItems, paidByItemId, selectedStudent?.status]);
 
   const totalBilled = bills.reduce(
     (sum, bill) => sum + Number(bill.total_amount || 0),
@@ -4255,14 +4260,16 @@ export default function FeesPage() {
 
                           <td className="px-5 py-4 text-right">
                             <div className="flex flex-wrap items-center justify-end gap-2">
-                              <button
-                                type="button"
-                                onClick={() => openPaymentModal(bill)}
-                                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 text-xs font-bold text-white transition hover:bg-blue-700"
-                              >
-                                <Plus size={14} />
-                                {Number(bill.balance_amount) > 0 ? "Add Payment / Inventory" : "Add Inventory"}
-                              </button>
+                              {(selectedStudent?.status || "active").toLowerCase() === "active" ? (
+                                <button
+                                  type="button"
+                                  onClick={() => openPaymentModal(bill)}
+                                  className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 text-xs font-bold text-white transition hover:bg-blue-700"
+                                >
+                                  <Plus size={14} />
+                                  {Number(outstandingByBillId.get(bill.id) || 0) > 0 ? "Add Payment / Inventory" : "Add Inventory"}
+                                </button>
+                              ) : null}
 
                               {concessions.filter((item) => item.bill_id === bill.id).map((concession) => (
                                 <span key={`actions-${concession.id}`} className="inline-flex gap-1">
@@ -4287,7 +4294,7 @@ export default function FeesPage() {
                                 </span>
                               ))}
 
-                              {Number(bill.balance_amount) > 0 && (
+                              {(selectedStudent?.status || "active").toLowerCase() === "active" && Number(outstandingByBillId.get(bill.id) || 0) > 0 && (
                                 <button
                                   type="button"
                                   onClick={() => {
@@ -4300,7 +4307,7 @@ export default function FeesPage() {
                                 </button>
                               )}
 
-                              {Number(bill.balance_amount) > 0 && bill.academic_year_id && (
+                              {(selectedStudent?.status || "active").toLowerCase() === "active" && Number(outstandingByBillId.get(bill.id) || 0) > 0 && bill.academic_year_id && (
                                 <button
                                   type="button"
                                   onClick={() => void handleCarryForward(bill)}
@@ -4310,11 +4317,15 @@ export default function FeesPage() {
                                 </button>
                               )}
 
-                              {Number(bill.balance_amount) <= 0 && (
+                              {(selectedStudent?.status || "active").toLowerCase() !== "active" ? (
+                                <span className="text-xs font-semibold text-slate-500">
+                                  Inactive · no collection
+                                </span>
+                              ) : Number(outstandingByBillId.get(bill.id) || 0) <= 0 ? (
                                 <span className="text-xs font-semibold text-green-600">
                                   Fully Paid
                                 </span>
-                              )}
+                              ) : null}
                             </div>
                           </td>
                         </tr>

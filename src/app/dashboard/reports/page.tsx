@@ -10,9 +10,7 @@
 | uses so the story can never disagree with the books:
 |
 |   canonical : journal_entries -> journal_lines
-|   legacy    : transactions -> transaction_entries, but only the rows the
-|               canonical bridge (legacy_superseded_transactions and the
-|               journal reference_id) has not already represented.
+|   totals    : receipt history + Expenses page records, matching their totals.
 |
 | Filters: any academic year (or All Years) and, inside a year, a single
 | month. Every tile, bar and ring below recalculates for that selection.
@@ -25,36 +23,27 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type CSSProperties,
+  type PointerEvent,
   type ReactNode,
 } from "react";
 import {
   type LucideIcon,
-  Award,
   Banknote,
   BarChart3,
   CalendarRange,
-  CircleDollarSign,
   Coins,
-  Flame,
   GraduationCap,
-  IndianRupee,
-  Landmark,
   Layers,
   Loader2,
-  Percent,
-  PiggyBank,
   Printer,
-  Receipt,
   RefreshCw,
   Scale,
   Sparkles,
   TrendingDown,
   TrendingUp,
-  Trophy,
-  Users,
-  Wallet,
 } from "lucide-react";
 
 import { createClient } from "@/lib/supabase/client";
@@ -93,14 +82,30 @@ type JournalLine = {
   credit: number | string | null;
 };
 
-type LegacyTxn = { id: string; transaction_date: string };
-
-type LegacyEntry = {
-  transaction_id: string;
-  account_id: string;
-  debit: number | string | null;
-  credit: number | string | null;
+type ReceiptRow = {
+  id: string;
+  transaction_date: string;
+  amount: number | string;
+  credit_account: string | null;
+  receipt_type: "student_fee" | "other_income";
 };
+
+type ExpenseRow = {
+  id: string;
+  expense_date: string;
+  amount: number | string;
+  description: string | null;
+  vendor_name: string | null;
+};
+
+type VendorPaymentRow = {
+  id: string;
+  payment_date: string;
+  amount: number | string;
+  vendor_id: string;
+};
+
+type VendorRow = { id: string; name: string };
 
 type Posting = {
   date: string;
@@ -146,9 +151,8 @@ type Summary = {
   maxBucket: number;
   incomeHeads: Slice[];
   expenseHeads: Slice[];
-  incomeVouchers: number;
-  expenseVouchers: number;
-  elapsedBuckets: number;
+  feeCollectionIncome: number;
+  otherIncome: number;
 };
 
 type Segment = {
@@ -209,6 +213,23 @@ function toNum(value: number | string | null | undefined) {
   return Number(value || 0) || 0;
 }
 
+const REPORT_PAGE_SIZE = 1000;
+
+async function fetchAllReportRows<T>(
+  queryPage: (from: number, to: number) => any,
+): Promise<{ data: T[]; error: any }> {
+  const rows: T[] = [];
+
+  for (let from = 0; ; from += REPORT_PAGE_SIZE) {
+    const { data, error } = await queryPage(from, from + REPORT_PAGE_SIZE - 1);
+    if (error) return { data: rows, error };
+
+    const page = (data || []) as T[];
+    rows.push(...page);
+    if (page.length < REPORT_PAGE_SIZE) return { data: rows, error: null };
+  }
+}
+
 const INR_FORMAT = new Intl.NumberFormat("en-IN", {
   style: "currency",
   currency: "INR",
@@ -255,23 +276,8 @@ function isFeeCollectionHead(name: string) {
   return (
     lower.includes("student fee") ||
     lower === "fees" ||
-    (lower.includes("fee") &&
-      (lower.includes("tuition") ||
-        lower.includes("transport") ||
-        lower.includes("admission")))
+    lower.includes("fee")
   );
-}
-
-function feeCollectionTotal(heads: Slice[]) {
-  return heads
-    .filter((head) => isFeeCollectionHead(head.name))
-    .reduce((sum, head) => sum + head.amount, 0);
-}
-
-function otherIncomeTotal(heads: Slice[]) {
-  return heads
-    .filter((head) => !isFeeCollectionHead(head.name))
-    .reduce((sum, head) => sum + head.amount, 0);
 }
 
 function toISO(date: Date) {
@@ -335,7 +341,7 @@ function monthNameLong(key: string) {
 
 /*
  * A single session is read month by month. "All years" (any period longer
- * than 15 months) is grouped by financial year so the page never turns into
+ * than 15 months) is grouped by academic year so the page never turns into
  * an unreadable wall of bars.
  */
 function spanGranularity(start: string, end: string): "month" | "year" {
@@ -362,6 +368,7 @@ function summarize(
   start: string,
   end: string,
   focusKey: string | null = null,
+  yearPeriods: YearOption[] = [],
 ): Summary {
   const scoped = postings.filter((p) => p.date >= start && p.date <= end);
 
@@ -387,12 +394,22 @@ function summarize(
       cursor.setMonth(cursor.getMonth() + 1);
     }
   } else {
-    let cursor = fiscalStartOf(start);
-    const last = fiscalStartOf(end);
+    const academicPeriods = yearPeriods.filter(
+      (period) => period.end >= start && period.start <= end,
+    );
 
-    while (cursor <= last) {
-      keys.push({ key: toISO(cursor), label: fiscalLabel(cursor) });
-      cursor = new Date(cursor.getFullYear() + 1, 3, 1);
+    if (academicPeriods.length > 0) {
+      for (const period of academicPeriods) {
+        keys.push({ key: period.id, label: period.label });
+      }
+    } else {
+      let cursor = fiscalStartOf(start);
+      const last = fiscalStartOf(end);
+
+      while (cursor <= last) {
+        keys.push({ key: toISO(cursor), label: fiscalLabel(cursor) });
+        cursor = new Date(cursor.getFullYear() + 1, 3, 1);
+      }
     }
   }
 
@@ -405,17 +422,18 @@ function summarize(
 
   const incomeHeads = new Map<string, number>();
   const expenseHeads = new Map<string, number>();
-  const incomeVouchers = new Set<string>();
-  const expenseVouchers = new Set<string>();
 
   let income = 0;
   let expense = 0;
+  let feeCollectionIncome = 0;
+  let otherIncome = 0;
 
   for (const posting of scoped) {
-    const key =
-      granularity === "month"
-        ? posting.date.slice(0, 7)
-        : toISO(fiscalStartOf(posting.date));
+    const key = granularity === "month"
+      ? posting.date.slice(0, 7)
+      : yearPeriods.find(
+          (period) => posting.date >= period.start && posting.date <= period.end,
+        )?.id || toISO(fiscalStartOf(posting.date));
 
     const bucket = bucketMap.get(key);
     if (!bucket) continue;
@@ -430,14 +448,17 @@ function summarize(
     /* Signed amounts: a contra posting lowers the head it belongs to. */
     if (posting.kind === "income") {
       income += posting.amount;
-      incomeVouchers.add(posting.entryId);
+      if (isFeeCollectionHead(posting.accountName)) {
+        feeCollectionIncome += posting.amount;
+      } else {
+        otherIncome += posting.amount;
+      }
       incomeHeads.set(
         posting.accountName,
         toNum(incomeHeads.get(posting.accountName)) + posting.amount,
       );
     } else {
       expense += posting.amount;
-      expenseVouchers.add(posting.entryId);
       expenseHeads.set(
         posting.accountName,
         toNum(expenseHeads.get(posting.accountName)) + posting.amount,
@@ -458,31 +479,13 @@ function summarize(
       .map(([name, amount]) => ({ name, amount, kind }));
 
     const total = rows.reduce((sum, row) => sum + row.amount, 0);
-    const top = rows.slice(0, 7);
-    const rest = rows.slice(7).reduce((sum, row) => sum + row.amount, 0);
-
-    return top
+    return rows
       .map((row, index) => ({
         ...row,
         color: PALETTE[index % PALETTE.length],
         percentage: share(row.amount, total),
-      }))
-      .concat(
-        rest > 0
-          ? [
-              {
-                name: "Other heads",
-                amount: rest,
-                kind,
-                color: "#94A3B8",
-                percentage: share(rest, total),
-              },
-            ]
-          : [],
-      );
+      }));
   };
-
-  const today = toISO(new Date());
 
   return {
     income,
@@ -497,18 +500,8 @@ function summarize(
     ),
     incomeHeads: toSlices(incomeHeads, "income"),
     expenseHeads: toSlices(expenseHeads, "expense"),
-    incomeVouchers: incomeVouchers.size,
-    expenseVouchers: expenseVouchers.size,
-    elapsedBuckets: focusKey
-      ? 1
-      : Math.max(
-          1,
-          buckets.filter(
-            (bucket) =>
-              (granularity === "month" ? `${bucket.key}-01` : bucket.key) <=
-              today,
-          ).length,
-        ),
+    feeCollectionIncome,
+    otherIncome,
   };
 }
 
@@ -523,12 +516,10 @@ export default function StatisticsPage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [journals, setJournals] = useState<Journal[]>([]);
   const [journalLines, setJournalLines] = useState<JournalLine[]>([]);
-  const [legacyTxns, setLegacyTxns] = useState<LegacyTxn[]>([]);
-  const [legacyEntries, setLegacyEntries] = useState<LegacyEntry[]>([]);
-  const [legacyEnabled, setLegacyEnabled] = useState(false);
-  const [supersededIds, setSupersededIds] = useState<Set<string>>(new Set());
-  const [studentCount, setStudentCount] = useState(0);
-  const [staffCount, setStaffCount] = useState(0);
+  const [receiptRows, setReceiptRows] = useState<ReceiptRow[]>([]);
+  const [expenseRows, setExpenseRows] = useState<ExpenseRow[]>([]);
+  const [vendorPaymentRows, setVendorPaymentRows] = useState<VendorPaymentRow[]>([]);
+  const [vendors, setVendors] = useState<VendorRow[]>([]);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -549,8 +540,6 @@ export default function StatisticsPage() {
         accountResult,
         journalResult,
         lineResult,
-        studentResult,
-        staffResult,
       ] = await Promise.all([
         supabase
           .from("schools")
@@ -558,36 +547,42 @@ export default function StatisticsPage() {
           .eq("id", schoolId)
           .maybeSingle(),
 
-        supabase
-          .from("academic_years")
-          .select("id, name, start_date, end_date, is_current")
-          .eq("school_id", schoolId)
-          .order("start_date", { ascending: true }),
+        fetchAllReportRows<AcademicYear>((from, to) =>
+          supabase
+            .from("academic_years")
+            .select("id, name, start_date, end_date, is_current")
+            .eq("school_id", schoolId)
+            .order("start_date", { ascending: true })
+            .range(from, to),
+        ),
 
-        supabase
-          .from("accounts")
-          .select("id, name, account_type")
-          .eq("school_id", schoolId),
+        fetchAllReportRows<Account>((from, to) =>
+          supabase
+            .from("accounts")
+            .select("id, name, account_type")
+            .eq("school_id", schoolId)
+            .range(from, to),
+        ),
 
-        supabase
-          .from("journal_entries")
-          .select("id, entry_date, reference_id, source_module, source_table, source_record_id, reference_type")
-          .eq("school_id", schoolId),
+        fetchAllReportRows<Journal>((from, to) =>
+          supabase
+            .from("journal_entries")
+            .select("id, entry_date, reference_id, source_module, source_table, source_record_id, reference_type")
+            .eq("school_id", schoolId)
+            .order("entry_date", { ascending: true })
+            .order("id", { ascending: true })
+            .range(from, to),
+        ),
 
-        supabase
-          .from("journal_lines")
-          .select("journal_entry_id, account_id, debit, credit")
-          .eq("school_id", schoolId),
+        fetchAllReportRows<JournalLine>((from, to) =>
+          supabase
+            .from("journal_lines")
+            .select("journal_entry_id, account_id, debit, credit")
+            .eq("school_id", schoolId)
+            .order("journal_entry_id", { ascending: true })
+            .range(from, to),
+        ),
 
-        supabase
-          .from("students")
-          .select("id", { count: "exact", head: true })
-          .eq("school_id", schoolId),
-
-        supabase
-          .from("staff")
-          .select("id", { count: "exact", head: true })
-          .eq("school_id", schoolId),
       ]);
 
       if (yearResult.error) {
@@ -606,46 +601,60 @@ export default function StatisticsPage() {
         throw new Error(`Unable to load journal lines: ${lineResult.error.message}`);
       }
 
-      /*
-       * The legacy books (and the canonical bridge view) are optional: older
-       * schools still have rows in them, brand new schools do not. A missing
-       * table must never break the report - the journal alone is complete.
-       */
-      const [txnResult, entryResult, supersededResult] = await Promise.all([
-        supabase
-          .from("transactions")
-          .select("id, transaction_date")
-          .eq("school_id", schoolId),
+      const [receiptResult, expenseResult, vendorPaymentResult, vendorResult] =
+        await Promise.all([
+          supabase.rpc("get_receipt_history", { p_school_id: schoolId }),
+          fetchAllReportRows<ExpenseRow>((from, to) =>
+            supabase
+              .from("expenses")
+              .select("id, expense_date, amount, description, vendor_name")
+              .eq("school_id", schoolId)
+              .order("expense_date", { ascending: true })
+              .order("id", { ascending: true })
+              .range(from, to),
+          ),
+          fetchAllReportRows<VendorPaymentRow>((from, to) =>
+            supabase
+              .from("vendor_payments")
+              .select("id, payment_date, amount, vendor_id")
+              .eq("school_id", schoolId)
+              .order("payment_date", { ascending: true })
+              .order("id", { ascending: true })
+              .range(from, to),
+          ),
+          fetchAllReportRows<VendorRow>((from, to) =>
+            supabase
+              .from("vendors")
+              .select("id, name")
+              .eq("school_id", schoolId)
+              .order("id", { ascending: true })
+              .range(from, to),
+          ),
+        ]);
 
-        supabase
-          .from("transaction_entries")
-          .select("transaction_id, account_id, debit, credit")
-          .eq("school_id", schoolId),
-
-        supabase
-          .from("legacy_superseded_transactions")
-          .select("transaction_id")
-          .eq("school_id", schoolId),
-      ]);
+      if (receiptResult.error) {
+        throw new Error(`Unable to load receipts: ${receiptResult.error.message}`);
+      }
+      if (expenseResult.error) {
+        throw new Error(`Unable to load expenses: ${expenseResult.error.message}`);
+      }
+      if (vendorPaymentResult.error) {
+        throw new Error(`Unable to load vendor payments: ${vendorPaymentResult.error.message}`);
+      }
+      if (vendorResult.error) {
+        throw new Error(`Unable to load vendors: ${vendorResult.error.message}`);
+      }
 
       setSchoolName(schoolResult.data?.name || "");
-      setAcademicYears((yearResult.data || []) as AcademicYear[]);
-      setAccounts((accountResult.data || []) as Account[]);
-      setJournals((journalResult.data || []) as Journal[]);
-      setJournalLines((lineResult.data || []) as JournalLine[]);
-      setStudentCount(studentResult.count || 0);
-      setStaffCount(staffResult.count || 0);
+      setAcademicYears(yearResult.data);
+      setAccounts(accountResult.data);
+      setJournals(journalResult.data);
+      setJournalLines(lineResult.data);
 
-      setLegacyTxns((txnResult.data || []) as LegacyTxn[]);
-      setLegacyEntries((entryResult.data || []) as LegacyEntry[]);
-      setLegacyEnabled(!txnResult.error && !entryResult.error);
-      setSupersededIds(
-        new Set(
-          (supersededResult.data || []).map((row: any) =>
-            String(row.transaction_id),
-          ),
-        ),
-      );
+      setReceiptRows((receiptResult.data || []) as ReceiptRow[]);
+      setExpenseRows(expenseResult.data);
+      setVendorPaymentRows(vendorPaymentResult.data);
+      setVendors(vendorResult.data);
     } catch (loadError: any) {
       console.error("STATISTICS ERROR:", loadError);
 
@@ -677,173 +686,68 @@ export default function StatisticsPage() {
     })();
   }, [loadReport]);
 
-  /*
-   * Flatten every money movement into income / expense postings. Income is the
-   * credit side of Income accounts, expense is the debit side of Expense
-   * accounts - exactly how the books read them.
-   */
+  /* Use the same receipt and expense records as their entry pages for totals.
+   * Journals provide the chart-of-account labels for expense breakdowns. */
   const postings = useMemo<Posting[]>(() => {
-    const accountById = new Map(
-      accounts.map((account) => [account.id, account]),
-    );
-
     const rows: Posting[] = [];
 
-    // Modules whose journals are the same cash movement written twice
-    // (salary Payment page posts Dr Salary Payable / Cr Cash AND the Expenses
-    // page posts Dr Salary Expense / Cr Cash for the same payout). Count each
-    // event once: prefer the expense-side posting and drop the pure
-    // payable-settlement twin. Same for vendor bills paid via vendor_payments.
-    const expenseLikeEntryIds = new Set<string>();
-    const expenseLikeSources = new Set<string>();
-    for (const journal of journals) {
-      const module = (journal.source_module || "").toLowerCase();
-      const table = (journal.source_table || "").toLowerCase();
-      const ref = (journal.reference_type || "").toLowerCase();
-      if (
-        module === "expenses" ||
-        table === "expenses" ||
-        ref === "expense" ||
-        module === "vendor_purchases" ||
-        table === "purchase_bills" ||
-        ref === "purchase_bill" ||
-        module === "payroll" ||
-        table === "payroll_runs" ||
-        ref === "payroll"
-      ) {
-        expenseLikeEntryIds.add(journal.id);
-        if (journal.source_record_id) {
-          expenseLikeSources.add(
-            `${module}|${table}|${String(journal.source_record_id)}`,
-          );
-        }
-      }
-    }
-    const isCashSettlementTwin = (journalId: string) => {
-      const journal = journals.find((entry) => entry.id === journalId);
-      if (!journal) return false;
-      const module = (journal.source_module || "").toLowerCase();
-      const table = (journal.source_table || "").toLowerCase();
-      const ref = (journal.reference_type || "").toLowerCase();
-      if (
-        !(
-          module === "salary_payment" ||
-          table === "salary_payments" ||
-          ref === "salary_payment" ||
-          module === "vendor_purchases" ||
-          table === "vendor_payments" ||
-          ref === "vendor_payment"
-        )
-      ) {
-        return false;
-      }
-      if (expenseLikeEntryIds.has(journalId)) return false;
-      if (
-        journal.source_record_id &&
-        expenseLikeSources.has(
-          `${module}|${table}|${String(journal.source_record_id)}`,
-        )
-      ) {
-        return true;
-      }
-      // Payroll accrue-then-pay twins share no record id: when an expense-side
-      // payroll posting already exists for the same date/amount, the cash-only
-      // settlement twin is the duplicate.
-      return false;
-    };
-
-    const pushRow = (
-      kind: "income" | "expense",
-      accountId: string,
-      entryId: string,
-      date: string,
-      amount: number,
-    ) => {
-      const account = accountById.get(accountId);
-
-      /*
-       * The amount is signed (credit - debit for income, debit - credit for
-       * expense) so contra postings such as purchase returns net the figures
-       * down instead of inflating them.
-       */
-      if (
-        !account ||
-        account.account_type.toLowerCase() !== kind ||
-        amount === 0
-      ) {
-        return;
-      }
-
+    for (const receipt of receiptRows) {
+      const amount = toNum(receipt.amount);
+      if (!receipt.transaction_date || amount === 0) continue;
       rows.push({
-        kind,
-        accountName: account.name || "Unnamed account",
-        entryId,
-        date,
+        kind: "income",
+        accountName: receipt.receipt_type === "student_fee"
+          ? `Student Fees · ${receipt.credit_account || "Income"}`
+          : receipt.credit_account || "Other Income",
+        entryId: receipt.id,
+        date: receipt.transaction_date,
         amount,
       });
-    };
-
-    const journalDate = new Map(
-      journals.map((journal) => [journal.id, journal.entry_date]),
-    );
-
-    /* Journals created by the legacy bridge point back at their old txn. */
-    const legacyBridge = new Map(
-      journals
-        .filter((journal) => journal.reference_id)
-        .map((journal) => [String(journal.reference_id), journal.id]),
-    );
-
-    for (const line of journalLines) {
-      const date = journalDate.get(line.journal_entry_id);
-      if (!date) continue;
-      if (isCashSettlementTwin(line.journal_entry_id)) continue;
-
-      pushRow(
-        "income",
-        line.account_id,
-        line.journal_entry_id,
-        date,
-        toNum(line.credit) - toNum(line.debit),
-      );
-
-      pushRow(
-        "expense",
-        line.account_id,
-        line.journal_entry_id,
-        date,
-        toNum(line.debit) - toNum(line.credit),
-      );
     }
 
-    const legacyDate = new Map(
-      legacyTxns.map((txn) => [String(txn.id), txn.transaction_date]),
+    const journalBySource = new Map(
+      journals
+        .filter((journal) => journal.source_record_id)
+        .map((journal) => [String(journal.source_record_id), journal]),
     );
+    const accountById = new Map(accounts.map((account) => [account.id, account]));
+    const journalLinesByEntry = new Map<string, JournalLine[]>();
+    for (const line of journalLines) {
+      const group = journalLinesByEntry.get(line.journal_entry_id) || [];
+      group.push(line);
+      journalLinesByEntry.set(line.journal_entry_id, group);
+    }
 
-    for (const entry of legacyEnabled ? legacyEntries : []) {
-      const legacyId = String(entry.transaction_id);
+    for (const expense of expenseRows) {
+      const amount = toNum(expense.amount);
+      if (!expense.expense_date || amount === 0) continue;
+      const journal = journalBySource.get(expense.id);
+      const expenseLine = journal
+        ? (journalLinesByEntry.get(journal.id) || []).find((line) => {
+            const account = accountById.get(line.account_id);
+            return account?.account_type.toLowerCase() === "expense" && toNum(line.debit) > toNum(line.credit);
+          })
+        : undefined;
+      rows.push({
+        kind: "expense",
+        accountName: (expenseLine && accountById.get(expenseLine.account_id)?.name) || expense.description || "Expenses",
+        entryId: expense.id,
+        date: expense.expense_date,
+        amount,
+      });
+    }
 
-      /* Never double count a row the canonical journal already holds. */
-      if (supersededIds.has(legacyId) || legacyBridge.has(legacyId)) continue;
-
-      const date = legacyDate.get(legacyId);
-      if (!date) continue;
-
-      pushRow(
-        "income",
-        entry.account_id,
-        legacyId,
-        date,
-        toNum(entry.credit) - toNum(entry.debit),
-      );
-
-      pushRow(
-        "expense",
-        entry.account_id,
-        legacyId,
-        date,
-        toNum(entry.debit) - toNum(entry.credit),
-      );
+    const vendorNameById = new Map(vendors.map((vendor) => [vendor.id, vendor.name]));
+    for (const payment of vendorPaymentRows) {
+      const amount = toNum(payment.amount);
+      if (!payment.payment_date || amount === 0) continue;
+      rows.push({
+        kind: "expense",
+        accountName: vendorNameById.get(payment.vendor_id) || "Vendor Payments",
+        entryId: payment.id,
+        date: payment.payment_date,
+        amount,
+      });
     }
 
     return rows.sort((a, b) => a.date.localeCompare(b.date));
@@ -851,10 +755,10 @@ export default function StatisticsPage() {
     accounts,
     journals,
     journalLines,
-    legacyTxns,
-    legacyEntries,
-    legacyEnabled,
-    supersededIds,
+    receiptRows,
+    expenseRows,
+    vendorPaymentRows,
+    vendors,
   ]);
 
   /* ------------------------------------------------------ year selection */
@@ -885,7 +789,7 @@ export default function StatisticsPage() {
 
     /*
      * No academic years configured: fall back to Indian financial years
-     * (Apr - Mar) built from the money data itself, newest six only.
+     * (Apr - Mar) built from the money data itself.
      */
     if (options.length === 0) {
       const starts = new Map<string, Date>([
@@ -898,8 +802,7 @@ export default function StatisticsPage() {
       }
 
       const ordered = [...starts.values()]
-        .sort((a, b) => a.getTime() - b.getTime())
-        .slice(-6);
+        .sort((a, b) => a.getTime() - b.getTime());
 
       for (const start of ordered) {
         const end = toISO(new Date(start.getFullYear() + 1, 2, 31));
@@ -942,18 +845,23 @@ export default function StatisticsPage() {
    */
   const selected =
     yearOptions.find((option) => option.id === selectedYear) ||
+    yearOptions.find((option) => option.isAll) ||
     yearOptions.find((option) => option.isCurrent && !option.isAll) ||
     yearOptions[yearOptions.length - 1] ||
     null;
 
-  /*
-   * The whole period, never narrowed: it feeds the bars, the year-on-year
-   * panel and the "this month is x% of the year" context line.
-   */
+  const academicYearPeriods = useMemo(
+    () => yearOptions.filter((option) => !option.isAll),
+    [yearOptions],
+  );
+
+  /* The selected academic period supplies the totals and chart buckets. */
   const period = useMemo(
     () =>
-      selected ? summarize(postings, selected.start, selected.end) : null,
-    [postings, selected],
+      selected
+        ? summarize(postings, selected.start, selected.end, null, academicYearPeriods)
+        : null,
+    [postings, selected, academicYearPeriods],
   );
 
   /* Month chips only exist while the period is read month by month. */
@@ -980,27 +888,9 @@ export default function StatisticsPage() {
   const summary = useMemo(
     () =>
       selected
-        ? summarize(postings, selected.start, selected.end, focusKey)
+        ? summarize(postings, selected.start, selected.end, focusKey, academicYearPeriods)
         : null,
-    [postings, selected, focusKey],
-  );
-
-  /* Totals of every single year - used by the year-on-year infographic. */
-  const perYear = useMemo(
-    () =>
-      yearOptions
-        .filter((option) => !option.isAll)
-        .map((option) => {
-          const totals = summarize(postings, option.start, option.end);
-
-          return {
-            option,
-            income: totals.income,
-            expense: totals.expense,
-            net: totals.net,
-          };
-        }),
-    [yearOptions, postings],
+    [postings, selected, focusKey, academicYearPeriods],
   );
 
   /* ------------------------------------------------------- derived stats */
@@ -1008,95 +898,28 @@ export default function StatisticsPage() {
   const facts = useMemo(() => {
     if (!summary || !period) return null;
 
-    const { income, expense, net, buckets, elapsedBuckets } = summary;
-
-    const peakIncome = buckets.reduce<Bucket | null>(
-      (best, bucket) =>
-        !best || bucket.income > best.income ? bucket : best,
-      null,
-    );
-
-    const heaviest = buckets.reduce<Bucket | null>(
-      (best, bucket) =>
-        !best || bucket.expense > best.expense ? bucket : best,
-      null,
-    );
-
-    const busy = buckets.filter(
-      (bucket) => bucket.income > 0 || bucket.expense > 0,
-    );
+    const { income, expense, net } = summary;
 
     return {
       income,
       expense,
       net,
-      isMonth: focusKey !== null,
       scopeLabel: focusKey
         ? monthNameLong(focusKey)
         : selected
           ? selected.label
           : "Selected period",
-      yearIncome: period.income,
-      yearExpense: period.expense,
       incomeShareOfYear: share(income, period.income),
       expenseShareOfYear: share(expense, period.expense),
       isSurplus: net >= 0,
       savingsRate: income > 0 ? (net / income) * 100 : 0,
-      spendRatio:
-        income > 0 ? (expense / income) * 100 : expense > 0 ? 100 : 0,
       flowShare:
         income + expense > 0 ? (income / (income + expense)) * 100 : 50,
-      avgIncome: income / elapsedBuckets,
-      avgExpense: expense / elapsedBuckets,
-      peakIncome: peakIncome && peakIncome.income > 0 ? peakIncome : null,
-      heaviest: heaviest && heaviest.expense > 0 ? heaviest : null,
-      activePeriods: busy.length,
-      totalPeriods: buckets.length,
-      earnedPerRupee: expense > 0 ? income / expense : 0,
-      perStudent: studentCount > 0 ? income / studentCount : 0,
-      perStaff: staffCount > 0 ? expense / staffCount : 0,
-      topIncome: summary.incomeHeads[0] || null,
       topExpense: summary.expenseHeads[0] || null,
     };
-  }, [summary, period, focusKey, selected, studentCount, staffCount]);
-
-  const yearOverYear = useMemo(() => {
-    const index = perYear.findIndex(
-      (row) => row.option.id === selected?.id,
-    );
-
-    if (index <= 0) return null;
-
-    const current = perYear[index];
-    const previous = perYear[index - 1];
-
-    return {
-      label: previous.option.label,
-      incomeGrowth:
-        previous.income > 0
-          ? share(current.income - previous.income, previous.income)
-          : null,
-      expenseGrowth:
-        previous.expense > 0
-          ? share(current.expense - previous.expense, previous.expense)
-          : null,
-    };
-  }, [perYear, selected]);
-
-  const maxYearAmount = useMemo(
-    () =>
-      Math.max(
-        1,
-        ...perYear.map((row) => Math.max(row.income, row.expense)),
-      ),
-    [perYear],
-  );
+  }, [summary, period, focusKey, selected]);
 
   const periodWord = period?.granularity === "year" ? "year" : "month";
-
-  const incomeDelta = yearOverYear?.incomeGrowth ?? null;
-  const expenseDelta = yearOverYear?.expenseGrowth ?? null;
-  const deltaLabel = yearOverYear?.label ?? "previous year";
 
   const yearSegments = useMemo<Segment[]>(
     () =>
@@ -1185,11 +1008,7 @@ export default function StatisticsPage() {
             </Chip>
 
             <Chip tone="slate">
-              {(
-                journalLines.length +
-                (legacyEnabled ? legacyEntries.length : 0)
-              ).toLocaleString("en-IN")}{" "}
-              entries read
+              {(receiptRows.length + expenseRows.length + vendorPaymentRows.length).toLocaleString("en-IN")} records included
             </Chip>
 
             {loading ? (
@@ -1275,7 +1094,7 @@ export default function StatisticsPage() {
                     Every {periodWord} from {prettyDate(selected.start)} to{" "}
                     {prettyDate(selected.end)}
                     {selected.isAll
-                      ? ", grouped by financial year."
+                      ? ", grouped by academic year."
                       : ", month by month."}
                   </>
                 )}
@@ -1290,7 +1109,7 @@ export default function StatisticsPage() {
         {summary && facts && period ? (
           <>
             {/* -------------------------------------------------- headline */}
-            <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
               <Kpi
                 icon={Coins}
                 tone="from-[#30D158] to-[#00B389]"
@@ -1298,31 +1117,31 @@ export default function StatisticsPage() {
                 value={money(facts.income)}
                 caption={
                   focusKey
-                    ? `${monthNameLong(focusKey)} receipts`
-                    : `Average ${shortMoney(facts.avgIncome)} per ${periodWord}`
+                    ? `${monthNameLong(focusKey)} income`
+                    : selected?.isAll
+                      ? "Total across all academic years"
+                      : `${selected?.label || "Selected period"} total`
                 }
                 meter={facts.flowShare}
                 meterClass="from-[#30D158] to-[#7BEBAE]"
-                delta={focusKey ? null : incomeDelta}
                 goodWhenUp
-                deltaHint={deltaLabel}
               />
 
               <Kpi
                 icon={Banknote}
                 tone="from-[#FF453A] to-[#FF9F0A]"
-                label="Money spent"
+                label="Expenditure"
                 value={money(facts.expense)}
                 caption={
                   focusKey
-                    ? `${monthNameLong(focusKey)} payments`
-                    : `Average ${shortMoney(facts.avgExpense)} per ${periodWord}`
+                    ? `${monthNameLong(focusKey)} expenditure`
+                    : selected?.isAll
+                      ? "Total across all academic years"
+                      : `${selected?.label || "Selected period"} total`
                 }
                 meter={100 - facts.flowShare}
                 meterClass="from-[#FF453A] to-[#FFB340]"
-                delta={focusKey ? null : expenseDelta}
                 goodWhenUp={false}
-                deltaHint={deltaLabel}
               />
 
               <Kpi
@@ -1338,20 +1157,6 @@ export default function StatisticsPage() {
                 meter={clamp(Math.abs(facts.savingsRate))}
                 meterClass="from-[#0A84FF] to-[#64D2FF]"
               />
-
-              <Kpi
-                icon={Percent}
-                tone="from-[#5E5CE6] to-[#BF5AF2]"
-                label="Spent per ₹100 earned"
-                value={`\u20B9${Math.round(facts.spendRatio)}`}
-                caption={
-                  facts.earnedPerRupee > 0
-                    ? `\u20B9${facts.earnedPerRupee.toFixed(2)} earned per \u20B91 spent`
-                    : "Nothing earned against this spend"
-                }
-                meter={clamp(facts.spendRatio)}
-                meterClass="from-[#5E5CE6] to-[#DA8FFF]"
-              />
             </section>
 
             {/* ----------------------------------------------- rhythm bars */}
@@ -1363,6 +1168,8 @@ export default function StatisticsPage() {
                 subtitle={
                   focusKey
                     ? `${facts.scopeLabel} is highlighted - tap any ${periodWord} to focus it`
+                    : selected?.isAll && period.granularity === "year"
+                      ? "Select an academic year to view its monthly totals"
                     : `Tap a ${periodWord} to focus every tile on it`
                 }
                 right={
@@ -1378,64 +1185,49 @@ export default function StatisticsPage() {
                 maxBucket={period.maxBucket}
                 focusKey={focusKey}
                 granularity={period.granularity}
-                onPick={(key) => pickMonth(key === focusKey ? ALL : key)}
+                onPick={(key) => {
+                  if (selected?.isAll && period.granularity === "year") {
+                    pickYear(key);
+                    return;
+                  }
+                  pickMonth(key === focusKey ? ALL : key);
+                }}
               />
-
-              <div className="mt-5 flex items-center gap-3 rounded-2xl bg-white/55 px-3.5 py-3 ring-1 ring-white/70">
-                <p className="w-16 shrink-0 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                  Split
-                </p>
-
-                <div className="flex h-2.5 flex-1 overflow-hidden rounded-full bg-slate-200/70">
-                  <span
-                    className="print-exact h-full rounded-l-full bg-gradient-to-r from-[#30D158] to-[#7BEBAE]"
-                    style={{ width: `${clamp(facts.flowShare)}%` }}
-                  />
-                  <span className="print-exact h-full flex-1 bg-gradient-to-r from-[#FF9F0A] to-[#FF453A]" />
-                </div>
-
-                <p className="shrink-0 text-[12px] font-semibold text-slate-600">
-                  {Math.round(facts.flowShare)} /{" "}
-                  {Math.max(0, 100 - Math.round(facts.flowShare))}
-                </p>
-              </div>
             </Glass>
 
             {/* ----------------------------------------------- breakdowns */}
-            <section className="grid gap-3 lg:grid-cols-3">
-              <Glass className="p-5 sm:p-6">
+            <section className="grid gap-3 xl:grid-cols-3">
+              <Glass className="min-w-0 p-5 sm:p-6">
                 <PanelHead
                   icon={GraduationCap}
                   tone="from-[#0A84FF] to-[#64D2FF]"
                   title="Fee collection"
                   subtitle="Student fees paid"
-                  right={<Chip tone="blue">{shortMoney(feeCollectionTotal(summary.incomeHeads))}</Chip>}
+                  right={<Chip tone="blue">{shortMoney(summary.feeCollectionIncome)}</Chip>}
                 />
 
                 <Breakdown
                   slices={summary.incomeHeads.filter((slice) => isFeeCollectionHead(slice.name))}
-                  ringLabel="fee collection"
                   empty="No fee collection in this period"
                 />
               </Glass>
 
-              <Glass className="p-5 sm:p-6">
+              <Glass className="min-w-0 p-5 sm:p-6">
                 <PanelHead
                   icon={Coins}
                   tone="from-[#30D158] to-[#00B389]"
                   title="Other income"
                   subtitle="All non-fee income"
-                  right={<Chip tone="mint">{shortMoney(otherIncomeTotal(summary.incomeHeads))}</Chip>}
+                  right={<Chip tone="mint">{shortMoney(summary.otherIncome)}</Chip>}
                 />
 
                 <Breakdown
                   slices={summary.incomeHeads.filter((slice) => !isFeeCollectionHead(slice.name))}
-                  ringLabel="other income"
                   empty="No other income in this period"
                 />
               </Glass>
 
-              <Glass className="p-5 sm:p-6">
+              <Glass className="min-w-0 p-5 sm:p-6">
                 <PanelHead
                   icon={Banknote}
                   tone="from-[#FF453A] to-[#FF9F0A]"
@@ -1450,191 +1242,10 @@ export default function StatisticsPage() {
 
                 <Breakdown
                   slices={summary.expenseHeads}
-                  ringLabel="expenditure"
                   empty="No expenditure in this period"
                 />
               </Glass>
             </section>
-
-            {/* ------------------------------------------------ fast facts */}
-            <Glass className="p-5 sm:p-6">
-              <PanelHead
-                icon={Sparkles}
-                tone="from-[#FF9F0A] to-[#FF375F]"
-                title="Fast facts"
-                subtitle={`${facts.scopeLabel} at a glance`}
-              />
-
-              <section className="grid gap-2.5 sm:grid-cols-2 xl:grid-cols-4">
-                {facts.isMonth ? (
-                  <>
-                    <Fact
-                      icon={CircleDollarSign}
-                      tone="from-[#30D158] to-[#00B389]"
-                      label="Share of year income"
-                      value={percent(facts.incomeShareOfYear)}
-                      hint={`${money(facts.yearIncome)} across the period`}
-                    />
-
-                    <Fact
-                      icon={Wallet}
-                      tone="from-[#FF453A] to-[#FF9F0A]"
-                      label="Share of year spend"
-                      value={percent(facts.expenseShareOfYear)}
-                      hint={`${money(facts.yearExpense)} across the period`}
-                    />
-                  </>
-                ) : (
-                  <>
-                    <Fact
-                      icon={Trophy}
-                      tone="from-[#30D158] to-[#00B389]"
-                      label={`Best ${periodWord} for income`}
-                      value={
-                        facts.peakIncome
-                          ? shortMoney(facts.peakIncome.income)
-                          : "\u2014"
-                      }
-                      hint={
-                        facts.peakIncome
-                          ? `${facts.peakIncome.label} earned the most`
-                          : "No income yet"
-                      }
-                    />
-
-                    <Fact
-                      icon={Flame}
-                      tone="from-[#FF453A] to-[#FF9F0A]"
-                      label={`Heaviest ${periodWord}`}
-                      value={
-                        facts.heaviest
-                          ? shortMoney(facts.heaviest.expense)
-                          : "\u2014"
-                      }
-                      hint={
-                        facts.heaviest
-                          ? `${facts.heaviest.label} spent the most`
-                          : "No spending yet"
-                      }
-                    />
-                  </>
-                )}
-
-                <Fact
-                  icon={Receipt}
-                  tone="from-[#0A84FF] to-[#64D2FF]"
-                  label="Money-in vouchers"
-                  value={summary.incomeVouchers.toLocaleString("en-IN")}
-                  hint="entries carrying an income line"
-                />
-
-                <Fact
-                  icon={Landmark}
-                  tone="from-[#5E5CE6] to-[#0A84FF]"
-                  label="Money-out vouchers"
-                  value={summary.expenseVouchers.toLocaleString("en-IN")}
-                  hint="entries carrying a spend line"
-                />
-
-                <Fact
-                  icon={GraduationCap}
-                  tone="from-[#FFD60A] to-[#FF9F0A]"
-                  label="Income per student"
-                  value={shortMoney(facts.perStudent)}
-                  hint={
-                    studentCount > 0
-                      ? `${studentCount.toLocaleString("en-IN")} students on roll`
-                      : "No students on record"
-                  }
-                />
-
-                <Fact
-                  icon={Users}
-                  tone="from-[#BF5AF2] to-[#FF375F]"
-                  label="Spend per staff member"
-                  value={shortMoney(facts.perStaff)}
-                  hint={
-                    staffCount > 0
-                      ? `${staffCount.toLocaleString("en-IN")} staff on roll`
-                      : "No staff on record"
-                  }
-                />
-
-                <Fact
-                  icon={IndianRupee}
-                  tone="from-[#30D158] to-[#64D2FF]"
-                  label="Earned per ₹1 spent"
-                  value={
-                    facts.earnedPerRupee > 0
-                      ? `₹${facts.earnedPerRupee.toFixed(2)}`
-                      : "\u2014"
-                  }
-                  hint={`Spending is ${percent(facts.spendRatio)} of income`}
-                />
-
-                <Fact
-                  icon={Layers}
-                  tone="from-[#64D2FF] to-[#0A84FF]"
-                  label={`Active ${periodWord}s`}
-                  value={`${facts.activePeriods} / ${facts.totalPeriods}`}
-                  hint={`Avg ${shortMoney(facts.avgIncome)} in per ${periodWord}`}
-                />
-
-                {facts.topIncome ? (
-                  <Fact
-                    icon={Award}
-                    tone="from-[#30D158] to-[#64D2FF]"
-                    label="Top income head"
-                    value={shortMoney(facts.topIncome.amount)}
-                    hint={`${facts.topIncome.name} · ${percent(facts.topIncome.percentage)}`}
-                  />
-                ) : null}
-
-                {facts.topExpense ? (
-                  <Fact
-                    icon={PiggyBank}
-                    tone="from-[#FF453A] to-[#BF5AF2]"
-                    label="Top spend head"
-                    value={shortMoney(facts.topExpense.amount)}
-                    hint={`${facts.topExpense.name} · ${percent(facts.topExpense.percentage)}`}
-                  />
-                ) : null}
-              </section>
-            </Glass>
-
-            {/* -------------------------------------------- year on year */}
-            <Glass className="p-5 sm:p-6">
-              <PanelHead
-                icon={Trophy}
-                tone="from-[#5E5CE6] to-[#0A84FF]"
-                title="Year on year"
-                subtitle="Every year on record - tap one to switch to it"
-                right={
-                  perYear.length > 0 ? (
-                    <Chip tone="violet">{perYear.length} years</Chip>
-                  ) : null
-                }
-              />
-
-              {perYear.length === 0 ? (
-                <Empty text="No years to compare yet." />
-              ) : (
-                <section className="space-y-1.5">
-                  {perYear.map((row) => (
-                    <YearRow
-                      key={row.option.id}
-                      label={row.option.label}
-                      income={row.income}
-                      expense={row.expense}
-                      net={row.net}
-                      max={maxYearAmount}
-                      active={row.option.id === selected?.id}
-                      onPick={() => pickYear(row.option.id)}
-                    />
-                  ))}
-                </section>
-              )}
-            </Glass>
 
             <p className="px-1 pb-2 text-[11px] leading-relaxed text-slate-400">
               Statistics only. Figures are net of contra entries such as
@@ -1828,7 +1439,7 @@ function Segmented({
   if (items.length === 0) return null;
 
   return (
-    <div className="flex gap-1 overflow-x-auto rounded-[18px] border border-white/70 bg-white/55 p-1 shadow-[inset_0_1px_2px_rgba(15,23,42,0.06)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+    <div className="flex flex-wrap gap-1 rounded-[18px] border border-white/70 bg-white/55 p-1 shadow-[inset_0_1px_2px_rgba(15,23,42,0.06)]">
       {items.map((item) => {
         const active = item.id === value;
 
@@ -1838,7 +1449,7 @@ function Segmented({
             type="button"
             aria-pressed={active}
             onClick={() => onChange(item.id)}
-            className={`shrink-0 rounded-[14px] transition active:scale-[0.98] ${
+            className={`rounded-[14px] transition active:scale-[0.98] ${
               compact ? "px-3 py-1.5" : "px-4 py-2"
             } ${
               active
@@ -2031,7 +1642,7 @@ function MonthBars({
   }
 
   return (
-    <div className="flex items-end gap-1.5 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+    <div className="grid grid-cols-4 items-end gap-1.5 pb-1 sm:grid-cols-6 lg:grid-cols-8">
       {buckets.map((bucket) => {
         const active = focusKey === bucket.key;
         const dim = focusKey !== null && !active;
@@ -2058,7 +1669,7 @@ function MonthBars({
             title={`${label} - in ${money(bucket.income)}, out ${money(
               bucket.expense,
             )}`}
-            className={`flex min-w-[3.5rem] flex-1 flex-col items-center gap-1.5 rounded-2xl px-1.5 pb-2 pt-2.5 transition active:scale-[0.98] ${
+            className={`flex min-w-0 flex-col items-center gap-1.5 rounded-2xl px-1.5 pb-2 pt-2.5 transition active:scale-[0.98] ${
               active
                 ? "bg-white/85 ring-1 ring-white shadow-[0_12px_26px_-18px_rgba(15,23,42,0.5)]"
                 : "hover:bg-white/50"
@@ -2106,239 +1717,98 @@ function MonthBars({
 
 function Breakdown({
   slices,
-  ringLabel,
   empty,
 }: {
   slices: Slice[];
-  ringLabel: string;
   empty: string;
 }) {
   const shown = slices.reduce((sum, slice) => sum + slice.amount, 0);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{ pointerId: number; startX: number; scrollLeft: number } | null>(null);
 
   if (slices.length === 0 || shown <= 0) return <Empty text={empty} />;
 
-  const radius = 54;
-  const circumference = 2 * Math.PI * radius;
+  function startDrag(event: PointerEvent<HTMLDivElement>) {
+    if (event.pointerType !== "mouse" || !scrollRef.current) return;
+    dragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      scrollLeft: scrollRef.current.scrollLeft,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
 
-  /* Cumulative ring offsets, built up front so render never mutates. */
-  const arcs = slices.map((slice, index) => {
-    const length = (clamp(slice.percentage) / 100) * circumference;
+  function moveDrag(event: PointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId || !scrollRef.current) return;
+    scrollRef.current.scrollLeft = drag.scrollLeft - (event.clientX - drag.startX);
+  }
 
-    const before = slices
-      .slice(0, index)
-      .reduce(
-        (sum, item) => sum + (clamp(item.percentage) / 100) * circumference,
-        0,
-      );
-
-    return { key: slice.name, color: slice.color, length, before };
-  });
+  function stopDrag(event: PointerEvent<HTMLDivElement>) {
+    if (dragRef.current?.pointerId !== event.pointerId) return;
+    dragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }
 
   return (
-    <div className="flex flex-col items-center gap-5 sm:flex-row sm:items-start">
-      <div className="relative h-[168px] w-[168px] shrink-0">
-        <svg viewBox="0 0 140 140" className="h-full w-full -rotate-90">
-          <circle
-            cx="70"
-            cy="70"
-            r={radius}
-            fill="none"
-            stroke="rgba(148,163,184,0.18)"
-            strokeWidth="16"
-          />
-
-          {arcs.map((arc) => {
-            const dash = Math.max(arc.length - 3, 1);
-
-            return (
-              <circle
-                key={arc.key}
-                cx="70"
-                cy="70"
-                r={radius}
-                fill="none"
-                stroke={arc.color}
-                strokeWidth="16"
-                strokeLinecap="round"
-                strokeDasharray={`${dash} ${circumference - dash}`}
-                strokeDashoffset={-arc.before}
-              />
-            );
-          })}
-        </svg>
-
-        <div className="absolute inset-0 flex flex-col items-center justify-center">
-          <span className="rounded-full bg-white/75 px-3 py-1 text-[17px] font-semibold tracking-[-0.02em] text-slate-900 shadow-[0_4px_14px_-8px_rgba(15,23,42,0.5)] backdrop-blur">
-            {shortMoney(shown)}
-          </span>
-
-          <span className="mt-1 text-[10px] font-bold uppercase tracking-[0.14em] text-slate-400">
-            {ringLabel}
-          </span>
-        </div>
+    <section className="mt-4 min-w-0 overflow-hidden rounded-xl border border-slate-200 bg-white">
+      <div
+        ref={scrollRef}
+        onPointerDown={startDrag}
+        onPointerMove={moveDrag}
+        onPointerUp={stopDrag}
+        onPointerCancel={stopDrag}
+        className="cursor-grab overflow-x-auto overscroll-x-contain active:cursor-grabbing"
+        style={{ touchAction: "pan-x" }}
+        aria-label="Account breakdown; drag horizontally to view amounts"
+      >
+        <table className="w-max min-w-full border-collapse text-left">
+          <thead className="border-b border-slate-200 bg-slate-50 text-[10px] font-bold uppercase tracking-wide text-slate-500">
+            <tr>
+              <th className="whitespace-nowrap px-3 py-2 font-bold">Account head</th>
+              <th className="whitespace-nowrap px-3 py-2 text-right font-bold">Amount</th>
+              <th className="whitespace-nowrap px-3 py-2 text-right font-bold">Share</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {slices.map((slice) => (
+              <tr key={slice.name} className="text-xs">
+                <td className="whitespace-nowrap px-3 py-3 font-semibold text-slate-800" title={slice.name}>
+                  <span className="inline-flex items-center gap-2.5">
+                    <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: slice.color }} />
+                    {slice.name}
+                  </span>
+                </td>
+                <td className="whitespace-nowrap px-3 py-3 text-right font-semibold tabular-nums text-slate-700">
+                  {money(slice.amount)}
+                </td>
+                <td className="whitespace-nowrap px-3 py-3 text-right tabular-nums text-slate-500">
+                  {Math.round(slice.percentage)}%
+                </td>
+              </tr>
+            ))}
+          </tbody>
+          <tfoot className="border-t border-slate-200 bg-slate-50 text-xs font-bold text-slate-700">
+            <tr>
+              <td className="whitespace-nowrap px-3 py-2.5">Total</td>
+              <td className="whitespace-nowrap px-3 py-2.5 text-right tabular-nums">{money(shown)}</td>
+              <td />
+            </tr>
+          </tfoot>
+        </table>
       </div>
-
-      <section className="w-full space-y-1.5">
-        {slices.map((slice, index) => (
-          <div
-            key={slice.name}
-            className="flex items-center gap-3 rounded-[18px] bg-white/55 px-3 py-2 ring-1 ring-white/70"
-          >
-            <span
-              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-white"
-              style={{ background: slice.color }}
-            >
-              {index + 1}
-            </span>
-
-            <span className="min-w-0 flex-1">
-              <span className="block truncate text-[13px] font-semibold text-slate-800">
-                {slice.name}
-              </span>
-
-              <span className="mt-1 block h-1 w-full overflow-hidden rounded-full bg-slate-300/40">
-                <span
-                  className="print-exact block h-full rounded-full"
-                  style={{
-                    width: `${clamp(slice.percentage)}%`,
-                    background: slice.color,
-                  }}
-                />
-              </span>
-            </span>
-
-            <span className="shrink-0 text-right">
-              <span className="block text-[12px] font-semibold text-slate-700">
-                {shortMoney(slice.amount)}
-              </span>
-
-              <span className="block text-[11px] text-slate-400">
-                {Math.round(slice.percentage)}%
-              </span>
-            </span>
-          </div>
-        ))}
-      </section>
-    </div>
+    </section>
   );
 }
 
 /* ----------------------------------------------------------- small parts */
 
-function Fact({
-  icon,
-  tone,
-  label,
-  value,
-  hint,
-}: {
-  icon: LucideIcon;
-  tone: string;
-  label: string;
-  value: string;
-  hint: string;
-}) {
-  return (
-    <div className="relative overflow-hidden rounded-[22px] border border-white/70 bg-white/55 p-3.5 shadow-[inset_0_1px_1px_rgba(255,255,255,0.8),0_8px_20px_-16px_rgba(15,23,42,0.45)] backdrop-blur-xl">
-      <span
-        aria-hidden
-        className="pointer-events-none absolute inset-x-0 top-0 h-1/2 bg-gradient-to-b from-white/70 to-transparent"
-      />
-
-      <div className="relative">
-        <Squircle icon={icon} tone={tone} />
-
-        <p className="mt-2.5 text-[11px] font-bold uppercase tracking-[0.1em] text-slate-400">
-          {label}
-        </p>
-
-        <p className="mt-0.5 truncate text-[18px] font-semibold tracking-[-0.02em] text-slate-900">
-          {value}
-        </p>
-
-        <p className="mt-0.5 truncate text-[11px] text-slate-500">{hint}</p>
-      </div>
-    </div>
-  );
-}
-
-function YearRow({
-  label,
-  income,
-  expense,
-  net,
-  max,
-  active,
-  onPick,
-}: {
-  label: string;
-  income: number;
-  expense: number;
-  net: number;
-  max: number;
-  active: boolean;
-  onPick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onPick}
-      aria-pressed={active}
-      className={`flex w-full items-center gap-3 rounded-[20px] px-3 py-2.5 text-left transition active:scale-[0.99] ${
-        active
-          ? "bg-white/85 ring-1 ring-[#0A84FF]/25 shadow-[0_10px_26px_-18px_rgba(15,23,42,0.5)]"
-          : "hover:bg-white/50"
-      }`}
-    >
-      <span className="w-20 shrink-0 truncate text-[12px] font-bold text-slate-600">
-        {label}
-      </span>
-
-      <span className="flex min-w-0 flex-1 flex-col gap-1">
-        <span className="flex items-center gap-2">
-          <span className="h-2 flex-1 overflow-hidden rounded-full bg-slate-300/35">
-            <span
-              className="print-exact block h-full rounded-full bg-gradient-to-r from-[#30D158] to-[#7BEBAE]"
-              style={{ width: `${clamp(share(income, max))}%` }}
-            />
-          </span>
-
-          <span className="w-16 shrink-0 text-right text-[11px] font-semibold text-slate-500">
-            {shortMoney(income)}
-          </span>
-        </span>
-
-        <span className="flex items-center gap-2">
-          <span className="h-2 flex-1 overflow-hidden rounded-full bg-slate-300/35">
-            <span
-              className="print-exact block h-full rounded-full bg-gradient-to-r from-[#FF9F0A] to-[#FF453A]"
-              style={{ width: `${clamp(share(expense, max))}%` }}
-            />
-          </span>
-
-          <span className="w-16 shrink-0 text-right text-[11px] font-semibold text-slate-500">
-            {shortMoney(expense)}
-          </span>
-        </span>
-      </span>
-
-      <span
-        className={`w-20 shrink-0 rounded-full px-2 py-1 text-center text-[11px] font-bold ${
-          net >= 0
-            ? "bg-[#30D158]/10 text-[#0A7A2E]"
-            : "bg-[#FF453A]/10 text-[#B3261E]"
-        }`}
-      >
-        {shortMoney(net)}
-      </span>
-    </button>
-  );
-}
-
 function SkeletonBoard() {
   return (
     <div className="space-y-3">
-      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
         {[0, 1, 2, 3].map((slot) => (
           <div
             key={slot}

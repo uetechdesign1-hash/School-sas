@@ -416,6 +416,10 @@ export default function StudentsPage() {
       }
 
       for (const student of loadedStudents) {
+        if (student.status !== "active") {
+          feeMap[student.id] = 0;
+          continue;
+        }
         if (!currentYear || !student.class_id) {
           feeMap[student.id] = 0;
           continue;

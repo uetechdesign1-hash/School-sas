@@ -51,6 +51,15 @@ type FeeBill = {
   student_id: string;
   academic_year_id: string | null;
   bill_date: string | null;
+  total_amount: number | null;
+  paid_amount: number | null;
+  balance_amount: number | null;
+  status?: string | null;
+};
+
+type FeePaymentRow = {
+  bill_id: string | null;
+  amount: number | null;
 };
 
 type FeeBillItem = {
@@ -100,15 +109,17 @@ type ReportRow = {
   name: string;
   className: string;
   sectionName: string;
+  assigned: number;
   paid: Record<string, number>;
   concession: number;
   total: number;
+  pending: number;
 };
 
 type ReportData = {
   categories: ReportCategory[];
   rows: ReportRow[];
-  totals: { paid: Record<string, number>; concession: number; total: number };
+  totals: { assigned: number; paid: Record<string, number>; concession: number; total: number; pending: number };
 };
 
 // Supabase builders are thenable and can be paged with .range(). Kept
@@ -202,6 +213,7 @@ function FeeStructureReport() {
   const [billItems, setBillItems] = useState<FeeBillItem[]>([]);
   const [allocations, setAllocations] = useState<FeeAllocation[]>([]);
   const [concessions, setConcessions] = useState<FeeConcession[]>([]);
+  const [payments, setPayments] = useState<FeePaymentRow[]>([]);
   const [structures, setStructures] = useState<StructureRow[]>([]);
   const [structureItems, setStructureItems] = useState<StructureItem[]>([]);
   const [enrollments, setEnrollments] = useState<EnrollmentRow[]>([]);
@@ -308,12 +320,12 @@ function FeeStructureReport() {
 
       // The big fee tables are paged so schools with many students are not
       // cut off by the default row cap.
-      const [billRows, itemRows, allocationRows, concessionRows, enrollmentResult] =
+      const [billRows, itemRows, allocationRows, concessionRows, paymentRows, enrollmentResult] =
         await Promise.all([
           fetchAll(
             supabase
               .from("fee_bills")
-              .select("id, student_id, academic_year_id, bill_date")
+              .select("id, student_id, academic_year_id, bill_date, total_amount, paid_amount, balance_amount, status")
               .eq("school_id", schoolId)
               .order("id", { ascending: true }),
           ),
@@ -337,6 +349,13 @@ function FeeStructureReport() {
             supabase
               .from("fee_concessions")
               .select("student_id, bill_id, amount")
+              .eq("school_id", schoolId)
+              .order("id", { ascending: true }),
+          ),
+          fetchAll(
+            supabase
+              .from("fee_payments")
+              .select("bill_id, amount")
               .eq("school_id", schoolId)
               .order("id", { ascending: true }),
           ),
@@ -383,6 +402,7 @@ function FeeStructureReport() {
       setBillItems(itemRows as FeeBillItem[]);
       setAllocations(allocationRows as FeeAllocation[]);
       setConcessions(concessionRows as FeeConcession[]);
+      setPayments(paymentRows as FeePaymentRow[]);
       setEnrollments(
         enrollmentResult.error
           ? []
@@ -445,7 +465,7 @@ function FeeStructureReport() {
     const empty: ReportData = {
       categories: [],
       rows: [],
-      totals: { paid: {}, concession: 0, total: 0 },
+      totals: { assigned: 0, paid: {}, concession: 0, total: 0, pending: 0 },
     };
 
     const year = academicYears.find((item) => item.id === yearId);
@@ -543,11 +563,48 @@ function FeeStructureReport() {
 
     // Bills of the selected academic year for the shown students only.
     const visibleIds = new Set(visible.map((entry) => entry.student.id));
+    const studentById = new Map(students.map((student) => [student.id, student]));
     const studentOfBill = new Map<string, string>();
+    const assignedByStudent = new Map<string, number>();
+    const billedPaidByStudent = new Map<string, number>();
+    const pendingByStudent = new Map<string, number>();
     for (const bill of bills) {
+      if ((bill.status || "").toLowerCase() === "cancelled") continue;
       if (bill.academic_year_id !== year.id) continue;
       if (!visibleIds.has(bill.student_id)) continue;
       studentOfBill.set(bill.id, bill.student_id);
+      assignedByStudent.set(
+        bill.student_id,
+        round2((assignedByStudent.get(bill.student_id) || 0) + Number(bill.total_amount || 0)),
+      );
+      billedPaidByStudent.set(
+        bill.student_id,
+        round2((billedPaidByStudent.get(bill.student_id) || 0) + Number(bill.paid_amount || 0)),
+      );
+      if (
+        studentById.get(bill.student_id)?.status?.toLowerCase() === "active" &&
+        (bill.status || "").toLowerCase() !== "carried_forward"
+      ) {
+        pendingByStudent.set(
+          bill.student_id,
+          round2((pendingByStudent.get(bill.student_id) || 0) + Math.max(Number(bill.balance_amount || 0), 0)),
+        );
+      }
+    }
+
+    const receiptPaidByStudent = new Map<string, number>();
+    for (const payment of payments) {
+      if (!payment.bill_id) continue;
+      const studentId = studentOfBill.get(payment.bill_id);
+      if (!studentId) continue;
+      receiptPaidByStudent.set(
+        studentId,
+        round2((receiptPaidByStudent.get(studentId) || 0) + Number(payment.amount || 0)),
+      );
+    }
+    const paidTotalByStudent = new Map(billedPaidByStudent);
+    for (const [studentId, receiptTotal] of receiptPaidByStudent) {
+      paidTotalByStudent.set(studentId, receiptTotal);
     }
 
     const keyOfItem = (item: FeeBillItem) =>
@@ -618,6 +675,24 @@ function FeeStructureReport() {
       paidByStudent.set(studentId, bucket);
     }
 
+    const unallocatedByStudent = new Map<string, number>();
+    for (const [studentId, paidTotal] of paidTotalByStudent) {
+      const allocatedTotal = Object.values(paidByStudent.get(studentId) || {}).reduce(
+        (sum, amount) => sum + amount,
+        0,
+      );
+      const unallocated = round2(Math.max(paidTotal - allocatedTotal, 0));
+      if (unallocated > 0) unallocatedByStudent.set(studentId, unallocated);
+    }
+    if (unallocatedByStudent.size > 0) {
+      categories.push({ key: "__unallocated__", label: "Other / Unallocated" });
+      for (const [studentId, amount] of unallocatedByStudent) {
+        const bucket = paidByStudent.get(studentId) || {};
+        bucket.__unallocated__ = amount;
+        paidByStudent.set(studentId, bucket);
+      }
+    }
+
     // Concessions given for this year's bills, per student.
     const concessionByStudent: Record<string, number> = {};
     for (const concession of concessions) {
@@ -651,16 +726,20 @@ function FeeStructureReport() {
           (placement.section_id
             ? sectionMap.get(placement.section_id)?.name
             : undefined) || "—",
+        assigned: round2(assignedByStudent.get(student.id) || 0),
         paid,
         concession,
-        total: round2(round2(paidTotal) - concession),
+        total: round2(paidTotalByStudent.get(student.id) ?? paidTotal),
+        pending: round2(pendingByStudent.get(student.id) || 0),
       };
     });
 
     const totals: ReportData["totals"] = {
+      assigned: 0,
       paid: {},
       concession: 0,
       total: 0,
+      pending: 0,
     };
     for (const category of categories) totals.paid[category.key] = 0;
     for (const row of rows) {
@@ -670,7 +749,9 @@ function FeeStructureReport() {
         );
       }
       totals.concession = round2(totals.concession + row.concession);
+      totals.assigned = round2(totals.assigned + row.assigned);
       totals.total = round2(totals.total + row.total);
+      totals.pending = round2(totals.pending + row.pending);
     }
 
     return { categories, rows, totals };
@@ -682,6 +763,7 @@ function FeeStructureReport() {
     billItems,
     allocations,
     concessions,
+    payments,
     structures,
     structureItems,
     enrollments,
@@ -711,9 +793,11 @@ function FeeStructureReport() {
       "Name",
       "Class",
       "Section",
+      "Fee Assigned",
       ...report.categories.map((category) => category.label),
       "Concession",
       "Total",
+      "Pending Fee",
     ];
 
     // Columns after index 3 (SI, Name, Class, Section) are numeric.
@@ -725,9 +809,11 @@ function FeeStructureReport() {
         row.name,
         row.className,
         row.sectionName,
+        round2(row.assigned),
         ...report.categories.map((category) => round2(row.paid[category.key])),
         round2(row.concession),
         round2(row.total),
+        round2(row.pending),
       ],
     );
 
@@ -736,11 +822,13 @@ function FeeStructureReport() {
       "Total",
       "",
       "",
+      round2(report.totals.assigned),
       ...report.categories.map((category) =>
         round2(report.totals.paid[category.key]),
       ),
       round2(report.totals.concession),
       round2(report.totals.total),
+      round2(report.totals.pending),
     ];
 
     return { headers, rows, totalsRow, numericFrom };
@@ -815,8 +903,10 @@ function FeeStructureReport() {
       if (index === 1) return 1.55; // Name
       if (index === 2) return 1.15; // Class
       if (index === 3) return 0.95; // Section
-      if (index === headers.length - 1) return 1.05; // Total
-      if (index === headers.length - 2) return 1; // Concession
+      if (index === headers.length - 1) return 1.05; // Pending Fee
+      if (index === headers.length - 2) return 1.05; // Total
+      if (index === headers.length - 3) return 1; // Concession
+      if (index === 4) return 1.15; // Fee Assigned
       return 1.05; // fee categories
     });
     const weightSum = weights.reduce((sum, weight) => sum + weight, 0);
@@ -1097,6 +1187,10 @@ function FeeStructureReport() {
                       Section
                     </th>
 
+                    <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wide text-blue-700">
+                      Fee Assigned
+                    </th>
+
                     {report.categories.map((category) => (
                       <th
                         key={category.key}
@@ -1112,6 +1206,10 @@ function FeeStructureReport() {
 
                     <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wide text-slate-700">
                       Total
+                    </th>
+
+                    <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wide text-amber-700">
+                      Pending Fee
                     </th>
                   </tr>
                 </thead>
@@ -1136,6 +1234,10 @@ function FeeStructureReport() {
                         {row.sectionName}
                       </td>
 
+                      <td className="px-4 py-3 text-right font-semibold tabular-nums text-blue-800">
+                        {formatAmount(row.assigned)}
+                      </td>
+
                       {report.categories.map((category) => (
                         <td
                           key={category.key}
@@ -1157,6 +1259,10 @@ function FeeStructureReport() {
                       <td className="px-4 py-3 text-right font-bold tabular-nums text-slate-900">
                         {formatAmount(row.total)}
                       </td>
+
+                      <td className="px-4 py-3 text-right font-semibold tabular-nums text-amber-800">
+                        {formatAmount(row.pending)}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -1169,6 +1275,10 @@ function FeeStructureReport() {
                     >
                       Total ({report.rows.length} student
                       {report.rows.length === 1 ? "" : "s"})
+                    </td>
+
+                    <td className="px-4 py-3 text-right font-bold tabular-nums text-blue-800">
+                      {formatAmount(report.totals.assigned)}
                     </td>
 
                     {report.categories.map((category) => (
@@ -1187,6 +1297,10 @@ function FeeStructureReport() {
                     <td className="px-4 py-3 text-right font-bold tabular-nums text-slate-900">
                       {formatAmount(report.totals.total)}
                     </td>
+
+                    <td className="px-4 py-3 text-right font-bold tabular-nums text-amber-800">
+                      {formatAmount(report.totals.pending)}
+                    </td>
                   </tr>
                 </tfoot>
               </table>
@@ -1199,8 +1313,10 @@ function FeeStructureReport() {
           that category during {yearLabel} — multiple payments are added
           together (for example ₹2,000 in June + ₹2,000 in August shows
           ₹4,000), and categories with no payment show 0. The Concession column
-          lists the concession given for the year and{" "}
-          <strong>Total = total paid − concession</strong>.
+          lists the concession given for the year. Fee Assigned is the bill
+          total after concessions, Total is the amount actually paid, and
+          Pending Fee is the remaining collectible balance. Inactive students
+          keep their payment history and show no collectible pending fee.
         </p>
       </div>
     </div>

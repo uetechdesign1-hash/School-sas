@@ -224,7 +224,8 @@ export default function StudentDetailsPage() {
         createClient(),
         student.school_id,
         studentId,
-        summaryYearId
+        summaryYearId,
+        student.status
       );
     };
 
@@ -580,7 +581,8 @@ export default function StudentDetailsPage() {
     supabase: ReturnType<typeof createClient>,
     schoolId: string,
     studentId: string,
-    academicYearId: string
+    academicYearId: string,
+    studentStatus: string | null | undefined
   ) {
     setFeeSummaryLoading(true);
 
@@ -676,7 +678,9 @@ export default function StudentDetailsPage() {
       for (const bill of bills) {
         billed += Math.max(Number(bill.total_amount || 0), 0);
         collected += Math.max(Number(bill.paid_amount || 0), 0);
-        pending += Math.max(Number(bill.balance_amount || 0), 0);
+        pending += studentStatus === "active"
+          ? Math.max(Number(bill.balance_amount || 0), 0)
+          : 0;
       }
 
       for (const item of concessions) {
@@ -693,7 +697,6 @@ export default function StudentDetailsPage() {
       // The bill total already contains the carried-forward lines, so
       // "Overall" is this year's own fee and "Old Fee" is shown separately.
       const overall = Math.max(billed - oldFee, 0);
-
       setFeeSummary({
         overall,
         oldFee,
