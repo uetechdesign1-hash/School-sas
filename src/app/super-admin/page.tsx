@@ -20,6 +20,7 @@ type School = {
   status: string;
   plan_code: string | null;
   student_limit: number | null;
+  active_student_count: number;
   starts_on: string | null;
   expires_on: string | null;
   created_at: string;
@@ -267,13 +268,36 @@ export default function SuperAdminPage() {
       return;
     }
 
-    console.log(
-      "SUPER ADMIN SCHOOLS:",
-      data
-    );
+    let counts: Map<string, number>;
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) throw new Error("Your Super Admin session has expired.");
+      const response = await fetch("/api/super-admin/schools/student-counts", {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+        cache: "no-store",
+      });
+      const result = await response.json();
+      if (!response.ok || !result.success) {
+        throw new Error(result.error || "Unable to load actual student counts.");
+      }
+      counts = new Map<string, number>(Object.entries(result.counts || {}).map(
+        ([schoolId, count]) => [schoolId, Number(count || 0)],
+      ));
+    } catch (studentCountError) {
+      console.error("LOAD STUDENT COUNTS ERROR:", studentCountError);
+      setErrorMessage(studentCountError instanceof Error ? studentCountError.message : "Unable to load actual student counts.");
+      setSchools((data || []).map((school) => ({
+        ...(school as School),
+        active_student_count: 0,
+      })));
+      return;
+    }
 
     setSchools(
-      (data || []) as School[]
+      (data || []).map((school) => ({
+        ...(school as School),
+        active_student_count: counts.get(school.id) || 0,
+      })),
     );
   }
 
@@ -1097,7 +1121,7 @@ export default function SuperAdminPage() {
             </div>
           ) : (
             <div className="mt-6 overflow-x-auto">
-              <table className="w-full min-w-[1050px] text-left">
+              <table className="w-full min-w-[1180px] text-left">
                 <thead>
                   <tr className="border-b border-slate-200">
                     <th className="px-4 py-3 text-xs font-semibold uppercase text-slate-400">
@@ -1113,7 +1137,11 @@ export default function SuperAdminPage() {
                     </th>
 
                     <th className="px-4 py-3 text-xs font-semibold uppercase text-slate-400">
-                      Students
+                      Student Limit
+                    </th>
+
+                    <th className="px-4 py-3 text-xs font-semibold uppercase text-slate-400">
+                      Actual Students
                     </th>
 
                     <th className="px-4 py-3 text-xs font-semibold uppercase text-slate-400">
@@ -1164,6 +1192,10 @@ export default function SuperAdminPage() {
                         <td className="px-4 py-4 text-sm text-slate-600">
                           {school.student_limit ||
                             300}
+                        </td>
+
+                        <td className="px-4 py-4 text-sm font-semibold text-slate-900">
+                          {school.active_student_count.toLocaleString("en-IN")}
                         </td>
 
                         <td className="px-4 py-4">

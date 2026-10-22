@@ -1,7 +1,6 @@
 ﻿import type { Metadata } from "next";
 import "./globals.css";
 import SchoolAccessGuard from "@/components/auth/SchoolAccessGuard";
-import EduNexaChat from "@/components/chat/EduNexaChat";
 import OfflineAttendanceServiceWorker from "@/components/staff/OfflineAttendanceServiceWorker";
 
 export const metadata: Metadata = {
@@ -20,7 +19,6 @@ export default function RootLayout({
       <body>
         <SchoolAccessGuard>{children}</SchoolAccessGuard>
         <OfflineAttendanceServiceWorker />
-        <EduNexaChat />
       </body>
     </html>
   );
