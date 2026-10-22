@@ -2,26 +2,36 @@
 
 
 
-import { FormEvent, useEffect, useState } from "react";
-import { Loader2, ShieldCheck } from "lucide-react";
+import { FormEvent, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import { ImagePlus, Loader2, ShieldCheck, Upload } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 
 export default function SuperAdminLoginPage() {
   const router = useRouter();
-  const supabase = createClient();
+  const supabase = useMemo(() => createClient(), []);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [canManageBranding, setCanManageBranding] = useState(false);
+  const [platformLogo, setPlatformLogo] = useState<string | null>(null);
+  const [uploadingLogo, setUploadingLogo] = useState(false);
+  const [logoMessage, setLogoMessage] = useState("");
   const [error, setError] = useState("");
+  const cloudName = process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME?.trim();
+  const uploadPreset = process.env.NEXT_PUBLIC_CLOUDINARY_UPLOAD_PRESET?.trim();
 
   useEffect(() => {
     let mounted = true;
 
     async function checkExistingSession() {
       try {
+        const { data: logoData } = await supabase.rpc("get_platform_logo");
+        if (mounted) setPlatformLogo(typeof logoData === "string" ? logoData : null);
+
         const {
           data: { user },
         } = await supabase.auth.getUser();
@@ -43,7 +53,7 @@ export default function SuperAdminLoginPage() {
           profile.platform_role === "super_admin" &&
           profile.is_active === true
         ) {
-          router.replace("/super-admin");
+          if (mounted) setCanManageBranding(true);
           return;
         }
 
@@ -119,7 +129,7 @@ export default function SuperAdminLoginPage() {
         );
       }
 
-      router.replace("/super-admin");
+      setCanManageBranding(true);
     } catch (err: any) {
       setError(
         err?.message ||
@@ -127,6 +137,64 @@ export default function SuperAdminLoginPage() {
       );
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function uploadPlatformLogo(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setError("");
+    setLogoMessage("");
+
+    if (!canManageBranding) {
+      setError("Sign in as an active Super Administrator before uploading the platform logo.");
+      return;
+    }
+    if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
+      setError("Choose a PNG, JPG, or WebP image.");
+      return;
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      setError("The logo must be 2 MB or smaller.");
+      return;
+    }
+    if (!cloudName || !uploadPreset) {
+      setError("Cloudinary is not configured. Add the Cloud Name and unsigned upload preset to the app environment.");
+      return;
+    }
+
+    setUploadingLogo(true);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      form.append("upload_preset", uploadPreset);
+      form.append("folder", "platform/logo");
+      const response = await fetch(`https://api.cloudinary.com/v1_1/${encodeURIComponent(cloudName)}/image/upload`, {
+        method: "POST",
+        body: form,
+      });
+      const result = await response.json();
+      if (!response.ok || !result.secure_url) {
+        throw new Error(result.error?.message || "Cloudinary could not upload this logo.");
+      }
+
+      const { error: saveError } = await supabase.rpc("update_platform_logo", {
+        p_logo_url: result.secure_url,
+      });
+      if (saveError) {
+        if (saveError.code === "PGRST202" || saveError.message?.includes("update_platform_logo")) {
+          throw new Error("Apply supabase/migrations/20261022120000_platform_logo_cloudinary.sql in Supabase, then try again.");
+        }
+        throw saveError;
+      }
+      setPlatformLogo(result.secure_url);
+      window.dispatchEvent(new CustomEvent("platform-logo-updated", { detail: result.secure_url }));
+      setLogoMessage("Platform logo saved. It will appear on login screens and dashboards.");
+    } catch (uploadError) {
+      setError(uploadError instanceof Error ? uploadError.message : "Unable to upload the platform logo.");
+    } finally {
+      setUploadingLogo(false);
     }
   }
 
@@ -146,9 +214,13 @@ export default function SuperAdminLoginPage() {
       <div className="w-full max-w-md">
         <div className="rounded-3xl border border-slate-200 bg-white p-8 shadow-xl shadow-slate-200/60">
           <div className="flex justify-center">
-            <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-emerald-600 text-white shadow-lg shadow-emerald-200">
-              <ShieldCheck className="h-8 w-8" />
-            </div>
+            {platformLogo ? (
+              <img src={platformLogo} alt="EduNexa platform logo" className="h-16 w-16 rounded-2xl border border-slate-200 bg-white object-contain p-1 shadow-sm" />
+            ) : (
+              <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-emerald-600 text-white shadow-lg shadow-emerald-200">
+                <ShieldCheck className="h-8 w-8" />
+              </div>
+            )}
           </div>
 
           <div className="mt-6 text-center">
@@ -163,6 +235,31 @@ export default function SuperAdminLoginPage() {
               administration.
             </p>
           </div>
+
+          {canManageBranding && (
+            <section className="mt-6 rounded-2xl border border-emerald-100 bg-emerald-50/70 p-4">
+              <div className="flex items-center gap-3">
+                <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border bg-white">
+                  {platformLogo ? <img src={platformLogo} alt="Current platform logo" className="h-full w-full rounded-xl object-contain p-1" /> : <ImagePlus className="text-slate-400" size={22} />}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <h2 className="text-sm font-bold text-slate-900">Platform logo</h2>
+                  <p className="text-xs leading-5 text-slate-600">Upload PNG, JPG, or WebP up to 2 MB. This brand appears on school sign-in and dashboard headers.</p>
+                </div>
+              </div>
+              {logoMessage && <p role="status" className="mt-3 text-xs font-medium text-emerald-700">{logoMessage}</p>}
+              <input ref={fileInputRef} type="file" accept="image/png,image/jpeg,image/webp" onChange={uploadPlatformLogo} className="hidden" />
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button type="button" onClick={() => fileInputRef.current?.click()} disabled={uploadingLogo} className="inline-flex items-center gap-2 rounded-lg bg-emerald-700 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-800 disabled:opacity-60">
+                  {uploadingLogo ? <Loader2 className="animate-spin" size={15} /> : <Upload size={15} />}
+                  {uploadingLogo ? "Uploading…" : platformLogo ? "Replace logo" : "Upload logo"}
+                </button>
+                <button type="button" onClick={() => router.replace("/super-admin")} disabled={uploadingLogo} className="rounded-lg border border-emerald-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-emerald-50 disabled:opacity-60">
+                  Continue to Super Admin
+                </button>
+              </div>
+            </section>
+          )}
 
           <form onSubmit={handleSubmit} className="mt-8 space-y-5">
             {error ? (

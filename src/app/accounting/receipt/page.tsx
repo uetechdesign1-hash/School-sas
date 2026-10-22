@@ -37,6 +37,7 @@ import { listInventoryItems, type InventoryItemRecord } from "@/lib/inventory/in
 import { getStockSummary } from "@/lib/inventory/valuation";
 import { saveStudentBookSale } from "@/lib/inventory/book-sales";
 import { attachInventorySaleToFeeBill as linkInventorySaleToFeeBill } from "@/lib/inventory/fee-bill-link";
+import { useAccountingAcademicYear } from "@/components/accounting/academic-year-provider";
 
 type ReceiptType = "student_fee" | "other_income";
 
@@ -137,6 +138,7 @@ type ReceiptHistoryRow = {
   class_name?: string | null;
   section_name?: string | null;
   academic_year_name?: string | null;
+  academic_year_id?: string | null;
   transaction_date: string;
   description: string | null;
   debit_account: string;
@@ -196,6 +198,11 @@ const PAYMENT_METHODS = [
 
 function today() {
   return new Date().toISOString().split("T")[0];
+}
+
+function dateDDMMYYYY(value: string) {
+  const [year, month, day] = String(value || "").slice(0, 10).split("-");
+  return year && month && day ? `${day}-${month}-${year}` : value || "—";
 }
 
 function money(value: number) {
@@ -268,6 +275,7 @@ function isIncomeOrReceivableAccount(account: Account) {
 
 export default function ReceiptPage() {
   const supabase = useMemo(() => createClient(), []);
+  const { academicYear } = useAccountingAcademicYear();
 
   const [schoolId, setSchoolId] = useState<string | null>(null);
   const [schoolName, setSchoolName] = useState("School");
@@ -1163,7 +1171,13 @@ export default function ReceiptPage() {
     }
 
     const enriched = rows.map((row) => {
-      if (row.receipt_type !== "student_fee" || !row.reference_id) return row;
+      const paidOn = String(row.transaction_date || "").slice(0, 10);
+      const paidYear = (yearRanges || []).find(
+        (year) => paidOn >= String(year.start_date) && paidOn <= String(year.end_date),
+      );
+      if (row.receipt_type !== "student_fee" || !row.reference_id) {
+        return { ...row, academic_year_id: paidYear?.id || null };
+      }
 
       const payment = paymentMap.get(row.reference_id);
       const categories = payment
@@ -1175,12 +1189,11 @@ export default function ReceiptPage() {
       const studentName = student ? getStudentName(student) : "Student";
       let enrollment = payment?.bill_id ? billClassLabels.get(payment.bill_id) : undefined;
       if (!enrollment && payment?.student_id) {
-        const paidOn = String(row.transaction_date || "").slice(0, 10);
-        const paidYear = (yearRanges || []).find(
-          (year) => paidOn >= String(year.start_date) && paidOn <= String(year.end_date),
-        );
         if (paidYear) enrollment = dateEnrollmentLabels.get(enrollmentKey(payment.student_id, paidYear.id));
       }
+      const academicYearId = payment?.bill_id
+        ? billYearMap.get(payment.bill_id) || paidYear?.id || null
+        : paidYear?.id || null;
       const className = enrollment?.className
         ? enrollment.className
         : student?.class_id
@@ -1209,6 +1222,7 @@ export default function ReceiptPage() {
         class_name: className,
         section_name: sectionName || null,
         academic_year_name: enrollment?.academicYearName || null,
+        academic_year_id: academicYearId,
         description: particulars || row.description,
       };
     });
@@ -1227,11 +1241,16 @@ export default function ReceiptPage() {
       const categoryMatches = historyCategoryFilter === "all" || (row.fee_categories || []).includes(historyCategoryFilter);
       const classMatches = historyClassFilter === "all" || row.class_name === classes.find((item) => item.id === historyClassFilter)?.name;
       const sectionMatches = historySectionFilter === "all" || row.section_name === sections.find((item) => item.id === historySectionFilter)?.name;
+      const academicYearMatches = !academicYear?.id || (
+        row.academic_year_id
+          ? row.academic_year_id === academicYear.id
+          : Boolean(academicYear.start_date && academicYear.end_date && row.transaction_date >= academicYear.start_date && row.transaction_date <= academicYear.end_date)
+      );
       const fromMatches = !historyFromDate || row.transaction_date >= historyFromDate;
       const toMatches = !historyToDate || row.transaction_date <= historyToDate;
-      return typeMatches && categoryMatches && classMatches && sectionMatches && fromMatches && toMatches;
+      return academicYearMatches && typeMatches && categoryMatches && classMatches && sectionMatches && fromMatches && toMatches;
     });
-  }, [history, historyTypeFilter, historyCategoryFilter, historyClassFilter, historySectionFilter, classes, sections, historyFromDate, historyToDate]);
+  }, [history, academicYear, historyTypeFilter, historyCategoryFilter, historyClassFilter, historySectionFilter, classes, sections, historyFromDate, historyToDate]);
 
   const historySections = useMemo(() => sections.filter((item) => historyClassFilter === "all" || item.class_id === historyClassFilter), [sections, historyClassFilter]);
 
@@ -4085,11 +4104,11 @@ export default function ReceiptPage() {
                     No receipts found.
                   </div>
                 ) : (
-                  <div className="overflow-x-auto">
+                  <div className="max-w-full overflow-x-auto overscroll-x-contain touch-pan-x">
                     <table className="w-full min-w-[1150px]">
                       <thead className="bg-slate-50">
                         <tr>
-                          <th className="px-5 py-3 text-left text-xs text-slate-500">
+                          <th className="whitespace-nowrap px-3 py-3 text-left text-xs text-slate-500">
                             Date
                           </th>
 
@@ -4130,8 +4149,8 @@ export default function ReceiptPage() {
                       <tbody className="divide-y">
                         {filteredHistory.map((row) => (
                           <tr key={row.id}>
-                            <td className="px-5 py-4 text-sm">
-                              {row.transaction_date}
+                            <td className="whitespace-nowrap px-3 py-4 text-xs">
+                              {dateDDMMYYYY(row.transaction_date)}
                             </td>
 
                             <td className="px-5 py-4 font-mono text-xs font-semibold text-slate-700">

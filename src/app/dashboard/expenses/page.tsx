@@ -163,6 +163,11 @@ const DIGI_SCHOOL_ID = "54ab324b-a707-4516-9b33-6721d97163ec";
 
 const today = () => new Date().toISOString().slice(0, 10);
 const currentMonth = () => new Date().toISOString().slice(0, 7);
+const currentMonthStart = () => `${currentMonth()}-01`;
+const currentMonthEnd = () => {
+  const [year, month] = currentMonth().split("-").map(Number);
+  return new Date(year, month, 0).toISOString().slice(0, 10);
+};
 
 function money(n: number) {
   return new Intl.NumberFormat("en-IN", {
@@ -184,21 +189,6 @@ function dateText(v: string) {
         month: "short",
         year: "numeric",
       });
-}
-
-function monthText(v: string) {
-  if (!v) return "";
-
-  const [y, m] = v.split("-");
-
-  return new Date(
-    Number(y),
-    Number(m) - 1,
-    1,
-  ).toLocaleDateString("en-IN", {
-    month: "long",
-    year: "numeric",
-  });
 }
 
 function csv(v: unknown) {
@@ -234,7 +224,8 @@ export default function ExpensesPage() {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
 
-  const [month, setMonth] = useState(currentMonth());
+  const [fromDate, setFromDate] = useState(currentMonthStart());
+  const [toDate, setToDate] = useState(currentMonthEnd());
   const [search, setSearch] = useState("");
   const [accountFilter, setAccountFilter] = useState("");
   const [expenseAccountFilter, setExpenseAccountFilter] = useState("");
@@ -336,18 +327,30 @@ export default function ExpensesPage() {
 
   async function loadData(
     id: string,
-    selectedMonth = month,
+    selectedFromDate = fromDate,
+    selectedToDate = toDate,
   ) {
-    const [y, m] = selectedMonth.split("-");
+    let expenseQuery = supabase
+      .from("expenses")
+      .select(
+        "id,school_id,expense_date,amount,paid_from_account_id,transaction_id,vendor_name,invoice_number,description,created_at",
+      )
+      .eq("school_id", id)
+      .order("expense_date", { ascending: false })
+      .order("created_at", { ascending: false });
+    if (selectedFromDate) expenseQuery = expenseQuery.gte("expense_date", selectedFromDate);
+    if (selectedToDate) expenseQuery = expenseQuery.lte("expense_date", selectedToDate);
 
-    const start = `${y}-${m}-01`;
-
-    const next =
-      Number(m) === 12
-        ? `${Number(y) + 1}-01-01`
-        : `${y}-${String(
-            Number(m) + 1,
-          ).padStart(2, "0")}-01`;
+    let vendorPaymentQuery = supabase
+      .from("vendor_payments")
+      .select(
+        "id,school_id,vendor_id,payment_date,amount,paid_from_account_id,reference_number,notes,journal_entry_id,created_at",
+      )
+      .eq("school_id", id)
+      .order("payment_date", { ascending: false })
+      .order("created_at", { ascending: false });
+    if (selectedFromDate) vendorPaymentQuery = vendorPaymentQuery.gte("payment_date", selectedFromDate);
+    if (selectedToDate) vendorPaymentQuery = vendorPaymentQuery.lte("payment_date", selectedToDate);
 
     const [
       schoolRes,
@@ -374,20 +377,7 @@ export default function ExpensesPage() {
         .eq("is_active", true)
         .order("name"),
 
-      supabase
-        .from("expenses")
-        .select(
-          "id,school_id,expense_date,amount,paid_from_account_id,transaction_id,vendor_name,invoice_number,description,created_at",
-        )
-        .eq("school_id", id)
-        .gte("expense_date", start)
-        .lt("expense_date", next)
-        .order("expense_date", {
-          ascending: false,
-        })
-        .order("created_at", {
-          ascending: false,
-        }),
+      expenseQuery,
 
       supabase
         .from("vendors")
@@ -395,20 +385,7 @@ export default function ExpensesPage() {
         .eq("school_id", id)
         .order("name"),
 
-      supabase
-        .from("vendor_payments")
-        .select(
-          "id,school_id,vendor_id,payment_date,amount,paid_from_account_id,reference_number,notes,journal_entry_id,created_at",
-        )
-        .eq("school_id", id)
-        .gte("payment_date", start)
-        .lt("payment_date", next)
-        .order("payment_date", {
-          ascending: false,
-        })
-        .order("created_at", {
-          ascending: false,
-        }),
+      vendorPaymentQuery,
 
       supabase
         .from("purchase_bills")
@@ -762,10 +739,12 @@ export default function ExpensesPage() {
     };
   }, [filtered, filteredVendorPayments, accountMap]);
 
-  async function changeMonth(
-    value: string,
+  async function changeDateRange(
+    nextFromDate: string,
+    nextToDate: string,
   ) {
-    setMonth(value);
+    setFromDate(nextFromDate);
+    setToDate(nextToDate);
 
     if (!schoolId) return;
 
@@ -774,7 +753,8 @@ export default function ExpensesPage() {
 
       await loadData(
         schoolId,
-        value,
+        nextFromDate,
+        nextToDate,
       );
     } catch (e: any) {
       setError(
@@ -2171,7 +2151,7 @@ export default function ExpensesPage() {
       document.createElement("a");
 
     a.href = url;
-    a.download = `expenses-${month}.csv`;
+    a.download = `expenses-${fromDate || "all"}-to-${toDate || "all"}.csv`;
     a.click();
 
     URL.revokeObjectURL(url);
@@ -2331,12 +2311,27 @@ export default function ExpensesPage() {
 
         <section className="mt-6 rounded-2xl border bg-white p-5 shadow-sm">
           <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
-            <Field label="Month">
+            <Field label="From date">
               <input
-                type="month"
-                value={month}
+                type="date"
+                value={fromDate}
                 onChange={(e) =>
-                  void changeMonth(
+                  void changeDateRange(
+                    e.target.value,
+                    toDate,
+                  )
+                }
+                className="input"
+              />
+            </Field>
+
+            <Field label="To date">
+              <input
+                type="date"
+                value={toDate}
+                onChange={(e) =>
+                  void changeDateRange(
+                    fromDate,
                     e.target.value,
                   )
                 }
@@ -2401,7 +2396,7 @@ export default function ExpensesPage() {
             of{" "}
             <b>{expenses.length}</b>{" "}
             expenses for{" "}
-            <b>{monthText(month)}</b>.
+            <b>{dateText(fromDate)}</b> to <b>{dateText(toDate)}</b>.
           </div>
         </section>
 
@@ -2472,7 +2467,9 @@ export default function ExpensesPage() {
                         <td className="px-5 py-4">
                           <div className="font-semibold text-sm">
                             {e.vendor_name ||
-                              "School Expense"}
+                              (e.expense_account_id
+                                ? accountMap.get(e.expense_account_id)?.name
+                                : null) || "Expense"}
                           </div>
 
                           <div className="mt-1 max-w-[280px] truncate text-xs text-slate-500">

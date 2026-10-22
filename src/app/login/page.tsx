@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   Eye,
@@ -18,7 +18,7 @@ import Link from "next/link";
 export default function LoginPage() {
   const router = useRouter();
 
-  const supabase = createClient();
+  const supabase = useMemo(() => createClient(), []);
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -30,6 +30,15 @@ export default function LoginPage() {
     useState(false);
 
   const [error, setError] = useState("");
+  const [platformLogo, setPlatformLogo] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void supabase.rpc("get_platform_logo").then(({ data }) => {
+      if (active) setPlatformLogo(typeof data === "string" ? data : null);
+    });
+    return () => { active = false; };
+  }, [supabase]);
 
   const login = async (
     event: FormEvent<HTMLFormElement>
@@ -283,9 +292,13 @@ export default function LoginPage() {
 
           <div className="mb-8 text-center">
 
-            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-500 via-indigo-500 to-purple-500 text-white shadow-lg shadow-indigo-500/40">
-              <ShieldCheck className="h-7 w-7" />
-            </div>
+            {platformLogo ? (
+              <img src={platformLogo} alt="EduNexa platform logo" className="mx-auto h-14 w-14 rounded-2xl border border-slate-200 bg-white object-contain p-1 shadow-sm" />
+            ) : (
+              <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-500 via-indigo-500 to-purple-500 text-white shadow-lg shadow-indigo-500/40">
+                <ShieldCheck className="h-7 w-7" />
+              </div>
+            )}
 
             <h1 className="mt-5 bg-gradient-to-r from-blue-600 via-indigo-500 to-purple-500 bg-clip-text text-2xl font-bold text-transparent">
               School Management

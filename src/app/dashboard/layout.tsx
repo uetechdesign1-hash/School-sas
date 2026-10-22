@@ -460,7 +460,11 @@ export default function DashboardLayout({
           .select("logo_url")
           .eq("id", membership.school_id)
           .maybeSingle();
-        setSchoolLogo(logoError ? null : logoData?.logo_url || null);
+        const { data: platformLogoData } = await supabase.rpc("get_platform_logo");
+        setSchoolLogo(
+          (typeof platformLogoData === "string" && platformLogoData) ||
+            (logoError ? null : logoData?.logo_url || null),
+        );
 
         setRole(
           currentRole
@@ -597,8 +601,15 @@ export default function DashboardLayout({
     function handleSchoolLogoUpdate(event: Event) {
       setSchoolLogo((event as CustomEvent<string | null>).detail || null);
     }
+    function handlePlatformLogoUpdate(event: Event) {
+      setSchoolLogo((event as CustomEvent<string | null>).detail || null);
+    }
     window.addEventListener("school-logo-updated", handleSchoolLogoUpdate);
-    return () => window.removeEventListener("school-logo-updated", handleSchoolLogoUpdate);
+    window.addEventListener("platform-logo-updated", handlePlatformLogoUpdate);
+    return () => {
+      window.removeEventListener("school-logo-updated", handleSchoolLogoUpdate);
+      window.removeEventListener("platform-logo-updated", handlePlatformLogoUpdate);
+    };
   }, []);
 
   /* =======================================================
