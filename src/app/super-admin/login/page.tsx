@@ -189,8 +189,7 @@ export default function SuperAdminLoginPage() {
         throw saveError;
       }
       setPlatformLogo(result.secure_url);
-      window.dispatchEvent(new CustomEvent("platform-logo-updated", { detail: result.secure_url }));
-      setLogoMessage("Platform logo saved. It will appear on login screens and dashboards.");
+      setLogoMessage("Platform logo saved. It will appear on the school and Super Admin login pages.");
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : "Unable to upload the platform logo.");
     } finally {
@@ -244,7 +243,7 @@ export default function SuperAdminLoginPage() {
                 </div>
                 <div className="min-w-0 flex-1">
                   <h2 className="text-sm font-bold text-slate-900">Platform logo</h2>
-                  <p className="text-xs leading-5 text-slate-600">Upload PNG, JPG, or WebP up to 2 MB. This brand appears on school sign-in and dashboard headers.</p>
+                  <p className="text-xs leading-5 text-slate-600">Upload PNG, JPG, or WebP up to 2 MB. This logo appears on the school and Super Admin login pages. School dashboards keep their own logos.</p>
                 </div>
               </div>
               {logoMessage && <p role="status" className="mt-3 text-xs font-medium text-emerald-700">{logoMessage}</p>}

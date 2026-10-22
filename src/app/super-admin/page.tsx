@@ -85,7 +85,6 @@ export default function SuperAdminPage() {
 
   const [userEmail, setUserEmail] = useState("");
   const [userName, setUserName] = useState("");
-  const [platformLogo, setPlatformLogo] = useState<string | null>(null);
 
   const [schools, setSchools] = useState<School[]>(
     []
@@ -197,9 +196,6 @@ export default function SuperAdminPage() {
         }
 
         if (!mounted) return;
-
-        const { data: logoData } = await supabase.rpc("get_platform_logo");
-        if (mounted) setPlatformLogo(typeof logoData === "string" ? logoData : null);
 
         setUserEmail(
           user.email || ""
@@ -952,9 +948,7 @@ export default function SuperAdminPage() {
 
       <header className="border-b border-slate-200 bg-white">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-5">
-          <div className="flex items-center gap-3">
-            {platformLogo && <img src={platformLogo} alt="EduNexa platform logo" className="h-11 w-11 rounded-xl border border-slate-200 bg-white object-contain p-1" />}
-            <div>
+          <div>
             <h1 className="text-2xl font-bold text-slate-900">
               Super Admin
             </h1>
@@ -962,7 +956,6 @@ export default function SuperAdminPage() {
             <p className="text-sm text-blue-600">
               School SaaS Administration
             </p>
-            </div>
           </div>
 
           <button
