@@ -58,9 +58,24 @@ export async function proxy(request: NextRequest) {
     (pathname === "/login" || pathname === "/signup") &&
     user
   ) {
+    const { data: memberships, error: membershipError } = await supabase
+      .from("school_users")
+      .select("role")
+      .eq("user_id", user.id)
+      .eq("is_active", true);
+
+    const hasStaffMembership = !membershipError && memberships?.some(
+      ({ role }) =>
+        ["staff", "teacher", "employee"].includes(
+          String(role || "").trim().toLowerCase()
+        )
+    );
+
     const dashboardUrl = request.nextUrl.clone();
 
-    dashboardUrl.pathname = "/dashboard";
+    dashboardUrl.pathname = hasStaffMembership
+      ? "/dashboard/staff/home"
+      : "/dashboard";
     dashboardUrl.search = "";
 
     return NextResponse.redirect(dashboardUrl);
