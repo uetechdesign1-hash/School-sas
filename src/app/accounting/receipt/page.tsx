@@ -32,7 +32,10 @@ import { enrollmentKey, loadBillClassLabels, loadEnrollmentLabels } from "@/lib/
 import { applyCarryForwardToBill, ensureCarryForwardRecords } from "@/lib/fees/year-bill";
 import { getCurrentSchoolId } from "@/lib/supabase/current-school";
 import { generateReceiptPDF, loadReceiptLogoDataUrl } from "@/lib/fees/generateReceipt";
-import { ensureSchoolAccountingSetup } from "@/lib/accounting/canonical-accounting";
+import {
+  ensureSchoolAccountingSetup,
+  postReceiptJournal,
+} from "@/lib/accounting/canonical-accounting";
 import { listInventoryItems, type InventoryItemRecord } from "@/lib/inventory/inventory-items";
 import { getStockSummary } from "@/lib/inventory/valuation";
 import { saveStudentBookSale } from "@/lib/inventory/book-sales";
@@ -989,7 +992,7 @@ export default function ReceiptPage() {
       .map((row) => row.reference_id as string);
 
     if (paymentIds.length === 0) {
-      setHistory(rows);
+      setHistory(rows.sort((a, b) => String(b.transaction_date || "").localeCompare(String(a.transaction_date || ""))));
       return;
     }
 
@@ -1227,6 +1230,7 @@ export default function ReceiptPage() {
       };
     });
 
+    enriched.sort((a, b) => String(b.transaction_date || "").localeCompare(String(a.transaction_date || "")));
     setHistory(enriched);
   }
 
@@ -1236,20 +1240,23 @@ export default function ReceiptPage() {
   }, [history]);
 
   const filteredHistory = useMemo(() => {
-    return history.filter((row) => {
-      const typeMatches = historyTypeFilter === "all" || row.receipt_type === historyTypeFilter;
-      const categoryMatches = historyCategoryFilter === "all" || (row.fee_categories || []).includes(historyCategoryFilter);
-      const classMatches = historyClassFilter === "all" || row.class_name === classes.find((item) => item.id === historyClassFilter)?.name;
-      const sectionMatches = historySectionFilter === "all" || row.section_name === sections.find((item) => item.id === historySectionFilter)?.name;
-      const academicYearMatches = !academicYear?.id || (
-        row.academic_year_id
-          ? row.academic_year_id === academicYear.id
-          : Boolean(academicYear.start_date && academicYear.end_date && row.transaction_date >= academicYear.start_date && row.transaction_date <= academicYear.end_date)
-      );
-      const fromMatches = !historyFromDate || row.transaction_date >= historyFromDate;
-      const toMatches = !historyToDate || row.transaction_date <= historyToDate;
-      return academicYearMatches && typeMatches && categoryMatches && classMatches && sectionMatches && fromMatches && toMatches;
-    });
+    return history
+      .slice()
+      .sort((a, b) => String(b.transaction_date || "").localeCompare(String(a.transaction_date || "")))
+      .filter((row) => {
+        const typeMatches = historyTypeFilter === "all" || row.receipt_type === historyTypeFilter;
+        const categoryMatches = historyCategoryFilter === "all" || (row.fee_categories || []).includes(historyCategoryFilter);
+        const classMatches = historyClassFilter === "all" || row.class_name === classes.find((item) => item.id === historyClassFilter)?.name;
+        const sectionMatches = historySectionFilter === "all" || row.section_name === sections.find((item) => item.id === historySectionFilter)?.name;
+        const academicYearMatches = !academicYear?.id || (
+          row.academic_year_id
+            ? row.academic_year_id === academicYear.id
+            : Boolean(academicYear.start_date && academicYear.end_date && row.transaction_date >= academicYear.start_date && row.transaction_date <= academicYear.end_date)
+        );
+        const fromMatches = !historyFromDate || row.transaction_date >= historyFromDate;
+        const toMatches = !historyToDate || row.transaction_date <= historyToDate;
+        return academicYearMatches && typeMatches && categoryMatches && classMatches && sectionMatches && fromMatches && toMatches;
+      });
   }, [history, academicYear, historyTypeFilter, historyCategoryFilter, historyClassFilter, historySectionFilter, classes, sections, historyFromDate, historyToDate]);
 
   const historySections = useMemo(() => sections.filter((item) => historyClassFilter === "all" || item.class_id === historyClassFilter), [sections, historyClassFilter]);
@@ -2536,6 +2543,23 @@ export default function ReceiptPage() {
           `Accounting entries could not be created: ${entryError.message}`
         );
       }
+
+      /* Post canonical journal entry so reports read receipt from the same
+       * unified ledger_entries source as payments. */
+      const setup = await ensureSchoolAccountingSetup(supabase, schoolId!);
+      await postReceiptJournal(supabase, {
+        schoolId: schoolId!,
+        fiscalYearId: setup.fiscalYearId,
+        entryDate: receiptDate,
+        sourceRecordId: transaction.id,
+        receiveAccountId: receiveIntoAccountId,
+        incomeAccountId: incomeAccount!.id,
+        amount: numericAmount,
+        createdBy: userId,
+        referenceType: "accounting_receipt",
+        referenceId: transaction.id,
+        entryDescription: description,
+      });
 
       const transactionNumber =
         transaction.transaction_number ||

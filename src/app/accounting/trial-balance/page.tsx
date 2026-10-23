@@ -278,8 +278,6 @@ export default function TrialBalancePage() {
       const [
         schoolResult,
         accountResult,
-        transactionResult,
-        entryResult,
         openingBalanceResult,
       ] = await Promise.all([
         supabase
@@ -314,36 +312,6 @@ export default function TrialBalancePage() {
           .order("name"),
 
         supabase
-          .from("ledger_transactions")
-          .select(
-            `
-            id,
-            transaction_date
-            `
-          )
-          .eq(
-            "school_id",
-            currentSchoolId
-          ),
-
-        supabase
-          .from("ledger_entries")
-          .select(
-            `
-            id,
-            school_id,
-            transaction_id,
-            account_id,
-            debit,
-            credit
-            `
-          )
-          .eq(
-            "school_id",
-            currentSchoolId
-          ),
-
-        supabase
           .from("opening_balances")
           .select(
             `
@@ -376,23 +344,6 @@ export default function TrialBalancePage() {
         );
       }
 
-      if (transactionResult.error) {
-        throw new Error(
-          `Unable to load transactions: ${transactionResult.error.message}`
-        );
-      }
-
-      if (entryResult.error) {
-        console.error(
-          "TRIAL BALANCE transaction_entries ERROR:",
-          entryResult.error
-        );
-
-        throw new Error(
-          `Unable to load transaction entries: ${entryResult.error.message}`
-        );
-      }
-
       if (openingBalanceResult.error) {
         console.error(
           "TRIAL BALANCE opening_balances ERROR:",
@@ -413,19 +364,178 @@ export default function TrialBalancePage() {
           []) as Account[]
       );
 
+      setOpeningBalances(
+        (openingBalanceResult.data ||
+          []) as OpeningBalance[]
+      );
+
+      /* =====================================================
+       * Load transactions + entries from the canonical ledger
+       * views (ledger_transactions / ledger_entries), which
+       * UNION legacy (not superseded) + canonical journal data.
+       * Fall back to reading both legacy and canonical tables
+       * individually if the views are unavailable.
+       * ===================================================== */
+      let ledgerTxResult: any = null;
+      let ledgerEntryResult: any = null;
+
+      try {
+        const [txRes, entryRes] = await Promise.all([
+          supabase
+            .from("ledger_transactions")
+            .select(
+              `
+              id,
+              transaction_date
+              `
+            )
+            .eq(
+              "school_id",
+              currentSchoolId
+            ),
+          supabase
+            .from("ledger_entries")
+            .select(
+              `
+              id,
+              school_id,
+              transaction_id,
+              account_id,
+              debit,
+              credit
+              `
+            )
+            .eq(
+              "school_id",
+              currentSchoolId
+            ),
+        ]);
+        ledgerTxResult = txRes;
+        ledgerEntryResult = entryRes;
+      } catch (ledgerViewErr) {
+        console.warn(
+          "TRIAL BALANCE ledger_* views unavailable, falling back to legacy + canonical tables:",
+          ledgerViewErr
+        );
+
+        const [
+          legacyTxRes,
+          legacyEntryRes,
+          canonTxRes,
+          canonEntryRes,
+        ] = await Promise.all([
+          supabase
+            .from("transactions")
+            .select("id, transaction_date")
+            .eq("school_id", currentSchoolId),
+          supabase
+            .from("transaction_entries")
+            .select(
+              "id, school_id, transaction_id, account_id, debit, credit"
+            )
+            .eq("school_id", currentSchoolId),
+          supabase
+            .from("journal_entries")
+            .select("id, entry_date as transaction_date")
+            .eq("school_id", currentSchoolId),
+          supabase
+            .from("journal_lines")
+            .select(
+              "id, school_id, journal_entry_id as transaction_id, account_id, debit, credit"
+            )
+            .eq("school_id", currentSchoolId),
+        ]);
+
+        const legacyTxData: any[] = (legacyTxRes.data || []) as any[];
+        const canonTxData: any[] = (canonTxRes.data || []) as any[];
+        const legacyEntryData: any[] = (legacyEntryRes.data || []) as any[];
+        const canonEntryData: any[] = (canonEntryRes.data || []) as any[];
+
+        /* Build a set of legacy transaction IDs that are already represented
+         * by a canonical journal entry (same date, same total debit+credit).
+         * These legacy entries must be skipped to avoid double counting. */
+        const canonByDateAmount = new Map<string, boolean>();
+        for (const ce of canonEntryData) {
+          const key = `${ce.account_id}|${String(ce.debit || 0)}|${String(ce.credit || 0)}`;
+          canonByDateAmount.set(key, true);
+        }
+
+        const supersededTxIds = new Set<string>();
+        for (const le of legacyEntryData) {
+          const key = `${le.account_id}|${String(le.debit || 0)}|${String(le.credit || 0)}`;
+          if (canonByDateAmount.has(key)) {
+            supersededTxIds.add(le.transaction_id);
+          }
+        }
+
+        const mergedTx: any[] = [];
+        const seenTx = new Set<string>();
+        for (const t of legacyTxData) {
+          if (supersededTxIds.has(t.id)) continue;
+          if (!seenTx.has(t.id)) {
+            seenTx.add(t.id);
+            mergedTx.push(t);
+          }
+        }
+        for (const t of canonTxData) {
+          if (!seenTx.has(t.id)) {
+            seenTx.add(t.id);
+            mergedTx.push({ id: t.id, transaction_date: t.transaction_date });
+          }
+        }
+
+        const mergedEntry: any[] = [];
+        const seenEntry = new Set<string>();
+        for (const e of legacyEntryData) {
+          if (supersededTxIds.has(e.transaction_id)) continue;
+          if (!seenEntry.has(e.id)) {
+            seenEntry.add(e.id);
+            mergedEntry.push(e);
+          }
+        }
+        for (const e of canonEntryData) {
+          if (!seenEntry.has(e.id)) {
+            seenEntry.add(e.id);
+            mergedEntry.push({
+              id: e.id,
+              school_id: e.school_id,
+              transaction_id: e.transaction_id,
+              account_id: e.account_id,
+              debit: e.debit,
+              credit: e.credit,
+            });
+          }
+        }
+
+        ledgerTxResult = { data: mergedTx, error: legacyTxRes.error };
+        ledgerEntryResult = { data: mergedEntry, error: legacyEntryRes.error };
+      }
+
+      if (ledgerTxResult?.error) {
+        throw new Error(
+          `Unable to load transactions: ${ledgerTxResult.error.message}`
+        );
+      }
+
+      if (ledgerEntryResult?.error) {
+        console.error(
+          "TRIAL BALANCE entries ERROR:",
+          ledgerEntryResult.error
+        );
+
+        throw new Error(
+          `Unable to load transaction entries: ${ledgerEntryResult.error.message}`
+        );
+      }
+
       setTransactions(
-        (transactionResult.data ||
+        (ledgerTxResult.data ||
           []) as Transaction[]
       );
 
       setEntries(
-        (entryResult.data ||
+        (ledgerEntryResult.data ||
           []) as TransactionEntry[]
-      );
-
-      setOpeningBalances(
-        (openingBalanceResult.data ||
-          []) as OpeningBalance[]
       );
     } catch (err: any) {
       console.error(

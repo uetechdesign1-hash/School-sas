@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import { createClient } from "@/lib/supabase/client";
+import { pagedRead } from "@/lib/supabase/paged-read";
 
 type Account = {
   id: string;
@@ -192,8 +193,7 @@ export default function BankReconciliationPage() {
       const [
         schoolResult,
         accountsResult,
-        transactionsResult,
-        entriesResult,
+
         openingResult,
       ] = await Promise.all([
         supabase
@@ -210,22 +210,6 @@ export default function BankReconciliationPage() {
           .eq("school_id", currentSchoolId)
           .eq("is_active", true)
           .order("name", { ascending: true }),
-
-        supabase
-          .from("ledger_transactions")
-          .select(
-            "id, transaction_date, transaction_type, description, reference_type, reference_id, created_at",
-          )
-          .eq("school_id", currentSchoolId)
-          .order("transaction_date", { ascending: true })
-          .order("created_at", { ascending: true }),
-
-        supabase
-          .from("ledger_entries")
-          .select(
-            "id, school_id, transaction_id, account_id, debit, credit, description",
-          )
-          .eq("school_id", currentSchoolId),
 
         supabase
           .from("opening_balances")
@@ -247,18 +231,6 @@ export default function BankReconciliationPage() {
         );
       }
 
-      if (transactionsResult.error) {
-        throw new Error(
-          `Unable to load transactions: ${transactionsResult.error.message}`,
-        );
-      }
-
-      if (entriesResult.error) {
-        throw new Error(
-          `Unable to load transaction entries: ${entriesResult.error.message}`,
-        );
-      }
-
       if (openingResult.error) {
         throw new Error(
           `Unable to load opening balances: ${openingResult.error.message}`,
@@ -267,9 +239,157 @@ export default function BankReconciliationPage() {
 
       setSchoolName(schoolResult.data?.name || "");
       setAccounts((accountsResult.data || []) as Account[]);
-      setTransactions((transactionsResult.data || []) as Transaction[]);
-      setEntries((entriesResult.data || []) as TransactionEntry[]);
       setOpeningBalances((openingResult.data || []) as OpeningBalance[]);
+
+      /* =====================================================
+       * Load transactions + entries from the canonical ledger
+       * views (ledger_transactions / ledger_entries), which
+       * UNION legacy (not superseded) + canonical journal data.
+       * Fall back to reading both legacy and canonical tables
+       * individually if the views are unavailable.
+       * ===================================================== */
+      let ledgerTxResult: any = null;
+      let ledgerEntryResult: any = null;
+
+      try {
+        const [txRes, entryRes] = await Promise.all([
+          pagedRead(
+            (from, to) =>
+              supabase
+                .from("ledger_transactions")
+                .select(
+                  "id, transaction_date, transaction_type, description, reference_type, reference_id, created_at",
+                )
+                .eq("school_id", currentSchoolId)
+                .order("transaction_date", { ascending: true })
+                .order("created_at", { ascending: true })
+                .range(from, to),
+          ),
+          pagedRead(
+            (from, to) =>
+              supabase
+                .from("ledger_entries")
+                .select(
+                  "id, school_id, transaction_id, account_id, debit, credit, description",
+                )
+                .eq("school_id", currentSchoolId)
+                .range(from, to),
+          ),
+        ]);
+        ledgerTxResult = txRes;
+        ledgerEntryResult = entryRes;
+      } catch (ledgerViewErr) {
+        console.warn(
+          "BANK RECONCILIATION ledger_* views unavailable, falling back to legacy + canonical tables:",
+          ledgerViewErr
+        );
+
+        const [
+          legacyTxRes,
+          legacyEntryRes,
+          canonTxRes,
+          canonEntryRes,
+        ] = await Promise.all([
+          supabase
+            .from("transactions")
+            .select(
+              "id, transaction_date, transaction_type, description, reference_type, reference_id, created_at",
+            )
+            .eq("school_id", currentSchoolId)
+            .order("transaction_date", { ascending: true })
+            .order("created_at", { ascending: true }),
+          supabase
+            .from("transaction_entries")
+            .select(
+              "id, school_id, transaction_id, account_id, debit, credit, description",
+            )
+            .eq("school_id", currentSchoolId),
+          supabase
+            .from("journal_entries")
+            .select(
+              "id, entry_date as transaction_date, entry_type as transaction_type, description, reference_type, reference_id, created_at",
+            )
+            .eq("school_id", currentSchoolId),
+          supabase
+            .from("journal_lines")
+            .select(
+              "id, school_id, journal_entry_id as transaction_id, account_id, debit, credit, description",
+            )
+            .eq("school_id", currentSchoolId),
+        ]);
+
+        const legacyTxData: any[] = (legacyTxRes.data || []) as any[];
+        const canonTxData: any[] = (canonTxRes.data || []) as any[];
+        const legacyEntryData: any[] = (legacyEntryRes.data || []) as any[];
+        const canonEntryData: any[] = (canonEntryRes.data || []) as any[];
+
+        /* Build a set of legacy transaction IDs that are already represented
+         * by a canonical journal entry (same date, same total debit+credit).
+         * These legacy entries must be skipped to avoid double counting. */
+        const canonByDateAmount = new Map<string, boolean>();
+        for (const ce of canonEntryData) {
+          const key = `${ce.account_id}|${String(ce.debit || 0)}|${String(ce.credit || 0)}`;
+          canonByDateAmount.set(key, true);
+        }
+
+        const supersededTxIds = new Set<string>();
+        for (const le of legacyEntryData) {
+          const key = `${le.account_id}|${String(le.debit || 0)}|${String(le.credit || 0)}`;
+          if (canonByDateAmount.has(key)) {
+            supersededTxIds.add(le.transaction_id);
+          }
+        }
+
+        const mergedTx: any[] = [];
+        const seenTx = new Set<string>();
+        for (const t of legacyTxData) {
+          if (supersededTxIds.has(t.id)) continue; /* skip superseded legacy */
+          if (!seenTx.has(t.id)) {
+            seenTx.add(t.id);
+            mergedTx.push(t);
+          }
+        }
+        for (const t of canonTxData) {
+          if (!seenTx.has(t.id)) {
+            seenTx.add(t.id);
+            mergedTx.push(t);
+          }
+        }
+
+        const mergedEntry: any[] = [];
+        const seenEntry = new Set<string>();
+        for (const e of legacyEntryData) {
+          if (supersededTxIds.has(e.transaction_id)) continue; /* skip superseded legacy */
+          if (!seenEntry.has(e.id)) {
+            seenEntry.add(e.id);
+            mergedEntry.push(e);
+          }
+        }
+        for (const e of canonEntryData) {
+          if (!seenEntry.has(e.id)) {
+            seenEntry.add(e.id);
+            mergedEntry.push(e);
+          }
+        }
+
+        ledgerTxResult = { data: mergedTx, error: legacyTxRes.error };
+        ledgerEntryResult = { data: mergedEntry, error: legacyEntryRes.error };
+      }
+
+      if (ledgerTxResult?.error) {
+        throw new Error(
+          `Unable to load transactions: ${ledgerTxResult.error.message}`,
+        );
+      }
+
+      if (ledgerEntryResult?.error) {
+        throw new Error(
+          `Unable to load transaction entries: ${ledgerEntryResult.error.message}`,
+        );
+      }
+
+      setTransactions((ledgerTxResult.data || []) as Transaction[]);
+      setEntries((ledgerEntryResult.data || []) as TransactionEntry[]);
 
       const bankAccounts = (accountsResult.data || []).filter(
         (account: Account) =>

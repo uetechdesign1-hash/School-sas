@@ -234,7 +234,7 @@ export default function AccountsPage() {
 
       const [
         accountResult,
-        journalLinesResult,
+        ledgerEntriesResult,
         openingResult,
       ] = await Promise.all([
         supabase
@@ -257,7 +257,7 @@ export default function AccountsPage() {
           .order("name"),
 
         supabase
-          .from("journal_lines")
+          .from("ledger_entries")
           .select(
             "id, school_id, account_id, debit, credit"
           )
@@ -283,16 +283,16 @@ export default function AccountsPage() {
        * logged instead of thrown — balances then fall back to the
        * legacy opening_balance column.
        */
-      if (journalLinesResult.error) {
+      if (ledgerEntriesResult.error) {
         console.error(
-          "ACCOUNTS journal_lines ERROR:",
-          journalLinesResult.error
+          "ACCOUNTS ledger_entries ERROR:",
+          ledgerEntriesResult.error
         );
         setPosted(new Map());
       } else {
         setPosted(
           buildPostedTotals(
-            (journalLinesResult.data || []) as {
+            (ledgerEntriesResult.data || []) as {
               account_id: string;
               debit: number | null;
               credit: number | null;

@@ -632,6 +632,53 @@ export async function postExpenseJournal(
   });
 }
 
+export async function postReceiptJournal(
+  supabase: SupabaseClient,
+  input: {
+    schoolId: string;
+    fiscalYearId: string;
+    entryDate: string;
+    sourceRecordId?: string | null;
+    receiveAccountId: string;   // Cash / Bank account (receives the money)
+    incomeAccountId: string;    // Income account (earned the money)
+    amount: number;
+    createdBy?: string | null;
+    referenceType?: string | null;
+    referenceId?: string | null;
+    entryDescription?: string | null;
+  },
+) {
+  const entryDescription =
+    input.entryDescription?.trim() || `Receipt booking`;
+  return postCanonicalJournalEntry(supabase, {
+    schoolId: input.schoolId,
+    fiscalYearId: input.fiscalYearId,
+    entryDate: input.entryDate,
+    description: entryDescription,
+    entryType: "RECEIPT",
+    sourceModule: "receipts",
+    sourceTable: "receipts",
+    sourceRecordId: input.sourceRecordId ?? null,
+    referenceType: input.referenceType ?? "receipt",
+    referenceId: input.sourceRecordId ?? null,
+    createdBy: input.createdBy ?? null,
+    lines: [
+      {
+        accountId: input.receiveAccountId,
+        debit: Number(input.amount || 0),
+        credit: 0,
+        description: entryDescription,
+      },
+      {
+        accountId: input.incomeAccountId,
+        debit: 0,
+        credit: Number(input.amount || 0),
+        description: entryDescription,
+      },
+    ],
+  });
+}
+
 export async function postContraJournal(
   supabase: SupabaseClient,
   input: {
