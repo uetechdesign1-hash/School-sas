@@ -242,154 +242,88 @@ export default function BankReconciliationPage() {
       setOpeningBalances((openingResult.data || []) as OpeningBalance[]);
 
       /* =====================================================
-       * Load transactions + entries from the canonical ledger
-       * views (ledger_transactions / ledger_entries), which
-       * UNION legacy (not superseded) + canonical journal data.
-       * Fall back to reading both legacy and canonical tables
-       * individually if the views are unavailable.
+       * Load transactions + entries from the bank_book view,
+       * which matches the Cash/Bank page exactly.
+       * This ensures Bank Reconciliation matches Bank Book.
        * ===================================================== */
-      let ledgerTxResult: any = null;
-      let ledgerEntryResult: any = null;
+      // Load data for the selected period (for reconciliation rows)
+      const { data: bankBookData, error: bankBookError } = await supabase
+        .from("bank_book")
+        .select(
+          "journal_entry_id, school_id, entry_id, entry_date, entry_type, reference_type, reference_id, entry_description, journal_line_id, account_id, account_code, account_name, debit, credit, bank_in, bank_out, line_description, created_at, vendor_payment_id, vendor_bill_number, vendor_payment_ref, vendor_name, vendor_id"
+        )
+        .eq("school_id", currentSchoolId)
+        .gte("entry_date", dateFrom)
+        .lte("entry_date", dateTo)
+        .order("entry_date", { ascending: true })
+        .order("created_at", { ascending: true });
 
-      try {
-        const [txRes, entryRes] = await Promise.all([
-          pagedRead(
-            (from, to) =>
-              supabase
-                .from("ledger_transactions")
-                .select(
-                  "id, transaction_date, transaction_type, description, reference_type, reference_id, created_at",
-                )
-                .eq("school_id", currentSchoolId)
-                .order("transaction_date", { ascending: true })
-                .order("created_at", { ascending: true })
-                .range(from, to),
-          ),
-          pagedRead(
-            (from, to) =>
-              supabase
-                .from("ledger_entries")
-                .select(
-                  "id, school_id, transaction_id, account_id, debit, credit, description",
-                )
-                .eq("school_id", currentSchoolId)
-                .range(from, to),
-          ),
-        ]);
-        ledgerTxResult = txRes;
-        ledgerEntryResult = entryRes;
-      } catch (ledgerViewErr) {
-        console.warn(
-          "BANK RECONCILIATION ledger_* views unavailable, falling back to legacy + canonical tables:",
-          ledgerViewErr
-        );
-
-        const [
-          legacyTxRes,
-          legacyEntryRes,
-          canonTxRes,
-          canonEntryRes,
-        ] = await Promise.all([
-          supabase
-            .from("transactions")
-            .select(
-              "id, transaction_date, transaction_type, description, reference_type, reference_id, created_at",
-            )
-            .eq("school_id", currentSchoolId)
-            .order("transaction_date", { ascending: true })
-            .order("created_at", { ascending: true }),
-          supabase
-            .from("transaction_entries")
-            .select(
-              "id, school_id, transaction_id, account_id, debit, credit, description",
-            )
-            .eq("school_id", currentSchoolId),
-          supabase
-            .from("journal_entries")
-            .select(
-              "id, entry_date as transaction_date, entry_type as transaction_type, description, reference_type, reference_id, created_at",
-            )
-            .eq("school_id", currentSchoolId),
-          supabase
-            .from("journal_lines")
-            .select(
-              "id, school_id, journal_entry_id as transaction_id, account_id, debit, credit, description",
-            )
-            .eq("school_id", currentSchoolId),
-        ]);
-
-        const legacyTxData: any[] = (legacyTxRes.data || []) as any[];
-        const canonTxData: any[] = (canonTxRes.data || []) as any[];
-        const legacyEntryData: any[] = (legacyEntryRes.data || []) as any[];
-        const canonEntryData: any[] = (canonEntryRes.data || []) as any[];
-
-        /* Build a set of legacy transaction IDs that are already represented
-         * by a canonical journal entry (same date, same total debit+credit).
-         * These legacy entries must be skipped to avoid double counting. */
-        const canonByDateAmount = new Map<string, boolean>();
-        for (const ce of canonEntryData) {
-          const key = `${ce.account_id}|${String(ce.debit || 0)}|${String(ce.credit || 0)}`;
-          canonByDateAmount.set(key, true);
-        }
-
-        const supersededTxIds = new Set<string>();
-        for (const le of legacyEntryData) {
-          const key = `${le.account_id}|${String(le.debit || 0)}|${String(le.credit || 0)}`;
-          if (canonByDateAmount.has(key)) {
-            supersededTxIds.add(le.transaction_id);
-          }
-        }
-
-        const mergedTx: any[] = [];
-        const seenTx = new Set<string>();
-        for (const t of legacyTxData) {
-          if (supersededTxIds.has(t.id)) continue; /* skip superseded legacy */
-          if (!seenTx.has(t.id)) {
-            seenTx.add(t.id);
-            mergedTx.push(t);
-          }
-        }
-        for (const t of canonTxData) {
-          if (!seenTx.has(t.id)) {
-            seenTx.add(t.id);
-            mergedTx.push(t);
-          }
-        }
-
-        const mergedEntry: any[] = [];
-        const seenEntry = new Set<string>();
-        for (const e of legacyEntryData) {
-          if (supersededTxIds.has(e.transaction_id)) continue; /* skip superseded legacy */
-          if (!seenEntry.has(e.id)) {
-            seenEntry.add(e.id);
-            mergedEntry.push(e);
-          }
-        }
-        for (const e of canonEntryData) {
-          if (!seenEntry.has(e.id)) {
-            seenEntry.add(e.id);
-            mergedEntry.push(e);
-          }
-        }
-
-        ledgerTxResult = { data: mergedTx, error: legacyTxRes.error };
-        ledgerEntryResult = { data: mergedEntry, error: legacyEntryRes.error };
-      }
-
-      if (ledgerTxResult?.error) {
+      if (bankBookError) {
         throw new Error(
-          `Unable to load transactions: ${ledgerTxResult.error.message}`,
+          `Unable to load bank book: ${bankBookError.message}`,
         );
       }
 
-      if (ledgerEntryResult?.error) {
-        throw new Error(
-          `Unable to load transaction entries: ${ledgerEntryResult.error.message}`,
-        );
+      // Transform bank_book rows to Transaction/TransactionEntry format
+      const bankBookRows = (bankBookData || []) as any[];
+
+      // Build transactions from bank_book (group by entry_id)
+      const transactionMap = new Map<string, any>();
+      for (const row of bankBookRows) {
+        const entryId = row.entry_id;
+        if (!transactionMap.has(entryId)) {
+          transactionMap.set(entryId, {
+            id: entryId,
+            school_id: row.school_id,
+            transaction_date: row.entry_date,
+            transaction_type: row.entry_type,
+            description: row.entry_description,
+            reference_type: row.reference_type,
+            reference_id: row.reference_id,
+            created_at: row.created_at,
+          });
+        }
       }
 
-      setTransactions((ledgerTxResult.data || []) as Transaction[]);
-      setEntries((ledgerEntryResult.data || []) as TransactionEntry[]);
+      const transactions = Array.from(transactionMap.values());
+      const entries = bankBookRows.map((row) => ({
+        id: row.journal_line_id,
+        school_id: row.school_id,
+        transaction_id: row.entry_id,
+        account_id: row.account_id,
+        debit: row.debit,
+        credit: row.credit,
+        description: row.line_description,
+      }));
+
+      setTransactions(transactions as Transaction[]);
+      setEntries(entries as TransactionEntry[]);
+
+      // Also load data BEFORE the period for opening balance calculation
+      // (matching Cash/Bank page behavior)
+      if (bankAccountId) {
+        const { data: openingRows, error: openingError } = await supabase
+          .from("bank_book")
+          .select("debit, credit")
+          .eq("school_id", currentSchoolId)
+          .eq("account_id", bankAccountId)
+          .lt("entry_date", dateFrom);
+
+        if (openingError) {
+          console.warn("Failed to load opening balance rows:", openingError);
+        } else {
+          // Store opening balance rows for the opening balance calculation
+          // We'll use a separate state or calculate it directly
+          const openingBalanceFromBook = (openingRows || []).reduce(
+            (sum: number, row: any) => {
+              return sum + Number(row.debit || 0) - Number(row.credit || 0);
+            },
+            0
+          );
+          // We'll use this in the openingBalance calculation
+          (window as any).__bankOpeningBalance = openingBalanceFromBook;
+        }
+      }
 
       const bankAccounts = (accountsResult.data || []).filter(
         (account: Account) =>
@@ -451,10 +385,8 @@ export default function BankReconciliationPage() {
 
   /**
    * FIX:
-   * Opening balance comes from opening_balances, not from zero.
-   *
-   * For Main Bank in the user's current test:
-   * Opening Balance = ₹10,000 Dr.
+   * Opening balance comes from opening_balances + bank_book entries before the period.
+   * This matches the Cash/Bank page calculation.
    */
   const openingBalance = useMemo(() => {
     if (!bankAccountId || !dateFrom) return 0;
@@ -477,28 +409,16 @@ export default function BankReconciliationPage() {
 
     let balance = saved ? Number(saved.balance || 0) : 0;
 
-    // Add bank transactions before the reconciliation period.
-    entries
-      .filter((entry) => entry.account_id === bankAccountId)
-      .forEach((entry) => {
-        const transaction = transactionMap.get(entry.transaction_id);
-
-        if (!transaction) return;
-
-        if (transaction.transaction_date >= dateFrom) return;
-
-        balance +=
-          Number(entry.debit || 0) -
-          Number(entry.credit || 0);
-      });
+    // Add bank transactions before the reconciliation period from bank_book view.
+    // This matches the Cash/Bank page behavior.
+    const preLoadedOpeningBalance = (window as any).__bankOpeningBalance || 0;
+    balance += preLoadedOpeningBalance;
 
     return balance;
   }, [
     bankAccountId,
     dateFrom,
-    entries,
     openingBalances,
-    transactionMap,
   ]);
 
   const bankRows = useMemo<BankRow[]>(() => {

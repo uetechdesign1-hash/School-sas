@@ -14,6 +14,7 @@ import {
 import * as XLSX from "xlsx";
 import { createClient } from "@/lib/supabase/client";
 import { filterSelectableAccounts } from "@/lib/accounting/account-visibility";
+import { pagedRead } from "@/lib/supabase/paged-read";
 
 type Account = {
   id: string;
@@ -347,18 +348,26 @@ export default function LedgerPage() {
   const loadJournalData = useCallback(
     async (currentSchoolId: string) => {
       const [journalResult, lineResult] = await Promise.all([
-        supabase
-          .from("journal_entries")
-          .select(
-            "id, school_id, entry_date, entry_type, reference_type, reference_id, description",
-          )
-          .eq("school_id", currentSchoolId),
-        supabase
-          .from("journal_lines")
-          .select(
-            "id, school_id, journal_entry_id, account_id, debit, credit, description",
-          )
-          .eq("school_id", currentSchoolId),
+        pagedRead(
+          (from, to) =>
+            supabase
+              .from("journal_entries")
+              .select(
+                "id, school_id, entry_date, entry_type, reference_type, reference_id, description",
+              )
+              .eq("school_id", currentSchoolId)
+              .range(from, to),
+        ),
+        pagedRead(
+          (from, to) =>
+            supabase
+              .from("journal_lines")
+              .select(
+                "id, school_id, journal_entry_id, account_id, debit, credit, description",
+              )
+              .eq("school_id", currentSchoolId)
+              .range(from, to),
+        ),
       ]);
 
       if (journalResult.error) {
@@ -490,14 +499,13 @@ export default function LedgerPage() {
   }, [accounts]);
 
   /*
-   * Accounts offered in the Account selector: accounts created by the school
-   * from Dashboard -> Accounting -> Accounts plus the common accounts every
-   * school needs (Cash, Bank, Student Fees, Student Fee Receivable and
-   * Salary Payable). Seeded default accounts are never deleted - they simply
-   * do not clutter the selector.
+   * Accounts offered in the Account selector: ALL active accounts.
+   * The Ledger is a report that must show every account with activity,
+   * so we don't filter out seeded default accounts (like expense accounts).
+   * The filterSelectableAccounts is only for transaction entry screens.
    */
   const selectableAccounts = useMemo(
-    () => filterSelectableAccounts(accounts),
+    () => (accounts ?? []).filter((a) => a.is_active),
     [accounts],
   );
 

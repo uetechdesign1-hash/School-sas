@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import { createClient } from "@/lib/supabase/client";
+import { pagedRead } from "@/lib/supabase/paged-read";
 
 type Account = {
   id: string;
@@ -265,8 +266,6 @@ export default function ProfitLossPage() {
         accountResult,
         transactionResult,
         entryResult,
-        journalEntryResult,
-        journalLineResult,
       ] = await Promise.all([
         supabase
           .from("schools")
@@ -328,40 +327,44 @@ export default function ProfitLossPage() {
             "school_id",
             currentSchoolId
           ),
+      ]);
 
-        supabase
-          .from("journal_entries")
-          .select(
-            `
-            id,
-            school_id,
-            entry_date,
-            entry_type,
-            reference_type,
-            reference_id
-            `
-          )
-          .eq(
-            "school_id",
-            currentSchoolId
-          ),
-
-        supabase
-          .from("journal_lines")
-          .select(
-            `
-            id,
-            school_id,
-            journal_entry_id,
-            account_id,
-            debit,
-            credit
-            `
-          )
-          .eq(
-            "school_id",
-            currentSchoolId
-          ),
+      // Use pagedRead to load all journal entries and lines (bypasses 1000 row limit)
+      const [journalEntryResult, journalLineResult] = await Promise.all([
+        pagedRead(
+          (from, to) =>
+            supabase
+              .from("journal_entries")
+              .select(
+                `
+                id,
+                school_id,
+                entry_date,
+                entry_type,
+                reference_type,
+                reference_id
+                `
+              )
+              .eq("school_id", currentSchoolId)
+              .range(from, to),
+        ),
+        pagedRead(
+          (from, to) =>
+            supabase
+              .from("journal_lines")
+              .select(
+                `
+                id,
+                school_id,
+                journal_entry_id,
+                account_id,
+                debit,
+                credit
+                `
+              )
+              .eq("school_id", currentSchoolId)
+              .range(from, to),
+        ),
       ]);
 
       if (schoolResult.error) {

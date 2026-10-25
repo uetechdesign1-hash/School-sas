@@ -113,7 +113,7 @@ export default function AccountsPage() {
 
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
-  const [statusFilter, setStatusFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("active");
   const [showSystemAccounts, setShowSystemAccounts] = useState(false);
 
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -223,6 +223,80 @@ export default function AccountsPage() {
     return `${money(view.balance)} ${view.side}`;
   }
 
+  /*
+   * Posted activity per account. Reads the legacy `transaction_entries` and
+   * canonical `journal_lines` base tables directly — the same union the Ledger
+   * page uses — de-duplicating superseded legacy entries via
+   * `legacy_superseded_transactions`. This avoids depending on the
+   * `ledger_entries` database view, which may not be deployed in every school
+   * database or may return stale/incomplete rows, causing accounts (including
+   * fee accounts) to wrongly show zero and "No journal postings yet".
+   */
+  async function loadPostedTotals(id: string): Promise<Map<string, PostedTotals>> {
+    const [supersededResult, legacyResult, journalResult] = await Promise.all([
+      supabase
+        .from("legacy_superseded_transactions")
+        .select("transaction_id")
+        .eq("school_id", id),
+      supabase
+        .from("transaction_entries")
+        .select(
+          "id, school_id, transaction_id, account_id, debit, credit"
+        )
+        .eq("school_id", id),
+      supabase
+        .from("journal_lines")
+        .select(
+          "id, school_id, journal_entry_id, account_id, debit, credit"
+        )
+        .eq("school_id", id),
+    ]);
+
+    const superseded = new Set<string>();
+    if (!supersededResult.error) {
+      for (const row of supersededResult.data || []) {
+        if (row.transaction_id) {
+          superseded.add(String(row.transaction_id));
+        }
+      }
+    }
+
+    const lines: {
+      account_id: string;
+      debit: number | null;
+      credit: number | null;
+    }[] = [];
+
+    if (!legacyResult.error) {
+      for (const entry of legacyResult.data || []) {
+        if (
+          entry.account_id &&
+          !superseded.has(String(entry.transaction_id))
+        ) {
+          lines.push({
+            account_id: entry.account_id,
+            debit: entry.debit,
+            credit: entry.credit,
+          });
+        }
+      }
+    }
+
+    if (!journalResult.error) {
+      for (const line of journalResult.data || []) {
+        if (line.account_id) {
+          lines.push({
+            account_id: line.account_id,
+            debit: line.debit,
+            credit: line.credit,
+          });
+        }
+      }
+    }
+
+    return buildPostedTotals(lines);
+  }
+
   async function loadAccounts(currentSchoolId?: string) {
     try {
       const id = currentSchoolId || schoolId;
@@ -232,15 +306,12 @@ export default function AccountsPage() {
       setLoading(true);
       setError("");
 
-      const [
-        accountResult,
-        ledgerEntriesResult,
-        openingResult,
-      ] = await Promise.all([
-        supabase
-          .from("accounts")
-          .select(
-            `
+      const [accountResult, postedTotals, openingResult] =
+        await Promise.all([
+          supabase
+            .from("accounts")
+            .select(
+              `
             id,
             school_id,
             code,
@@ -251,25 +322,20 @@ export default function AccountsPage() {
             is_active,
             created_at
           `
-          )
-          .eq("school_id", id)
-          .order("account_type")
-          .order("name"),
+            )
+            .eq("school_id", id)
+            .order("account_type")
+            .order("name"),
 
-        supabase
-          .from("ledger_entries")
-          .select(
-            "id, school_id, account_id, debit, credit"
-          )
-          .eq("school_id", id),
+          loadPostedTotals(id),
 
-        supabase
-          .from("opening_balances")
-          .select(
-            "id, school_id, account_id, balance, as_of_date"
-          )
-          .eq("school_id", id),
-      ]);
+          supabase
+            .from("opening_balances")
+            .select(
+              "id, school_id, account_id, balance, as_of_date"
+            )
+            .eq("school_id", id),
+        ]);
 
       if (accountResult.error) {
         throw new Error(accountResult.error.message);
@@ -278,28 +344,13 @@ export default function AccountsPage() {
       setAccounts((accountResult.data || []) as Account[]);
 
       /*
-       * The account list itself must still render if the balance
-       * sources are temporarily unavailable, so aux failures are
-       * logged instead of thrown — balances then fall back to the
-       * legacy opening_balance column.
+       * Posted activity already resolved by loadPostedTotals (canonical
+       * ledger_entries view, with a base-table fallback). The account list
+       * itself must still render if the balance sources are unavailable,
+       * so aux failures are logged instead of thrown — balances then fall
+       * back to the legacy opening_balance column.
        */
-      if (ledgerEntriesResult.error) {
-        console.error(
-          "ACCOUNTS ledger_entries ERROR:",
-          ledgerEntriesResult.error
-        );
-        setPosted(new Map());
-      } else {
-        setPosted(
-          buildPostedTotals(
-            (ledgerEntriesResult.data || []) as {
-              account_id: string;
-              debit: number | null;
-              credit: number | null;
-            }[]
-          )
-        );
-      }
+      setPosted(postedTotals);
 
       if (openingResult.error) {
         console.error(

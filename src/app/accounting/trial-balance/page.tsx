@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import { createClient } from "@/lib/supabase/client";
+import { pagedRead } from "@/lib/supabase/paged-read";
 
 type Account = {
   id: string;
@@ -381,34 +382,36 @@ export default function TrialBalancePage() {
 
       try {
         const [txRes, entryRes] = await Promise.all([
-          supabase
-            .from("ledger_transactions")
-            .select(
-              `
-              id,
-              transaction_date
-              `
-            )
-            .eq(
-              "school_id",
-              currentSchoolId
-            ),
-          supabase
-            .from("ledger_entries")
-            .select(
-              `
-              id,
-              school_id,
-              transaction_id,
-              account_id,
-              debit,
-              credit
-              `
-            )
-            .eq(
-              "school_id",
-              currentSchoolId
-            ),
+          pagedRead(
+            (from, to) =>
+              supabase
+                .from("ledger_transactions")
+                .select(
+                  `
+                  id,
+                  transaction_date
+                  `
+                )
+                .eq("school_id", currentSchoolId)
+                .range(from, to),
+          ),
+          pagedRead(
+            (from, to) =>
+              supabase
+                .from("ledger_entries")
+                .select(
+                  `
+                  id,
+                  school_id,
+                  transaction_id,
+                  account_id,
+                  debit,
+                  credit
+                  `
+                )
+                .eq("school_id", currentSchoolId)
+                .range(from, to),
+          ),
         ]);
         ledgerTxResult = txRes;
         ledgerEntryResult = entryRes;
@@ -434,16 +437,24 @@ export default function TrialBalancePage() {
               "id, school_id, transaction_id, account_id, debit, credit"
             )
             .eq("school_id", currentSchoolId),
-          supabase
-            .from("journal_entries")
-            .select("id, entry_date as transaction_date")
-            .eq("school_id", currentSchoolId),
-          supabase
-            .from("journal_lines")
-            .select(
-              "id, school_id, journal_entry_id as transaction_id, account_id, debit, credit"
-            )
-            .eq("school_id", currentSchoolId),
+          pagedRead(
+            (from, to) =>
+              supabase
+                .from("journal_entries")
+                .select("id, entry_date as transaction_date")
+                .eq("school_id", currentSchoolId)
+                .range(from, to),
+          ),
+          pagedRead(
+            (from, to) =>
+              supabase
+                .from("journal_lines")
+                .select(
+                  "id, school_id, journal_entry_id as transaction_id, account_id, debit, credit"
+                )
+                .eq("school_id", currentSchoolId)
+                .range(from, to),
+          ),
         ]);
 
         const legacyTxData: any[] = (legacyTxRes.data || []) as any[];

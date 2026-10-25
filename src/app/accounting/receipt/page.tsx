@@ -203,6 +203,20 @@ function today() {
   return new Date().toISOString().split("T")[0];
 }
 
+/**
+ * Sort receipt history rows by receipt number in ascending sequence
+ * (1, 2, 3...). Numeric receipt numbers are compared as numbers so
+ * "10" comes after "2", not before it.
+ */
+function sortReceiptsByNumber(a: ReceiptHistoryRow, b: ReceiptHistoryRow) {
+  const numA = Number(a.transaction_number);
+  const numB = Number(b.transaction_number);
+  if (!Number.isNaN(numA) && !Number.isNaN(numB)) return numA - numB;
+  return String(a.transaction_number || "").localeCompare(
+    String(b.transaction_number || ""),
+  );
+}
+
 function dateDDMMYYYY(value: string) {
   const [year, month, day] = String(value || "").slice(0, 10).split("-");
   return year && month && day ? `${day}-${month}-${year}` : value || "—";
@@ -986,18 +1000,31 @@ export default function ReceiptPage() {
 
     if (error) throw new Error(error.message);
 
-    const rows = (data || []) as ReceiptHistoryRow[];
+    let rows = (data || []) as ReceiptHistoryRow[];
+
+    // Apply date filter BEFORE enrichment so we don't fetch related
+    // data (students, bills, allocations, classes, sections) for receipts
+    // outside the selected date range.
+    if (historyFromDate) {
+      rows = rows.filter(
+        (row) => String(row.transaction_date || "").slice(0, 10) >= historyFromDate,
+      );
+    }
+    if (historyToDate) {
+      rows = rows.filter(
+        (row) => String(row.transaction_date || "").slice(0, 10) <= historyToDate,
+      );
+    }
+
     const paymentIds = rows
       .filter((row) => row.receipt_type === "student_fee" && row.reference_id)
       .map((row) => row.reference_id as string);
 
     if (paymentIds.length === 0) {
-      setHistory(rows.sort((a, b) => String(b.transaction_date || "").localeCompare(String(a.transaction_date || ""))));
+      setHistory(rows.sort(sortReceiptsByNumber));
       return;
     }
 
-    // Batched lookups: hundreds of receipt rows would otherwise build a
-    // single `in.()` URL past the ~8 KB proxy limit ("Bad Request" 400).
     const { data: paymentData, error: paymentError } = await inBatches(
       paymentIds,
       (batch) =>
@@ -1018,100 +1045,138 @@ export default function ReceiptPage() {
       bill_id: string | null;
     }>;
     const billIds = Array.from(new Set(payments.map((payment) => payment.bill_id).filter(Boolean) as string[]));
+    const studentIds = Array.from(
+      new Set(payments.map((payment) => payment.student_id).filter(Boolean) as string[]),
+    );
+
     const billNumberMap = new Map<string, string>();
     const billYearMap = new Map<string, string | null>();
-
-    if (billIds.length > 0) {
-      const { data: billData, error: billError } = await inBatches(
-        billIds,
-        (batch) =>
-          supabase
-            .from("fee_bills")
-            .select("id, bill_number, academic_year_id")
-            .eq("school_id", currentSchoolId)
-            .in("id", batch),
-      );
-      if (billError) throw new Error(billError?.message || "Failed to fetch bill data");
-      for (const bill of billData || []) {
-        billNumberMap.set(bill.id, bill.bill_number);
-        billYearMap.set(bill.id, bill.academic_year_id || null);
-      }
-    }
-
-    const { data: allocationData, error: allocationError } = await inBatches(
-      paymentIds,
-      (batch) =>
-        supabase
-          .from("fee_payment_allocations")
-          .select("payment_id, fee_bill_item_id, amount")
-          .eq("school_id", currentSchoolId)
-          .in("payment_id", batch),
-    );
-
-    if (allocationError) throw new Error(allocationError?.message || "Failed to fetch allocation data");
-
-    const itemIds = Array.from(new Set((allocationData || []).map((item) => item.fee_bill_item_id).filter(Boolean) as string[]));
     let itemData: Array<{ id: string; description: string }> = [];
-
-    if (itemIds.length > 0) {
-      const { data, error: itemError } = await inBatches(
-        itemIds,
-        (batch) =>
-          supabase
-            .from("fee_bill_items")
-            .select("id, description")
-            .eq("school_id", currentSchoolId)
-            .in("id", batch),
-      );
-      if (itemError) throw new Error(itemError?.message || "Failed to fetch fee bill items");
-      itemData = (data || []) as Array<{ id: string; description: string }>;
-    }
-
-    const paymentMap = new Map(payments.map((payment) => [payment.id, payment]));
-    const itemMap = new Map(itemData.map((item) => [item.id, cleanFeeCategory(item.description)]));
-    const paymentCategoryMap = new Map<string, string[]>();
-    const paymentCategoryAmountMap = new Map<string, Map<string, number>>();
-
-    for (const allocation of allocationData || []) {
-      if (!allocation.fee_bill_item_id) continue;
-
-      const description = itemMap.get(allocation.fee_bill_item_id);
-      if (!description) continue;
-
-      const current = paymentCategoryMap.get(allocation.payment_id) || [];
-      if (!current.includes(description)) current.push(description);
-      paymentCategoryMap.set(allocation.payment_id, current);
-      const amountMap = paymentCategoryAmountMap.get(allocation.payment_id) || new Map<string, number>();
-      amountMap.set(description, (amountMap.get(description) || 0) + Number(allocation.amount || 0));
-      paymentCategoryAmountMap.set(allocation.payment_id, amountMap);
-    }
-
-    // Resolve student/class/section BEFORE mapping rows. The row mapper must
-    // stay synchronous because Array.map() does not accept await.
-    const studentIds = Array.from(
-      new Set(
-        payments
-          .map((payment) => payment.student_id)
-          .filter(Boolean),
-      ),
-    );
-
     const studentMap = new Map<string, Student>();
-    if (studentIds.length > 0) {
-      const { data: studentData, error: studentError } = await inBatches(
-        studentIds,
+    let yearRanges: Array<{ id: string; name: string; start_date: string; end_date: string }> = [];
+
+    // ========================================================================
+    // Step 2 — parallel independent loads (all depend only on fee_payments)
+    // ========================================================================
+    const [
+      feeBillsResult,
+      allocationResult,
+      studentResult,
+      yearResult,
+    ] = await Promise.all([
+      billIds.length > 0
+        ? inBatches(
+            billIds,
+            (batch) =>
+              supabase
+                .from("fee_bills")
+                .select("id, bill_number, academic_year_id")
+                .eq("school_id", currentSchoolId)
+                .in("id", batch),
+          )
+        : Promise.resolve({ data: null, error: null } as { data: any[] | null; error: any }),
+
+      inBatches(
+        paymentIds,
         (batch) =>
           supabase
-            .from("students")
-            .select("id, school_id, admission_no, roll_no, first_name, middle_name, last_name, class_id, section_id, status")
+            .from("fee_payment_allocations")
+            .select("payment_id, fee_bill_item_id, amount")
             .eq("school_id", currentSchoolId)
-            .in("id", batch),
-      );
-      if (studentError) throw new Error(studentError?.message || "Failed to fetch student data");
-      for (const student of (studentData || []) as Student[]) {
-        studentMap.set(student.id, student);
-      }
+            .in("payment_id", batch),
+      ),
+
+      studentIds.length > 0
+        ? inBatches(
+            studentIds,
+            (batch) =>
+              supabase
+                .from("students")
+                .select("id, school_id, admission_no, roll_no, first_name, middle_name, last_name, class_id, section_id, status")
+                .eq("school_id", currentSchoolId)
+                .in("id", batch),
+          )
+        : Promise.resolve({ data: null, error: null } as { data: any[] | null; error: any }),
+
+      supabase
+        .from("academic_years")
+        .select("id, name, start_date, end_date")
+        .eq("school_id", currentSchoolId),
+    ]);
+
+    if (feeBillsResult.error) throw new Error(feeBillsResult.error?.message || "Failed to fetch bill data");
+    for (const bill of feeBillsResult.data || []) {
+      billNumberMap.set(bill.id, bill.bill_number);
+      billYearMap.set(bill.id, bill.academic_year_id || null);
     }
+
+    if (allocationResult.error) throw new Error(allocationResult.error?.message || "Failed to fetch allocation data");
+
+    const allocationData = allocationResult.data || [];
+    const itemIds = Array.from(new Set(allocationData.map((item) => item.fee_bill_item_id).filter(Boolean) as string[]));
+
+    if (studentResult.error) throw new Error(studentResult.error?.message || "Failed to fetch student data");
+    for (const student of (studentResult.data || []) as Student[]) {
+      studentMap.set(student.id, student);
+    }
+
+    yearRanges = yearResult.data || [];
+
+    // ========================================================================
+    // Step 3 — parallel loads that depend on step-2 results
+    // ========================================================================
+    const [itemsResult, classResult, sectionResult, enrollmentResult] = await Promise.all([
+      itemIds.length > 0
+        ? inBatches(
+            itemIds,
+            (batch) =>
+              supabase
+                .from("fee_bill_items")
+                .select("id, description")
+                .eq("school_id", currentSchoolId)
+                .in("id", batch),
+          )
+        : Promise.resolve({ data: null, error: null } as { data: any[] | null; error: any }),
+
+      (() => {
+        const ids = Array.from(
+          new Set(
+            Array.from(studentMap.values())
+              .map((student) => student.class_id)
+              .filter(Boolean) as string[],
+          ),
+        );
+        if (ids.length === 0) return Promise.resolve({ data: null, error: null } as { data: any[] | null; error: any });
+        return supabase.from("classes").select("id, name").eq("school_id", currentSchoolId).in("id", ids);
+      })(),
+
+      (() => {
+        const ids = Array.from(
+          new Set(
+            Array.from(studentMap.values())
+              .map((student) => student.section_id)
+              .filter(Boolean) as string[],
+          ),
+        );
+        if (ids.length === 0) return Promise.resolve({ data: null, error: null } as { data: any[] | null; error: any });
+        return supabase.from("sections").select("id, name").eq("school_id", currentSchoolId).in("id", ids);
+      })(),
+
+      loadEnrollmentLabels(supabase, currentSchoolId, Array.from(studentMap.keys())),
+    ]);
+
+    if (itemsResult.error) throw new Error(itemsResult.error?.message || "Failed to fetch fee bill items");
+    itemData = (itemsResult.data || []) as Array<{ id: string; description: string }>;
+
+    if (classResult.error) throw new Error(classResult.error?.message);
+    const classMap = new Map<string, string>();
+    for (const item of classResult.data || []) classMap.set(item.id, item.name);
+
+    if (sectionResult.error) throw new Error(sectionResult.error?.message);
+    const sectionMap = new Map<string, string>();
+    for (const item of sectionResult.data || []) sectionMap.set(item.id, item.name);
+
+    const dateEnrollmentLabels = enrollmentResult;
 
     // Class/section the student had in the academic year of each bill, so a
     // 2025-2026 receipt keeps showing Class 1 after promotion to Class 2.
@@ -1126,51 +1191,27 @@ export default function ReceiptPage() {
           academic_year_id: billYearMap.get(payment.bill_id as string) || null,
         })),
     );
-    // Payments without a bill: use the academic year that contains the paid date.
-    const { data: yearRanges } = await supabase
-      .from("academic_years")
-      .select("id, name, start_date, end_date")
-      .eq("school_id", currentSchoolId);
-    const dateEnrollmentLabels = await loadEnrollmentLabels(
-      supabase,
-      currentSchoolId,
-      Array.from(studentMap.keys()),
-    );
 
-    const classIds = Array.from(
-      new Set(
-        Array.from(studentMap.values())
-          .map((student) => student.class_id)
-          .filter(Boolean) as string[],
-      ),
-    );
-    const classMap = new Map<string, string>();
-    if (classIds.length > 0) {
-      const { data: classData, error: classError } = await supabase
-        .from("classes")
-        .select("id, name")
-        .eq("school_id", currentSchoolId)
-        .in("id", classIds);
-      if (classError) throw new Error(classError.message);
-      for (const item of classData || []) classMap.set(item.id, item.name);
-    }
+    // ========================================================================
+    // Step 4 — build category maps (synchronous, depends on step-3 items)
+    // ========================================================================
+    const itemMap = new Map(itemData.map((item) => [item.id, cleanFeeCategory(item.description)]));
+    const paymentMap = new Map(payments.map((payment) => [payment.id, payment]));
+    const paymentCategoryMap = new Map<string, string[]>();
+    const paymentCategoryAmountMap = new Map<string, Map<string, number>>();
 
-    const sectionIds = Array.from(
-      new Set(
-        Array.from(studentMap.values())
-          .map((student) => student.section_id)
-          .filter(Boolean) as string[],
-      ),
-    );
-    const sectionMap = new Map<string, string>();
-    if (sectionIds.length > 0) {
-      const { data: sectionData, error: sectionError } = await supabase
-        .from("sections")
-        .select("id, name")
-        .eq("school_id", currentSchoolId)
-        .in("id", sectionIds);
-      if (sectionError) throw new Error(sectionError.message);
-      for (const item of sectionData || []) sectionMap.set(item.id, item.name);
+    for (const allocation of allocationData) {
+      if (!allocation.fee_bill_item_id) continue;
+
+      const description = itemMap.get(allocation.fee_bill_item_id);
+      if (!description) continue;
+
+      const current = paymentCategoryMap.get(allocation.payment_id) || [];
+      if (!current.includes(description)) current.push(description);
+      paymentCategoryMap.set(allocation.payment_id, current);
+      const amountMap = paymentCategoryAmountMap.get(allocation.payment_id) || new Map<string, number>();
+      amountMap.set(description, (amountMap.get(description) || 0) + Number(allocation.amount || 0));
+      paymentCategoryAmountMap.set(allocation.payment_id, amountMap);
     }
 
     const enriched = rows.map((row) => {
@@ -1230,7 +1271,7 @@ export default function ReceiptPage() {
       };
     });
 
-    enriched.sort((a, b) => String(b.transaction_date || "").localeCompare(String(a.transaction_date || "")));
+    enriched.sort(sortReceiptsByNumber);
     setHistory(enriched);
   }
 
@@ -1241,8 +1282,6 @@ export default function ReceiptPage() {
 
   const filteredHistory = useMemo(() => {
     return history
-      .slice()
-      .sort((a, b) => String(b.transaction_date || "").localeCompare(String(a.transaction_date || "")))
       .filter((row) => {
         const typeMatches = historyTypeFilter === "all" || row.receipt_type === historyTypeFilter;
         const categoryMatches = historyCategoryFilter === "all" || (row.fee_categories || []).includes(historyCategoryFilter);
