@@ -243,6 +243,18 @@ function cleanFeeCategory(value: string) {
     .trim();
 }
 
+function isEditableOtherFee(item: FeeBillItem) {
+  return (
+    !item.fee_category_id &&
+    !item.inventory_sale_id &&
+    /^Other Fee\s*:/i.test(item.description)
+  );
+}
+
+function otherFeeDescriptionText(item: FeeBillItem) {
+  return item.description.replace(/^Other Fee\s*:\s*/i, "").trim();
+}
+
 function paymentMethodLabel(value: string) {
   return (
     PAYMENT_METHODS.find((item) => item.value === value)?.label || value
@@ -342,6 +354,8 @@ export default function ReceiptPage() {
   const [inventoryIssueLines, setInventoryIssueLines] = useState<InventoryIssueLine[]>([{ inventoryItemId: "", quantity: "1" }]);
   const [otherFeeDescription, setOtherFeeDescription] = useState("");
   const [otherFeeAmount, setOtherFeeAmount] = useState("");
+  const [editingOtherFeeItemId, setEditingOtherFeeItemId] = useState<string | null>(null);
+  const [editingOtherFeeText, setEditingOtherFeeText] = useState("");
   const [feeManagementName, setFeeManagementName] = useState("");
   const [feeManagementAcademicYear, setFeeManagementAcademicYear] = useState("");
   const [feeManagementAmount, setFeeManagementAmount] = useState(0);
@@ -360,8 +374,10 @@ export default function ReceiptPage() {
   const [historyCategoryFilter, setHistoryCategoryFilter] = useState("all");
   const [historyClassFilter, setHistoryClassFilter] = useState("all");
   const [historySectionFilter, setHistorySectionFilter] = useState("all");
-  const [historyFromDate, setHistoryFromDate] = useState("");
-  const [historyToDate, setHistoryToDate] = useState("");
+  const [historyFromDate, setHistoryFromDate] = useState(() => {
+    return `${today().slice(0, 7)}-01`;
+  });
+  const [historyToDate, setHistoryToDate] = useState(() => today());
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [viewingId, setViewingId] = useState<string | null>(null);
@@ -656,6 +672,42 @@ export default function ReceiptPage() {
 
     setReceiptFeeItems(items);
     return items;
+  }
+
+  async function saveOtherFeeDescription(item: FeeBillItem) {
+    const description = editingOtherFeeText.trim();
+    if (!isEditableOtherFee(item) || !description) {
+      setError("Enter a description for this Other Fee.");
+      return;
+    }
+
+    setSaving(true);
+    setError("");
+    setSuccess("");
+    try {
+      const { data: updatedItem, error: updateError } = await supabase
+        .from("fee_bill_items")
+        .update({ description: `Other Fee: ${description}` })
+        .eq("school_id", item.school_id)
+        .eq("bill_id", item.bill_id)
+        .eq("id", item.id)
+        .is("fee_category_id", null)
+        .is("inventory_sale_id", null)
+        .select("id")
+        .maybeSingle();
+
+      if (updateError) throw new Error(updateError.message);
+      if (!updatedItem) throw new Error("Other Fee was not updated. Check your permission to edit this bill.");
+
+      await loadReceiptFeeItems(item.bill_id);
+      setEditingOtherFeeItemId(null);
+      setEditingOtherFeeText("");
+      setSuccess("Other Fee description updated.");
+    } catch (err: any) {
+      setError(err?.message || "Unable to update Other Fee description.");
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function loadStudentBills(studentId: string) {
@@ -3704,6 +3756,36 @@ export default function ReceiptPage() {
                                               </button>
                                             </div>}
 
+                                            {receiptFeeItems.some(isEditableOtherFee) && (
+                                              <div className="mt-3 space-y-2 rounded-xl border border-amber-200 bg-amber-50/40 p-3">
+                                                <p className="text-xs font-semibold text-slate-700">Existing Other Fees — edit a description if it was entered incorrectly.</p>
+                                                {receiptFeeItems.filter(isEditableOtherFee).map((item) => (
+                                                  <div key={item.id} className="flex flex-col gap-2 rounded-lg bg-white p-3 sm:flex-row sm:items-center">
+                                                    {editingOtherFeeItemId === item.id ? (
+                                                      <>
+                                                        <input
+                                                          type="text"
+                                                          value={editingOtherFeeText}
+                                                          onChange={(event) => setEditingOtherFeeText(event.target.value)}
+                                                          maxLength={200}
+                                                          aria-label="Edit Other Fee description"
+                                                          className="input min-w-0 flex-1"
+                                                        />
+                                                        <button type="button" onClick={() => void saveOtherFeeDescription(item)} disabled={saving || !editingOtherFeeText.trim()} className="rounded-lg bg-emerald-700 px-3 py-2 text-xs font-bold text-white disabled:opacity-50">Save</button>
+                                                        <button type="button" onClick={() => { setEditingOtherFeeItemId(null); setEditingOtherFeeText(""); }} disabled={saving} className="rounded-lg border px-3 py-2 text-xs font-semibold text-slate-600">Cancel</button>
+                                                      </>
+                                                    ) : (
+                                                      <>
+                                                        <span className="min-w-0 flex-1 break-words text-sm text-slate-800">{otherFeeDescriptionText(item)}</span>
+                                                        <span className="text-xs font-semibold text-slate-600">{money(item.net_amount)}</span>
+                                                        <button type="button" onClick={() => { setEditingOtherFeeItemId(item.id); setEditingOtherFeeText(otherFeeDescriptionText(item)); }} disabled={saving} className="rounded-lg border border-amber-300 px-3 py-2 text-xs font-semibold text-amber-800">Edit description</button>
+                                                      </>
+                                                    )}
+                                                  </div>
+                                                ))}
+                                              </div>
+                                            )}
+
                                             <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4">
                         <div className="flex items-start justify-between gap-3">
                           <div>
@@ -4065,7 +4147,7 @@ export default function ReceiptPage() {
               </section>
 
               <section className="mt-6 overflow-hidden rounded-2xl border bg-white no-print">
-                <div className="flex items-center justify-between border-b px-5 py-4">
+                <div className="flex flex-col gap-4 border-b px-4 py-4 sm:px-5 lg:flex-row lg:items-center lg:justify-between">
                   <div>
                     <h2 className="font-semibold">
                       Receipt History
@@ -4084,11 +4166,11 @@ export default function ReceiptPage() {
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2">
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:flex lg:flex-wrap lg:items-center">
                     <select
                       value={historyTypeFilter}
                       onChange={(event) => setHistoryTypeFilter(event.target.value as ReceiptType | "all")}
-                      className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500"
+                      className="min-w-0 w-full rounded-lg border border-slate-200 bg-white px-2 py-2 text-sm outline-none focus:border-blue-500 lg:w-auto lg:px-3"
                     >
                       <option value="all">All receipt types</option>
                       <option value="student_fee">Student Fee</option>
@@ -4098,7 +4180,7 @@ export default function ReceiptPage() {
                     <select
                       value={historyCategoryFilter}
                       onChange={(event) => setHistoryCategoryFilter(event.target.value)}
-                      className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500"
+                      className="min-w-0 w-full rounded-lg border border-slate-200 bg-white px-2 py-2 text-sm outline-none focus:border-blue-500 lg:w-auto lg:px-3"
                     >
                       <option value="all">All fee categories</option>
                       {historyCategories.map((category) => (
@@ -4106,12 +4188,12 @@ export default function ReceiptPage() {
                       ))}
                     </select>
 
-                    <select value={historyClassFilter} onChange={(event) => { setHistoryClassFilter(event.target.value); setHistorySectionFilter("all"); }} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
+                    <select value={historyClassFilter} onChange={(event) => { setHistoryClassFilter(event.target.value); setHistorySectionFilter("all"); }} className="min-w-0 w-full rounded-lg border border-slate-200 bg-white px-2 py-2 text-sm outline-none focus:border-blue-500 lg:w-auto lg:px-3">
                       <option value="all">All classes</option>
                       {classes.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
                     </select>
 
-                    <select value={historySectionFilter} onChange={(event) => setHistorySectionFilter(event.target.value)} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500">
+                    <select value={historySectionFilter} onChange={(event) => setHistorySectionFilter(event.target.value)} className="min-w-0 w-full rounded-lg border border-slate-200 bg-white px-2 py-2 text-sm outline-none focus:border-blue-500 lg:w-auto lg:px-3">
                       <option value="all">All sections</option>
                       {historySections.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
                     </select>
@@ -4121,7 +4203,7 @@ export default function ReceiptPage() {
                       value={historyFromDate}
                       onChange={(event) => setHistoryFromDate(event.target.value)}
                       title="From date"
-                      className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500"
+                      className="min-w-0 w-full rounded-lg border border-slate-200 bg-white px-2 py-2 text-sm outline-none focus:border-blue-500 lg:w-auto lg:px-3"
                     />
 
                     <input
@@ -4129,7 +4211,7 @@ export default function ReceiptPage() {
                       value={historyToDate}
                       onChange={(event) => setHistoryToDate(event.target.value)}
                       title="To date"
-                      className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500"
+                      className="min-w-0 w-full rounded-lg border border-slate-200 bg-white px-2 py-2 text-sm outline-none focus:border-blue-500 lg:w-auto lg:px-3"
                     />
 
                     <button
@@ -4157,7 +4239,7 @@ export default function ReceiptPage() {
                     className="inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm"
                   >
                     <RefreshCw size={15} />
-                    Refresh
+                    Load dates
                   </button>
                   </div>
                 </div>

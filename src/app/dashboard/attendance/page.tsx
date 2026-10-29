@@ -901,7 +901,7 @@ export default function AdminAttendancePage() {
       if (runResult.data?.id) {
         const { data, error: savedItemsError } = await supabase
           .from("payroll_items")
-          .select("employee_id, staff_id, working_days, paid_leave_days, unpaid_days, school_holidays")
+          .select("employee_id, staff_id, working_days, paid_leave_days, unpaid_days")
           .eq("school_id", schoolId)
           .eq("payroll_run_id", runResult.data.id);
         if (savedItemsError) throw new Error(`Payroll items: ${savedItemsError.message}`);

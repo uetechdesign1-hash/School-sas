@@ -53,9 +53,12 @@ type Salary = {
 type Row = {
   staff: Staff;
   salary: Salary | null;
+  workingDays: number;
+  scheduledDays: number;
   worked: number;
   paidLeave: number;
   holiday: number;
+  weekOff: number;
   unpaid: number;
   payable: number;
   gross: number;
@@ -100,6 +103,14 @@ function monthText(month: string) {
 function daysInMonth(month: string) {
   const [y, m] = month.split("-").map(Number);
   return new Date(y, m, 0).getDate();
+}
+
+function elapsedDaysInMonth(month: string) {
+  const today = new Date().toISOString().slice(0, 10);
+  const currentMonth = today.slice(0, 7);
+  if (month < currentMonth) return daysInMonth(month);
+  if (month > currentMonth) return 0;
+  return Math.min(Number(today.slice(8, 10)), daysInMonth(month));
 }
 
 function staffName(s: Staff) {
@@ -199,37 +210,34 @@ function normalizeSalary(raw: Record<string, unknown>, staffId: string): Salary 
 }
 function calculate(
   salary: Salary | null,
-  workingDays: number,
   worked: number,
   paidLeave: number,
   holiday: number,
+  weekOff: number,
+  unpaidDays: number,
   calendarDays: number,
+  elapsedDays: number,
 ) {
-  if (!salary) {
-    return { payable: 0, unpaid: workingDays, gross: 0, lop: 0, deductions: 0, net: 0 };
-  }
-
-  const wd = Math.max(0, n(workingDays));
   const w = Math.max(0, n(worked));
   const p = Math.max(0, n(paidLeave));
   const h = Math.max(0, n(holiday));
+  const off = Math.max(0, n(weekOff));
+  const elapsed = Math.max(0, Math.min(n(calendarDays), n(elapsedDays)));
+  const unpaid = Math.min(elapsed, Math.max(0, n(unpaidDays)));
+  const payable = Math.min(elapsed, w + p + h + off);
+  if (!salary) {
+    return { payable, unpaid, gross: 0, lop: 0, deductions: 0, net: 0 };
+  }
 
-  // Scheduled working days exclude school holidays and weekly offs. Those
-  // calendar days are paid as part of the fixed monthly salary, so loss of pay
-  // is based on calendar days in the month, not scheduled working days.
-  const payable = Math.min(wd, w + p);
-  const unpaid = Math.max(wd - payable, 0);
-
-  // Gross is the full monthly salary from the Salary Structure.
-  // LOP is shown separately and reduces Net Pay. Do not replace Gross with
-  // the attendance-prorated amount; otherwise Gross incorrectly becomes Net
-  // before deductions.
-  const gross = salary.gross_salary;
+  // Gross is the portion of the monthly salary earned through the current
+  // payroll date. LOP separately reduces that earned amount for absences.
+  const monthFraction = elapsed / Math.max(1, n(calendarDays));
+  const gross = salary.gross_salary * monthFraction;
   const monthDays = Math.max(1, n(calendarDays));
   const lop = monthDays > 0
     ? salary.gross_salary * (unpaid / monthDays)
     : 0;
-  const deductions = salary.deductions;
+  const deductions = salary.deductions * monthFraction;
   const net = Math.max(gross - lop - deductions, 0);
 
   return { payable, unpaid, gross, lop, deductions, net };
@@ -237,7 +245,6 @@ function calculate(
 
 export default function PayrollPage() {
   const [month, setMonth] = useState(() => new Date().toISOString().slice(0, 7));
-  const [workingDays, setWorkingDays] = useState(31);
   const [schoolId, setSchoolId] = useState("");
   const [rows, setRows] = useState<Row[]>([]);
   const [savedRun, setSavedRun] = useState<PayrollRun | null>(null);
@@ -252,6 +259,8 @@ export default function PayrollPage() {
   const employeeForStaffRef = useRef<Map<string, Record<string, unknown>>>(new Map());
 
   const locked = savedRun?.status === "prepared" || savedRun?.status === "finalized";
+  const elapsedPayrollDays = elapsedDaysInMonth(month);
+  const payrollCalendarDays = daysInMonth(month);
 
   const totals = useMemo(
     () =>
@@ -265,7 +274,7 @@ export default function PayrollPage() {
         }),
         { staff: 0, gross: 0, deductions: 0, lop: 0, net: 0 },
       ),
-    [rows, workingDays],
+    [rows],
   );
 
   const filteredRows = useMemo(() => {
@@ -308,32 +317,107 @@ export default function PayrollPage() {
       const [year, monthNumber] = month.split("-").map(Number);
       const defaultDays = daysInMonth(month);
 
-      // Always refresh monthly attendance from the daily GPS/admin source
-      // before calculating payroll. This removes the dependency on someone
-      // opening the Attendance page first.
-      const { error: attendanceRefreshError } = await supabase.rpc(
-        "refresh_staff_monthly_attendance",
-        { p_month: month },
-      );
-      if (attendanceRefreshError) {
-        throw new Error(
-          `Attendance refresh: ${attendanceRefreshError.message}`,
-        );
+      const firstDate = `${month}-01`;
+      const lastDate = `${month}-${String(defaultDays).padStart(2, "0")}`;
+      const [actualResult, calendarResult, settingsResult, overridesResult] = await Promise.all([
+        supabase
+          .from("staff_attendance")
+          .select("staff_id, attendance_date, status, is_late")
+          .eq("school_id", sid)
+          .gte("attendance_date", firstDate)
+          .lte("attendance_date", lastDate),
+        supabase
+          .from("school_attendance_calendar")
+          .select("attendance_date, type")
+          .eq("school_id", sid)
+          .gte("attendance_date", firstDate)
+          .lte("attendance_date", lastDate),
+        supabase
+          .from("school_attendance_settings")
+          .select("weekly_off_day")
+          .eq("school_id", sid)
+          .maybeSingle(),
+        supabase
+          .from("staff_attendance_overrides")
+          .select("staff_id, attendance_date, status")
+          .eq("school_id", sid)
+          .gte("attendance_date", firstDate)
+          .lte("attendance_date", lastDate),
+      ]);
+
+      if (actualResult.error) throw new Error(`Attendance records: ${actualResult.error.message}`);
+      if (calendarResult.error) throw new Error(`Attendance calendar: ${calendarResult.error.message}`);
+      if (settingsResult.error) throw new Error(`Attendance settings: ${settingsResult.error.message}`);
+      if (overridesResult.error) throw new Error(`Attendance overrides: ${overridesResult.error.message}`);
+
+      const actualByStaffDate = new Map<string, { status: string; is_late: boolean | null }>();
+      for (const entry of (actualResult.data || []) as Array<{ staff_id: string; attendance_date: string; status: string; is_late: boolean | null }>) {
+        actualByStaffDate.set(`${entry.staff_id}|${entry.attendance_date}`, entry);
       }
+      const calendarByDate = new Map<string, string>();
+      for (const entry of (calendarResult.data || []) as Array<{ attendance_date: string; type: string }>) {
+        calendarByDate.set(entry.attendance_date, entry.type);
+      }
+      const statusOverrideByStaffDate = new Map<string, string>();
+      for (const entry of (overridesResult.data || []) as Array<{ staff_id: string; attendance_date: string; status: string }>) {
+        statusOverrideByStaffDate.set(`${entry.staff_id}|${entry.attendance_date}`, entry.status);
+      }
+      const weeklyOffDay = n(settingsResult.data?.weekly_off_day);
+      const elapsedDays = elapsedDaysInMonth(month);
 
-      const { data: attendance, error: attendanceError } = await supabase
-        .from("staff_monthly_attendance")
-        .select(
-          "staff_id, working_days, worked_days, paid_leave, unpaid_leave, school_holidays",
-        )
-        .eq("school_id", sid)
-        .eq("month", month);
+      function attendanceCounts(staffId: string) {
+        let monthHolidays = 0;
+        let monthWeekOffs = 0;
+        let present = 0;
+        let absent = 0;
+        let halfDay = 0;
+        let paidLeave = 0;
+        let holiday = 0;
+        let weekOff = 0;
 
-      if (attendanceError) throw new Error(`Attendance: ${attendanceError.message}`);
+        for (let day = 1; day <= defaultDays; day++) {
+          const date = `${month}-${String(day).padStart(2, "0")}`;
+          const override = statusOverrideByStaffDate.get(`${staffId}|${date}`);
+          const actual = actualByStaffDate.get(`${staffId}|${date}`);
+          const calendarType = calendarByDate.get(date);
+          const calendarStatus =
+            calendarType === "holiday" || calendarType === "week_off"
+              ? calendarType
+              : calendarType === "working_day"
+                ? "auto"
+                : new Date(`${date}T00:00:00`).getDay() === weeklyOffDay
+                  ? "week_off"
+                  : "auto";
+          const actualStatus = !actual
+            ? "auto"
+            : actual.status === "absent"
+              ? "absent"
+              : actual.status === "half_day" || actual.status === "late" || actual.is_late
+                ? "half_day"
+                : "present";
+          const status = override || actualStatus !== "auto"
+            ? override || actualStatus
+            : calendarStatus === "auto" && date <= new Date().toISOString().slice(0, 10)
+              ? "absent"
+              : calendarStatus;
 
-      const attendanceMap = new Map<string, Record<string, unknown>>();
-      for (const a of (attendance || []) as Record<string, unknown>[]) {
-        if (a.staff_id) attendanceMap.set(String(a.staff_id), a);
+          if (status === "holiday") monthHolidays++;
+          if (status === "week_off") monthWeekOffs++;
+
+          if (day > elapsedDays) continue;
+          if (status === "present") present++;
+          if (status === "absent") absent++;
+          if (status === "half_day") halfDay++;
+          if (status === "paid_leave") paidLeave++;
+          if (status === "holiday") holiday++;
+          if (status === "week_off") weekOff++;
+        }
+
+        const worked = present + halfDay * 0.5;
+        const unpaid = absent + halfDay * 0.5;
+        const workingDays = Math.max(defaultDays - monthWeekOffs, 0);
+        const scheduledDays = Math.max(defaultDays - monthWeekOffs - monthHolidays, 0);
+        return { workingDays, scheduledDays, worked, unpaid, paidLeave, holiday, weekOff };
       }
 
       const { data: runData, error: runError } = await supabase
@@ -366,24 +450,6 @@ export default function PayrollPage() {
       setSavedRun(run);
       setEditing(!run || run.status !== "prepared");
 
-      let savedItems: Record<string, Record<string, unknown>> = {};
-      if (run?.id) {
-        const { data, error } = await supabase
-          .from("payroll_items")
-          .select(
-            "id, payroll_run_id, employee_id, staff_id, salary_structure_id, working_days, paid_leave_days, unpaid_days, payable_days, gross_salary, lop_amount, pf_deduction, tax_deduction, other_deduction, total_deductions, net_salary, status, notes",
-          )
-          .eq("school_id", sid)
-          .eq("payroll_run_id", run.id);
-
-        if (error) throw new Error(`Payroll items: ${error.message}`);
-
-        for (const item of (data || []) as Record<string, unknown>[]) {
-          const id = item.staff_id || item.employee_id;
-          if (id) savedItems[String(id)] = item;
-        }
-      }
-
       const { data: staffData, error: staffError } = await supabase
         .from("staff")
         .select(
@@ -410,50 +476,36 @@ export default function PayrollPage() {
         if (raw.is_active !== false) salaryMap.set(String(id), salary);
       }
 
-      const firstSaved = Object.values(savedItems)[0];
-      const firstAttendance = attendance?.[0] as Record<string, unknown> | undefined;
-      const initialWorkingDays =
-        n(firstSaved?.working_days) ||
-        n(firstAttendance?.working_days) ||
-        defaultDays;
-
-      setWorkingDays(initialWorkingDays);
-
       const nextRows: Row[] = ((staffData || []) as Staff[]).map((s) => {
         const salary = salaryMap.get(s.id) || null;
-        const att = attendanceMap.get(s.id);
-        const saved = savedItems[s.id];
-
-        const wd = n(saved?.working_days) || n(att?.working_days) || initialWorkingDays;
-        const paid = saved
-          ? n(saved.paid_leave_days)
-          : n(att?.paid_leave);
-        const holiday = saved
-          ? n(saved.school_holidays)
-          : n(att?.school_holidays);
-
-        // Saved payroll rows keep the user's attendance edits. Salary amounts
-        // are always recalculated from the current Salary Structure so a stale
-        // payroll item cannot hide an allowance that exists in the structure.
-        const worked = saved
-          ? Math.max(
-              0,
-              wd -
-                n(saved.paid_leave_days) -
-                n(saved.unpaid_days),
-            )
-          : att?.worked_days != null
-            ? Math.max(0, n(att.worked_days))
-            : Math.max(wd - paid - n(att?.unpaid_leave), 0);
-
-        const result = calculate(salary, wd, worked, paid, holiday, defaultDays);
+        const attendance = attendanceCounts(s.id);
+        const working = attendance.workingDays;
+        const scheduledDays = attendance.scheduledDays;
+        const paid = attendance.paidLeave;
+        const holiday = attendance.holiday;
+        const weekOff = attendance.weekOff;
+        const worked = attendance.worked;
+        const unpaid = attendance.unpaid;
+        const result = calculate(
+          salary,
+          worked,
+          paid,
+          holiday,
+          weekOff,
+          unpaid,
+          defaultDays,
+          elapsedDays,
+        );
 
         return {
           staff: s,
           salary,
+          workingDays: working,
+          scheduledDays,
           worked,
           paidLeave: paid,
           holiday,
+          weekOff,
           unpaid: result.unpaid,
           payable: result.payable,
           gross: result.gross,
@@ -479,7 +531,6 @@ export default function PayrollPage() {
 
   function changeMonth(value: string) {
     setMonth(value);
-    setWorkingDays(daysInMonth(value));
   }
 
   async function savePayroll(): Promise<PayrollRun | null> {
@@ -502,10 +553,10 @@ export default function PayrollPage() {
           r.worked < 0 ||
           r.paidLeave < 0 ||
           r.holiday < 0 ||
-          r.worked + r.paidLeave > workingDays
+          r.worked + r.paidLeave > r.scheduledDays
         ) {
           throw new Error(
-            `Invalid attendance for ${staffName(r.staff)}. Worked days + paid leave cannot exceed ${workingDays}; holidays and weekly offs are already excluded from working days.`,
+            `Invalid attendance for ${staffName(r.staff)}. Worked days + paid leave cannot exceed ${r.scheduledDays} scheduled days.`,
           );
         }
       }
@@ -769,7 +820,7 @@ export default function PayrollPage() {
         net_salary: Number(r.net.toFixed(2)),
         paid_amount: 0,
         paid: false,
-        working_days: Number(workingDays),
+        working_days: Number(r.scheduledDays),
         paid_leave_days: Number(r.paidLeave),
         unpaid_days: Number(r.unpaid),
         payable_days: Number(r.payable),
@@ -1418,25 +1469,11 @@ export default function PayrollPage() {
 
             <div>
               <label className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-slate-500">
-                Working Days
+                Calendar Days
               </label>
-              <input
-                type="number"
-                min={1}
-                value={workingDays}
-                disabled={locked}
-                onChange={(e) => {
-                  const value = Math.max(1, n(e.target.value));
-                  setWorkingDays(value);
-                  setRows((current) =>
-                    current.map((r) => {
-                      const result = calculate(r.salary, value, r.worked, r.paidLeave, r.holiday, daysInMonth(month));
-                      return { ...r, worked: Math.min(r.worked, value), unpaid: result.unpaid, payable: result.payable, gross: result.gross, lopAmount: result.lop, deductions: result.deductions, net: result.net };
-                    }),
-                  );
-                }}
-                className="w-full rounded-xl border border-slate-300 px-4 py-2.5 text-sm font-semibold outline-none focus:border-blue-500 disabled:bg-slate-100"
-              />
+              <div className="flex h-[42px] items-center rounded-xl border border-slate-300 px-4 text-sm font-semibold">
+                {daysInMonth(month)} days
+              </div>
             </div>
 
             <div>
@@ -1494,8 +1531,7 @@ export default function PayrollPage() {
             <div>
               <h2 className="font-bold text-slate-900">Monthly Payroll</h2>
               <p className="mt-1 text-xs text-slate-500">
-                Salary comes from each staff member's Salary Structure. Attendance is linked automatically from Admin Staff Attendance.
-                Paid leave and school holidays are payable; unpaid days reduce salary.
+                Salary accrued through {elapsedPayrollDays} of {payrollCalendarDays} calendar days. Working = month days minus weekly offs. Payable = worked + paid leave + holidays + weekly offs; Unpaid comes from absences.
               </p>
             </div>
 
@@ -1549,11 +1585,11 @@ export default function PayrollPage() {
             <div className="p-14 text-center text-sm text-slate-500">No active staff found.</div>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[1050px] text-left">
+              <table className="w-full min-w-[1120px] table-fixed text-left text-xs xl:min-w-0">
                 <thead>
                   <tr className="border-b border-slate-200 bg-slate-50">
-                    {["Staff", "Working", "Worked", "Paid Leave", "Holiday", "Unpaid", "Payable", "Gross", "Deductions", "Net", "Action"].map((h) => (
-                      <th key={h} className="px-4 py-3 text-xs font-bold uppercase tracking-wide text-slate-500">
+                    {["Staff", "Days − W/O", "Worked", "Paid Leave", "Holiday", "W/O", "Unpaid", "Payable", "Gross", "Deductions", "Net", "Action"].map((h) => (
+                      <th key={h} className="whitespace-nowrap px-2 py-2 text-[10px] font-bold uppercase tracking-wide text-slate-500">
                         {h}
                       </th>
                     ))}
@@ -1562,47 +1598,42 @@ export default function PayrollPage() {
                 <tbody className="divide-y divide-slate-100">
                   {filteredRows.map((r) => (
                     <tr key={r.staff.id} className="hover:bg-slate-50">
-                      <td className="px-4 py-4">
-                        <div className="font-semibold text-slate-900">{staffName(r.staff)}</div>
-                        <div className="text-xs text-slate-500">
-                          {r.staff.employee_no} · {r.staff.designation || "No designation"}
+                      <td className="max-w-0 overflow-hidden px-2 py-2">
+                        <div className="truncate font-semibold text-slate-900" title={`${staffName(r.staff)} ${r.staff.employee_no}`}>
+                          {staffName(r.staff)} <span className="font-normal text-slate-500">{r.staff.employee_no}</span>
                         </div>
-                        {!r.salary && (
-                          <span className="mt-1 inline-block text-xs font-semibold text-red-600">
-                            Salary Structure Missing — click Add Salary
-                          </span>
-                        )}
                       </td>
 
-                      <td className="px-4 py-4 text-center font-semibold">{workingDays}</td>
+                      <td className="whitespace-nowrap px-2 py-2 text-center font-semibold" title="Full month calendar days minus weekly offs; holidays are included">{r.workingDays}</td>
 
-                      <td className="px-4 py-4 text-center font-semibold">{r.worked}</td>
-                      <td className="px-4 py-4 text-center font-semibold">{r.paidLeave}</td>
-                      <td className="px-4 py-4 text-center font-semibold">{r.holiday}</td>
+                      <td className="whitespace-nowrap px-2 py-2 text-center font-semibold">{r.worked}</td>
+                      <td className="whitespace-nowrap px-2 py-2 text-center font-semibold">{r.paidLeave}</td>
+                      <td className="whitespace-nowrap px-2 py-2 text-center font-semibold">{r.holiday}</td>
+                      <td className="whitespace-nowrap px-2 py-2 text-center font-semibold">{r.weekOff}</td>
 
-                      <td className="px-4 py-4 text-center font-bold text-red-600">{r.unpaid}</td>
-                      <td className="px-4 py-4 text-center font-bold">{r.payable}</td>
-                      <td className="px-4 py-4 text-right font-semibold">{r.salary ? money(r.gross) : "—"}</td>
-                      <td className="px-4 py-4 text-right">{r.salary ? money(r.deductions) : "—"}</td>
-                      <td className="px-4 py-4 text-right font-bold text-blue-700">{r.salary ? money(r.net) : "—"}</td>
+                      <td className="whitespace-nowrap px-2 py-2 text-center font-bold text-red-600">{r.unpaid}</td>
+                      <td className="whitespace-nowrap px-2 py-2 text-center font-bold">{r.payable}</td>
+                      <td className="whitespace-nowrap px-2 py-2 text-right font-semibold">{r.salary ? money(r.gross) : "—"}</td>
+                      <td className="whitespace-nowrap px-2 py-2 text-right">{r.salary ? money(r.deductions) : "—"}</td>
+                      <td className="whitespace-nowrap px-2 py-2 text-right font-bold text-blue-700">{r.salary ? money(r.net) : "—"}</td>
 
-                      <td className="px-4 py-4">
-                        <div className="flex min-w-[210px] flex-wrap items-center justify-center gap-2">
+                      <td className="whitespace-nowrap px-2 py-2">
+                        <div className="flex items-center justify-center gap-1">
                           <Link
                             href={`/dashboard/staff/${r.staff.id}/salary`}
-                            className="inline-flex items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-bold text-blue-700 hover:bg-blue-100"
+                            className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-1.5 py-1 text-[10px] font-bold text-blue-700 hover:bg-blue-100"
                             title="Add or edit salary structure"
                           >
                             <Pencil size={13} />
-                            {r.salary ? "Edit Salary" : "Add Salary"}
+                            <span className="sr-only">Salary</span>
                           </Link>
 
                           <Link
                             href={`/dashboard/staff/${r.staff.id}/attendance`}
-                            className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-700 hover:bg-emerald-100"
+                            className="inline-flex items-center gap-1 rounded-lg border border-emerald-200 bg-emerald-50 px-1.5 py-1 text-[10px] font-bold text-emerald-700 hover:bg-emerald-100"
                             title="Enter offline attendance and leave"
                           >
-                            Attendance
+                            Att.
                           </Link>
 
                           {r.salary && (
@@ -1617,11 +1648,10 @@ export default function PayrollPage() {
                                   ),
                                 )
                               }
-                              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50"
+                              className="inline-flex items-center rounded-lg border border-slate-200 bg-white px-1.5 py-1 text-[10px] font-bold text-slate-700 hover:bg-slate-50"
                               title="Show salary details"
                             >
                               {r.expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-                              Details
                             </button>
                           )}
                         </div>
@@ -1634,7 +1664,7 @@ export default function PayrollPage() {
                       r.expanded &&
                       r.salary && (
                         <tr key={`${r.staff.id}-details`} className="bg-slate-50">
-                          <td colSpan={11} className="px-5 py-4">
+                          <td colSpan={12} className="px-5 py-4">
                             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                               <Detail label="Basic" value={money(r.salary.basic_salary)} />
                               <Detail label="House" value={money(r.salary.house_allowance)} />
@@ -1655,7 +1685,7 @@ export default function PayrollPage() {
                 <tfoot>
                   <tr className="border-t-2 border-slate-200 bg-slate-50">
                     <td className="px-4 py-4 font-bold">TOTAL</td>
-                    <td colSpan={6} />
+                    <td colSpan={7} />
                     <td className="px-4 py-4 text-right font-bold">{money(totals.gross)}</td>
                     <td className="px-4 py-4 text-right font-bold">{money(totals.deductions)}</td>
                     <td className="px-4 py-4 text-right text-lg font-bold text-blue-700">{money(totals.net)}</td>
