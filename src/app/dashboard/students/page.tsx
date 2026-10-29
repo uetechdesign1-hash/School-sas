@@ -635,6 +635,11 @@ export default function StudentsPage() {
 
   const feeTotals = useMemo(() => {
     const studentIds = new Set(filteredStudents.map((student) => student.id));
+    const activeStudentIds = new Set(
+      filteredStudents
+        .filter((student) => student.status === "active")
+        .map((student) => student.id),
+    );
     const billsOfYear = yearBills.filter(
       (bill) =>
         bill.academic_year_id === feeYearId &&
@@ -648,7 +653,9 @@ export default function StudentsPage() {
     for (const bill of billsOfYear) {
       billed += Math.max(Number(bill.total_amount || 0), 0);
       collected += Math.max(Number(bill.paid_amount || 0), 0);
-      pending += Math.max(Number(bill.balance_amount || 0), 0);
+      if (activeStudentIds.has(bill.student_id)) {
+        pending += Math.max(Number(bill.balance_amount || 0), 0);
+      }
     }
 
     let concession = 0;
