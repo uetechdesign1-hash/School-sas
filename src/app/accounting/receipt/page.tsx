@@ -313,6 +313,7 @@ export default function ReceiptPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [loadingBills, setLoadingBills] = useState(false);
+  const [loadingHistory, setLoadingHistory] = useState(false);
 
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
@@ -1591,6 +1592,19 @@ export default function ReceiptPage() {
       setLoading(false);
     }
   }
+
+  // REFETCH: If the parent (fee structure) updated a category name,
+  // we reload the category-driven data and drop the flag from the URL.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const refetch = params.get("refetch");
+    if (refetch === "categories") {
+      params.delete("refetch");
+      const newUrl = `${window.location.pathname}?${params.toString()}`;
+      window.history.replaceState(null, '', newUrl);
+      loadPage();
+    }
+  }, []);
 
   useEffect(() => {
     loadPage();
@@ -4232,14 +4246,24 @@ export default function ReceiptPage() {
 
                   <button
                     type="button"
-                    onClick={() =>
-                      schoolId &&
-                      loadHistory(schoolId)
-                    }
+                    onClick={async () => {
+                      if (!schoolId) return;
+                      setLoadingHistory(true);
+                      try {
+                        await loadHistory(schoolId);
+                      } finally {
+                        setLoadingHistory(false);
+                      }
+                    }}
+                    disabled={loadingHistory}
                     className="inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm"
                   >
-                    <RefreshCw size={15} />
-                    Load dates
+                    {loadingHistory ? (
+                      <Loader2 size={15} className="animate-spin" />
+                    ) : (
+                      <RefreshCw size={15} />
+                    )}
+                    {loadingHistory ? "Loading..." : "Load dates"}
                   </button>
                   </div>
                 </div>

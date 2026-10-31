@@ -645,6 +645,8 @@ export default function FeeStructurePage() {
     if (error) { setErrorMessage(`Unable to update category: ${error.message}`); return; }
     setCategories((current) => current.map((item) => item.id === category.id ? { ...item, name } : item).sort((a, b) => a.name.localeCompare(b.name)));
     setSuccessMessage("Fee category updated.");
+    // Redirect to Receipt so the updated category name is shown immediately there.
+    window.location.href = "/accounting/receipt?refetch=categories";
   }
 
   async function syncAssignedBillsToStructure(
