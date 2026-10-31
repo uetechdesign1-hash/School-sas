@@ -499,13 +499,14 @@ export default function LedgerPage() {
   }, [accounts]);
 
   /*
-   * Accounts offered in the Account selector: ALL active accounts.
-   * The Ledger is a report that must show every account with activity,
-   * so we don't filter out seeded default accounts (like expense accounts).
-   * The filterSelectableAccounts is only for transaction entry screens.
+   * Accounts offered in the Account selector: school-created accounts
+   * (is_system = false) plus the two school-common accounts:
+   * Student Fees (STUDENT_FEES) and Salary Payable (SALARY_PAYABLE).
+   * Seeded default accounts not created by the school are hidden here
+   * but remain in the database for historical reporting.
    */
   const selectableAccounts = useMemo(
-    () => (accounts ?? []).filter((a) => a.is_active),
+    () => filterSelectableAccounts(accounts ?? []),
     [accounts],
   );
 

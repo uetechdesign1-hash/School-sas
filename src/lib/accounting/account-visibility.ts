@@ -14,8 +14,7 @@ import { DEFAULT_ACCOUNT_TEMPLATES } from "./canonical-accounting";
  *   1. Accounts created by the school from
  *      Dashboard -> Accounting -> Accounts  (is_system = false), and
  *   2. The common accounts every school needs:
- *      Cash, Bank, Student Fees (fee income), Student Fee Receivable and
- *      Salary Payable.
+ *      Student Fees (STUDENT_FEES) and Salary Payable (SALARY_PAYABLE).
  *
  * This module is a DISPLAY filter only. It never deletes, deactivates or
  * mutates accounts - hidden accounts keep their balances, history and
@@ -42,10 +41,7 @@ export type AccountLike = {
  * selectable everywhere.
  */
 export const COMMON_ACCOUNT_CODES = [
-  "CASH",
-  "BANK",
   "STUDENT_FEES",
-  "STUDENT_FEE_RECEIVABLE",
   "SALARY_PAYABLE",
 ] as const;
 
@@ -96,7 +92,7 @@ export function isSelectableAccount(account: AccountLike | null | undefined) {
   // Inactive accounts are never selectable.
   if (account.is_active === false) return false;
 
-  // Cash / Bank / Student Fees / Student Fee Receivable / Salary Payable.
+  // Student Fees / Salary Payable.
   if (isCommonAccountCode(account.code)) return true;
 
   // Anything the school created from Dashboard -> Accounting -> Accounts.
