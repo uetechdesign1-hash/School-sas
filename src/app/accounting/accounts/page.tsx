@@ -500,6 +500,24 @@ export default function AccountsPage() {
           );
         }
 
+        // Prevent renaming to a name already used by another account
+        const { data: nameDuplicate, error: nameDuplicateError } =
+          await supabase
+            .from("accounts")
+            .select("id, name")
+            .eq("school_id", schoolId)
+            .ilike("name", cleanName)
+            .neq("id", editingId)
+            .limit(1);
+
+        if (nameDuplicateError) throw new Error(nameDuplicateError.message);
+
+        if (nameDuplicate?.length) {
+          throw new Error(
+            `An account named "${cleanName}" already exists.`
+          );
+        }
+
         const { error: updateError } = await supabase
           .from("accounts")
           .update({
