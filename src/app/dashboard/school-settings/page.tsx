@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
-import { AlertCircle, CheckCircle2, ImagePlus, Loader2, School, Trash2, Upload } from "lucide-react";
+import { AlertCircle, CalendarDays, CheckCircle2, ImagePlus, Loader2, Radio, School, Trash2, Upload } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { getCurrentSchoolId } from "@/lib/supabase/current-school";
 
@@ -10,6 +10,38 @@ const ACCEPTED_TYPES = ["image/png", "image/jpeg", "image/webp"];
 
 type SchoolRecord = { id: string; name: string; logo_url: string | null };
 
+type AttendanceModel = "actual_calendar" | "30_day_fixed";
+
+/**
+ * Extract a readable message from Supabase/Postgres errors, which are often
+ * plain objects (not Error instances) with message/details/hint/code fields.
+ */
+function getSupabaseErrorMessage(error: unknown): string {
+  if (!error) return "Unknown database error.";
+
+  if (error instanceof Error) return error.message;
+
+  if (typeof error === "object") {
+    const e = error as Record<string, unknown>;
+    const parts = [
+      typeof e.message === "string" ? e.message : "",
+      typeof e.details === "string" ? `Details: ${e.details}` : "",
+      typeof e.hint === "string" ? `Hint: ${e.hint}` : "",
+      typeof e.code === "string" ? `Code: ${e.code}` : "",
+    ].filter(Boolean);
+
+    if (parts.length) return parts.join(" | ");
+
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return "Unknown database error.";
+    }
+  }
+
+  return String(error);
+}
+
 export default function SchoolSettingsPage() {
   const supabase = useMemo(() => createClient(), []);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -17,12 +49,17 @@ export default function SchoolSettingsPage() {
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
 
   const cloudName = process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME?.trim();
   const uploadPreset = process.env.NEXT_PUBLIC_CLOUDINARY_UPLOAD_PRESET?.trim();
   const cloudinaryReady = Boolean(cloudName && uploadPreset);
+
+  // Attendance model state
+  const [attendanceModel, setAttendanceModel] = useState<AttendanceModel>("actual_calendar");
+  const [settingsLoading, setSettingsLoading] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -53,6 +90,79 @@ export default function SchoolSettingsPage() {
     void loadSchool();
     return () => { cancelled = true; };
   }, [supabase]);
+
+  // Load attendance model when school loads
+  useEffect(() => {
+    let cancelled = false;
+    async function loadAttendanceModel() {
+      if (!school?.id) return;
+      setSettingsLoading(true);
+      setError("");
+      try {
+        const { data, error: rpcError } = await supabase.rpc(
+          "get_school_attendance_model",
+          { p_school_id: school.id },
+        );
+        if (rpcError) throw rpcError;
+        if (!cancelled) {
+          setAttendanceModel(data === "30_day_fixed" ? "30_day_fixed" : "actual_calendar");
+        }
+      } catch (err) {
+        if (!cancelled) {
+          // If RPC doesn't exist yet, default to actual_calendar silently
+          setAttendanceModel("actual_calendar");
+        }
+      } finally {
+        if (!cancelled) setSettingsLoading(false);
+      }
+    }
+    void loadAttendanceModel();
+    return () => { cancelled = true; };
+  }, [supabase, school?.id]);
+
+  async function saveAttendanceModel() {
+    if (!school?.id) return;
+    setSettingsSaving(true);
+    setError("");
+    setMessage("");
+    try {
+      console.log("Saving attendance model:", { schoolId: school.id, model: attendanceModel });
+      const { data, error: rpcError } = await supabase.rpc(
+        "update_school_attendance_model",
+        { p_school_id: school.id, p_model: attendanceModel },
+      );
+      console.log("RPC result:", { data, error: rpcError });
+      if (rpcError) throw rpcError;
+      setMessage(`Attendance model saved: ${attendanceModel === "30_day_fixed" ? "30 days (fixed)" : "Actual month calendar"}.`);
+    } catch (err) {
+      const msg = getSupabaseErrorMessage(err);
+      const isMissingFunction =
+        msg?.includes("Could not find the function") ||
+        msg?.includes("schema cache") ||
+        msg?.includes("PGRST202");
+
+      if (isMissingFunction) {
+        const hint =
+          "The attendance model migration has not been applied to this database. " +
+          "Run supabase/migrations/20261103120000_add_attendance_model_setting.sql in Supabase, then retry.";
+        console.error("Save attendance model error:", msg, {
+          schoolId: school.id,
+          model: attendanceModel,
+          raw: err,
+        });
+        setError(hint);
+      } else {
+        console.error("Save attendance model error:", msg, {
+          schoolId: school.id,
+          model: attendanceModel,
+          raw: err,
+        });
+        setError(msg || "Unable to save attendance model.");
+      }
+    } finally {
+      setSettingsSaving(false);
+    }
+  }
 
   async function saveLogoUrl(logoUrl: string | null) {
     if (!school) return;
@@ -176,6 +286,56 @@ export default function SchoolSettingsPage() {
                 </div>
                 <p className="mt-4 text-xs leading-5 text-slate-400">Uploads are stored in the school logo folder in Cloudinary. Your logo will appear in the dashboard header.</p>
               </div>
+            </div>
+
+            {/* Attendance Model Settings */}
+            <div className="mt-6 border-t border-slate-100 pt-6 sm:grid-cols-[220px_1fr] sm:col-span-2">
+              <div className="flex min-h-48 items-center justify-start rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-5">
+                <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-indigo-50 text-indigo-700"><CalendarDays size={20} /></div>
+                <div className="ml-4">
+                  <h3 className="font-semibold text-slate-900">Attendance Days Model</h3>
+                  <p className="mt-2 text-sm text-slate-600">Choose how working days per month are counted for payroll salary calculation.</p>
+                </div>
+              </div>
+              <div className="mt-4 space-y-3">
+                <label className="flex items-center gap-3 cursor-pointer rounded-xl border p-3 hover:bg-slate-50">
+                  <input
+                    type="radio"
+                    name="attendance_model"
+                    value="actual_calendar"
+                    checked={attendanceModel === "actual_calendar"}
+                    onChange={() => setAttendanceModel("actual_calendar")}
+                    className="rounded-slate-700 text-indigo-600 focus:ring-indigo-500"
+                  />
+                  <span>
+                    <span className="block font-semibold text-slate-900">Follow actual month calendar</span>
+                    <span className="text-xs text-slate-500">28/29/30/31 days depending on the month</span>
+                  </span>
+                </label>
+                <label className="flex items-center gap-3 cursor-pointer rounded-xl border p-3 hover:bg-slate-50">
+                  <input
+                    type="radio"
+                    name="attendance_model"
+                    value="30_day_fixed"
+                    checked={attendanceModel === "30_day_fixed"}
+                    onChange={() => setAttendanceModel("30_day_fixed")}
+                    className="rounded-slate-700 text-indigo-600 focus:ring-indigo-500"
+                  />
+                  <span>
+                    <span className="block font-semibold text-slate-900">Fixed 30 days every month</span>
+                    <span className="text-xs text-slate-500">Every month treated as exactly 30 days</span>
+                  </span>
+                </label>
+              </div>
+              <button
+                type="button"
+                onClick={saveAttendanceModel}
+                disabled={settingsSaving || settingsLoading}
+                className="inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-60 bg-indigo-600 hover:bg-indigo-700"
+              >
+                {settingsSaving ? <Loader2 className="animate-spin" size={17} /> : <CheckCircle2 size={17} />}
+                {settingsSaving ? "Saving…" : "Save Attendance Model"}
+              </button>
             </div>
           </section>
         )}

@@ -256,11 +256,16 @@ export default function PayrollPage() {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [search, setSearch] = useState("");
+  const [attendanceModel, setAttendanceModel] = useState<"actual_calendar" | "30_day_fixed">("actual_calendar");
   const employeeForStaffRef = useRef<Map<string, Record<string, unknown>>>(new Map());
 
   const locked = savedRun?.status === "prepared" || savedRun?.status === "finalized";
+  // Calendar days used as denominator for salary calculations.
+  // Schools on "30_day_fixed" model treat every month as exactly 30 days.
+  // Schools on "actual_calendar" model use actual days in month (28/29/30/31).
+  const salaryCalendarDays = attendanceModel === "30_day_fixed" ? 30 : daysInMonth(month);
   const elapsedPayrollDays = elapsedDaysInMonth(month);
-  const payrollCalendarDays = daysInMonth(month);
+  const payrollCalendarDays = salaryCalendarDays;
 
   const totals = useMemo(
     () =>
@@ -315,7 +320,7 @@ export default function PayrollPage() {
       setSchoolId(sid);
 
       const [year, monthNumber] = month.split("-").map(Number);
-      const defaultDays = daysInMonth(month);
+      const defaultDays = salaryCalendarDays;
 
       const firstDate = `${month}-01`;
       const lastDate = `${month}-${String(defaultDays).padStart(2, "0")}`;
@@ -334,7 +339,7 @@ export default function PayrollPage() {
           .lte("attendance_date", lastDate),
         supabase
           .from("school_attendance_settings")
-          .select("weekly_off_day")
+          .select("weekly_off_day, attendance_model")
           .eq("school_id", sid)
           .maybeSingle(),
         supabase
@@ -363,6 +368,11 @@ export default function PayrollPage() {
         statusOverrideByStaffDate.set(`${entry.staff_id}|${entry.attendance_date}`, entry.status);
       }
       const weeklyOffDay = n(settingsResult.data?.weekly_off_day);
+      const loadedAttendanceModel =
+        settingsResult.data?.attendance_model === "30_day_fixed"
+          ? ("30_day_fixed" as const)
+          : ("actual_calendar" as const);
+      setAttendanceModel(loadedAttendanceModel);
       const elapsedDays = elapsedDaysInMonth(month);
 
       function attendanceCounts(staffId: string) {
@@ -523,7 +533,7 @@ export default function PayrollPage() {
     } finally {
       setLoading(false);
     }
-  }, [month]);
+  }, [month, attendanceModel]);
 
   useEffect(() => {
     void loadPayroll();

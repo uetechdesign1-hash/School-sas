@@ -143,6 +143,7 @@ export default function AdminAttendancePage() {
   const [overrides, setOverrides] = useState<OverrideRecord[]>([]);
   const [calendarEntries, setCalendarEntries] = useState<SchoolCalendarEntry[]>([]);
   const [weeklyOffDay, setWeeklyOffDay] = useState(0);
+  const [attendanceModel, setAttendanceModel] = useState<"actual_calendar" | "30_day_fixed">("actual_calendar");
   const [schoolId, setSchoolId] = useState("");
   const [calendarOpen, setCalendarOpen] = useState(false);
   const [calendarDate, setCalendarDate] = useState("");
@@ -162,9 +163,15 @@ export default function AdminAttendancePage() {
   const [selectedStaffId, setSelectedStaffId] = useState<string | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(false);
 
+  // Schools on "30_day_fixed" model treat every month as exactly 30 days
+  // for payroll/salary calculations. "actual_calendar" uses real days (28/29/30/31).
+  const effectiveMonthDays = attendanceModel === "30_day_fixed"
+    ? Math.min(30, monthDays(month))
+    : monthDays(month);
+
   const days = useMemo(
-    () => Array.from({ length: monthDays(month) }, (_, i) => i + 1),
-    [month],
+    () => Array.from({ length: effectiveMonthDays }, (_, i) => i + 1),
+    [month, attendanceModel, effectiveMonthDays],
   );
 
   const today = new Date().toISOString().slice(0, 10);
@@ -263,7 +270,7 @@ export default function AdminAttendancePage() {
           .order("attendance_date", { ascending: true }),
         supabase
           .from("school_attendance_settings")
-          .select("weekly_off_day")
+          .select("weekly_off_day, attendance_model")
           .eq("school_id", schoolId)
           .maybeSingle(),
       ]);
@@ -282,9 +289,14 @@ export default function AdminAttendancePage() {
       const loadedAttendance = (attendanceData || []) as AttendanceRecord[];
       const loadedOverrides = (overrideData || []) as OverrideRecord[];
       const loadedWeeklyOffDay = Number(settingsData?.weekly_off_day ?? 0);
+      const loadedAttendanceModel =
+        settingsData?.attendance_model === "30_day_fixed"
+          ? ("30_day_fixed" as const)
+          : ("actual_calendar" as const);
 
       setSchoolId(schoolId);
       setWeeklyOffDay(loadedWeeklyOffDay);
+      setAttendanceModel(loadedAttendanceModel);
       setStaff(loadedStaff);
       setCalendarEntries(loadedCalendar);
       setAttendance(loadedAttendance);
@@ -946,25 +958,31 @@ export default function AdminAttendancePage() {
       }
       const firstSavedItem = savedItemsData[0];
       const firstAttendance = (attendanceResult.data || [])[0] as Record<string, unknown> | undefined;
+
+      // Calendar days used as denominator for salary calculations.
+      // Schools on "30_day_fixed" model treat every month as exactly 30 days.
+      // Schools on "actual_calendar" model use actual days in month (28/29/30/31).
+      const salaryCalendarDays = attendanceModel === "30_day_fixed" ? 30 : monthDays(month);
+
       const defaultWorkingDays = number(firstSavedItem?.working_days)
         || number(firstAttendance?.working_days)
-        || monthDays(month);
+        || salaryCalendarDays;
 
       const headers = [
         "Employee No",
         "Staff Name",
         "Mobile Number",
-        "Gross Salary",
         ...days.map((day) => dateFor(month, day)),
-        "Net Salary",
-        "Present",
-        "Half Day",
-        "C/L Paid Leave",
-        "Absent",
+        "Working Days − W/O",
+        "Worked",
+        "Paid Leave",
         "Holiday",
-        "Week Off",
-        "Working Days",
-        "Worked Days",
+        "W/O",
+        "Unpaid",
+        "Payable",
+        "Gross",
+        "Deductions",
+        "Net",
       ];
       const columnCount = headers.length;
       const xmlEscape = (value: unknown) => String(value ?? "")
@@ -1006,39 +1024,50 @@ export default function AdminAttendancePage() {
         const salary = salaryByStaff.get(item.id);
         const attendanceSummary = attendanceByStaff.get(item.id);
         const saved = savedByStaff.get(item.id);
-        const workingDays = number(saved?.working_days)
-          || number(attendanceSummary?.working_days)
-          || defaultWorkingDays;
-        const paidLeave = saved
-          ? number(saved.paid_leave_days)
-          : number(attendanceSummary?.paid_leave);
-        const workedDays = saved
-          ? Math.max(0, workingDays - number(saved.paid_leave_days) - number(saved.unpaid_days))
-          : number(attendanceSummary?.worked_days)
-            || Math.max(workingDays - paidLeave - number(attendanceSummary?.unpaid_leave), 0);
-        const payableDays = Math.min(workingDays, workedDays + paidLeave);
-        const unpaidDays = Math.max(workingDays - payableDays, 0);
-        const gross = salary?.gross ?? "";
+        // Match payroll side calculation exactly (calculate() + attendanceCounts())
+        const monthWeekOffs = summary.weekOff;
+        const monthHolidays = summary.holiday;
+        const present = summary.present;
+        const absent = summary.absent;
+        const halfDay = summary.halfDay;
+        const paidLeaveCount = summary.paidLeave;
+
+        const worked = present + halfDay * 0.5;
+        const unpaidDays = absent + halfDay * 0.5;
+        // Payroll: workingDays = defaultDays - weekOffs (holidays are still working days)
+        const workingDays = Math.max(salaryCalendarDays - monthWeekOffs, 0);
+        // Payroll: payable = min(elapsed, worked + paidLeave + holiday + weekOff)
+        const payableDays = Math.min(
+          salaryCalendarDays,
+          worked + paidLeaveCount + monthHolidays + monthWeekOffs,
+        );
+
+        const gross = salary
+          ? salary.gross
+          : 0;
+        const lop = salary
+          ? salary.gross * (unpaidDays / Math.max(1, salaryCalendarDays))
+          : 0;
+        const deductions = salary
+          ? salary.deductions
+          : 0;
         const net = salary
-          ? Math.max(
-              salary.gross - (workingDays > 0 ? salary.gross * unpaidDays / workingDays : 0) - salary.deductions,
-              0,
-            )
-          : "";
-        const values: unknown[] = [item.employee_no || "", staffName(item), item.phone || "", gross];
+          ? Math.max(gross - lop - deductions, 0)
+          : 0;
+        const values: unknown[] = [item.employee_no || "", staffName(item), item.phone || ""];
         const dailyStatuses: CellStatus[] = [];
         for (const day of days) {
           const status = getCellStatus(item.id, dateFor(month, day));
           dailyStatuses.push(status);
           values.push(status === "auto" ? "" : STATUS_LABEL[status]);
         }
-        values.push(net, summary.present, summary.halfDay, summary.paidLeave, summary.absent, summary.holiday, summary.weekOff, summary.workingDays, summary.workedDays);
+        values.push(workingDays, worked, paidLeaveCount, summary.holiday, summary.weekOff, unpaidDays, payableDays, gross, salary?.deductions ?? 0, net);
         const statusStyles = new Map<number, string>();
         dailyStatuses.forEach((status, index) => {
           const style = styleByStatus[status];
-          if (style) statusStyles.set(4 + index, style);
+          if (style) statusStyles.set(3 + index, style);
         });
-        const salaryColumns = new Set([3, 4 + days.length]);
+        const salaryColumns = new Set([10 + days.length, 11 + days.length, 12 + days.length]);
         rows.push(`<Row>${values.map((value, index) => cell(value, statusStyles.get(index) || (salaryColumns.has(index) ? "Money" : ""), typeof value === "number")).join("")}</Row>`);
       }
 

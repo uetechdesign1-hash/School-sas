@@ -10,6 +10,7 @@ import {
 } from "react";
 import Link from "next/link";
 import jsPDF from "jspdf";
+import * as XLSX from "xlsx";
 import {
   ArrowLeft,
   CheckCircle2,
@@ -147,6 +148,8 @@ type ReceiptHistoryRow = {
   debit_account: string;
   credit_account: string;
   amount: number;
+  cash_amount: number;
+  bank_amount: number;
   receipt_type: ReceiptType;
   reference_id: string | null;
 };
@@ -206,15 +209,33 @@ function today() {
 /**
  * Sort receipt history rows by receipt number in ascending sequence
  * (1, 2, 3...). Numeric receipt numbers are compared as numbers so
- * "10" comes after "2", not before it.
+ * "10" comes after "2", not before it. Rows are ordered by date first
+ * so receipts from the same date sit together before moving on.
  */
 function sortReceiptsByNumber(a: ReceiptHistoryRow, b: ReceiptHistoryRow) {
+  const dateA = String(a.transaction_date || "").slice(0, 10);
+  const dateB = String(b.transaction_date || "").slice(0, 10);
+  if (dateA !== dateB) return dateA.localeCompare(dateB);
   const numA = Number(a.transaction_number);
   const numB = Number(b.transaction_number);
   if (!Number.isNaN(numA) && !Number.isNaN(numB)) return numA - numB;
   return String(a.transaction_number || "").localeCompare(
     String(b.transaction_number || ""),
   );
+}
+
+function formatReceiptNumber(
+  row: Pick<ReceiptHistoryRow, "transaction_number" | "id">,
+): string {
+  const receiptNumber = row.transaction_number?.trim();
+  if (receiptNumber) {
+    const numericReceiptNumber = Number(receiptNumber);
+    if (Number.isFinite(numericReceiptNumber)) {
+      return String(numericReceiptNumber).padStart(4, "0");
+    }
+    return receiptNumber;
+  }
+  return row.id.slice(0, 8);
 }
 
 function dateDDMMYYYY(value: string) {
@@ -1074,7 +1095,15 @@ export default function ReceiptPage() {
       .map((row) => row.reference_id as string);
 
     if (paymentIds.length === 0) {
-      setHistory(rows.sort(sortReceiptsByNumber));
+      setHistory(
+        rows
+          .map((row) => ({
+            ...row,
+            cash_amount: Number(row.cash_amount || 0),
+            bank_amount: Number(row.bank_amount || 0),
+          }))
+          .sort(sortReceiptsByNumber),
+      );
       return;
     }
 
@@ -1083,7 +1112,7 @@ export default function ReceiptPage() {
       (batch) =>
         supabase
           .from("fee_payments")
-          .select("id, student_id, receipt_number, manual_bill_number, bill_id")
+          .select("id, student_id, receipt_number, manual_bill_number, bill_id, amount, payment_method")
           .eq("school_id", currentSchoolId)
           .in("id", batch),
     );
@@ -1096,7 +1125,27 @@ export default function ReceiptPage() {
       receipt_number: string;
       manual_bill_number: string | null;
       bill_id: string | null;
+      amount: number;
+      payment_method: string;
     }>;
+    const splitResult = await inBatches(
+      paymentIds,
+      (batch) =>
+        supabase
+          .from("fee_payment_splits")
+          .select("payment_id, payment_mode, amount")
+          .eq("school_id", currentSchoolId)
+          .in("payment_id", batch),
+    );
+    if (splitResult.error) throw new Error(splitResult.error.message || "Failed to fetch payment split data");
+
+    const paymentSplits = new Map<string, Array<{ payment_mode: string; amount: number }>>();
+    for (const split of splitResult.data || []) {
+      const current = paymentSplits.get(split.payment_id) || [];
+      current.push({ payment_mode: split.payment_mode, amount: Number(split.amount || 0) });
+      paymentSplits.set(split.payment_id, current);
+    }
+
     const billIds = Array.from(new Set(payments.map((payment) => payment.bill_id).filter(Boolean) as string[]));
     const studentIds = Array.from(
       new Set(payments.map((payment) => payment.student_id).filter(Boolean) as string[]),
@@ -1277,6 +1326,29 @@ export default function ReceiptPage() {
       }
 
       const payment = paymentMap.get(row.reference_id);
+      const splits = payment ? paymentSplits.get(payment.id) : undefined;
+      let cashAmount = Number(row.cash_amount || 0);
+      let bankAmount = Number(row.bank_amount || 0);
+      if (payment && splits?.length) {
+        cashAmount = splits.reduce(
+          (sum, split) => sum + (split.payment_mode.trim().toLowerCase() === "cash" ? split.amount : 0),
+          0,
+        );
+        bankAmount = splits.reduce(
+          (sum, split) => sum + (split.payment_mode.trim().toLowerCase() === "cash" ? 0 : split.amount),
+          0,
+        );
+      } else if (payment) {
+        const paymentMode = payment.payment_method.trim().toLowerCase();
+        if (paymentMode === "cash") {
+          cashAmount = Number(payment.amount || 0);
+          bankAmount = 0;
+        } else if (["bank_transfer", "upi", "card", "cheque", "online"].includes(paymentMode)) {
+          cashAmount = 0;
+          bankAmount = Number(payment.amount || 0);
+        }
+      }
+
       const categories = payment
         ? paymentCategoryMap.get(payment.id) || []
         : [];
@@ -1312,6 +1384,8 @@ export default function ReceiptPage() {
       return {
         ...row,
         transaction_number: payment?.receipt_number || row.transaction_number,
+        cash_amount: cashAmount,
+        bank_amount: bankAmount,
         manual_bill_number: payment?.manual_bill_number || (payment?.bill_id ? billNumberMap.get(payment.bill_id) || null : null),
         fee_categories: categories,
         fee_category_amounts: feeCategoryAmounts,
@@ -1384,56 +1458,90 @@ export default function ReceiptPage() {
   }, [historyFromDate, historyToDate]);
 
   function exportHistoryExcel() {
+    if (filteredHistory.length === 0) {
+      setError("No receipt history available for the selected filters.");
+      return;
+    }
+
     const rows = filteredHistory.map((row) => ({
       Date: row.transaction_date,
-      "Receipt No.": row.transaction_number || row.id.slice(0, 8),
+      "Receipt No.": formatReceiptNumber(row),
       "Bill No.": row.manual_bill_number || "",
       Student: row.student_name || "",
       Class: row.class_name || "",
       "Fee Categories Paid": getDisplayedHistoryCategories(row).join(", "),
       Debit: row.debit_account || "",
       Credit: row.credit_account || "",
-      Particulars: row.receipt_type === "student_fee"
-        ? [row.student_name, row.class_name].filter(Boolean).join(" • ")
-        : row.description || "",
+      Cash: Number(row.cash_amount || 0),
+      Bank: Number(row.bank_amount || 0),
       Amount: getDisplayedHistoryAmount(row),
     }));
+
+    const totalCash = filteredHistory.reduce(
+      (sum, row) => sum + Number(row.cash_amount || 0),
+      0,
+    );
+    const totalBank = filteredHistory.reduce(
+      (sum, row) => sum + Number(row.bank_amount || 0),
+      0,
+    );
+    const totalAmount = filteredHistory.reduce(
+      (sum, row) => sum + getDisplayedHistoryAmount(row),
+      0,
+    );
 
     if (rows.length === 0) {
       setError("No receipt history available for the selected filters.");
       return;
     }
 
-    const headers = Object.keys(rows[0]);
-    const escapeHtml = (value: unknown) =>
-      String(value ?? "")
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;");
+    const sheetData = [
+      {
+        Date: "Date",
+        "Receipt No.": "Receipt No.",
+        "Bill No.": "Bill No.",
+        Student: "Student",
+        Class: "Class",
+        "Fee Categories Paid": "Fee Categories Paid",
+        Debit: "Debit",
+        Credit: "Credit",
+        Cash: "Cash",
+        Bank: "Bank",
+        Amount: "Amount",
+      },
+      ...rows,
+      {},
+      {
+        "Receipt No.": "Total",
+        Cash: totalCash,
+        Bank: totalBank,
+        Amount: totalAmount,
+      },
+    ];
 
-    // SpreadsheetML/HTML is directly readable by Microsoft Excel without
-    // requiring an additional XLSX package in the Next.js bundle.
-    const html = `\uFEFF<html><head><meta charset="utf-8" /></head><body>
-      <h2>Receipt History</h2>
-      <p>Category: ${escapeHtml(historyCategoryFilter === "all" ? "All fee categories" : historyCategoryFilter)} | Date: ${escapeHtml(historyFromDate || "All")} to ${escapeHtml(historyToDate || "All")}</p>
-      <table border="1" cellspacing="0" cellpadding="5">
-        <thead><tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("")}</tr></thead>
-        <tbody>
-          ${rows.map((row) => `<tr>${headers.map((header) => `<td>${escapeHtml(row[header as keyof typeof row])}</td>`).join("")}</tr>`).join("")}
-        </tbody>
-      </table>
-    </body></html>`;
+    const worksheet = XLSX.utils.json_to_sheet(sheetData, { skipHeader: true });
 
-    const blob = new Blob([html], { type: "application/vnd.ms-excel;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = `receipt-history-${historyFromDate || "all"}-${historyToDate || "all"}.xls`;
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    URL.revokeObjectURL(url);
+    worksheet["!cols"] = [
+      { wch: 14 },
+      { wch: 16 },
+      { wch: 16 },
+      { wch: 22 },
+      { wch: 18 },
+      { wch: 26 },
+      { wch: 14 },
+      { wch: 14 },
+      { wch: 12 },
+      { wch: 12 },
+      { wch: 14 },
+    ];
+
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Receipt History");
+
+    XLSX.writeFile(
+      workbook,
+      `receipt-history-${historyFromDate || "all"}-${historyToDate || "all"}.xlsx`,
+    );
   }
 
   function exportHistoryPDF() {
