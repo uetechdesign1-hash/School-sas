@@ -1,5 +1,9 @@
 import * as XLSX from "xlsx";
-import { getStudentImportAuth } from "@/lib/students/import-auth";
+import {
+  getStudentImportAuth,
+  UnauthorizedError,
+  UnauthenticatedError,
+} from "@/lib/students/import-auth";
 
 function errorJson(message: string, status = 400) {
   return Response.json({ error: message }, { status });
@@ -241,6 +245,13 @@ export async function POST(request: Request) {
     return Response.json({ data: parsedData });
   } catch (error) {
     console.error("STUDENT PARSE ERROR:", error);
+
+    if (error instanceof UnauthenticatedError) {
+      return errorJson(error.message, 401);
+    }
+    if (error instanceof UnauthorizedError) {
+      return errorJson(error.message, 403);
+    }
 
     return errorJson(
       error instanceof Error

@@ -74,6 +74,7 @@ const ACCOUNTING_ROUTES = {
   openingBalance: "/accounting/opening-balance",
   cashBook: "/accounting/cash-bank?book=cash",
   bankBook: "/accounting/cash-bank?book=bank",
+  collectFee: "/accounting/collect-fee",
   receipt: "/accounting/receipt",
   payment: "/accounting/payment",
   contra: "/accounting/contra",
@@ -479,8 +480,8 @@ export default function DashboardPage() {
       },
       {
         title: "Collect Fees",
-        description: "Record a student fee and print its receipt.",
-        href: ACCOUNTING_ROUTES.receipt,
+        description: "Select a student and record a fee payment.",
+        href: ACCOUNTING_ROUTES.collectFee,
         icon: <IndianRupee size={22} />,
         color: "from-emerald-500 to-teal-600",
       },
@@ -917,10 +918,17 @@ export default function DashboardPage() {
               />
 
               <AccountingShortcut
+                href={ACCOUNTING_ROUTES.collectFee}
+                icon={<IndianRupee size={19} />}
+                title="Collect Fee"
+                description="Record a student fee payment"
+              />
+
+              <AccountingShortcut
                 href={ACCOUNTING_ROUTES.receipt}
                 icon={<ReceiptText size={19} />}
-                title="Receipt"
-                description="Record money received"
+                title="Fee Receipts"
+                description="View and manage recorded receipts"
               />
 
               <AccountingShortcut

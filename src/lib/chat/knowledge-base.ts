@@ -894,16 +894,16 @@ const GUIDES: ChatGuide[] = [
   },
   {
     id: "receipt",
-    title: "Issue a receipt (money received)",
-    pageLabel: "Receipt",
-    href: "/accounting/receipt",
+    title: "Collect a fee",
+    pageLabel: "Collect Fee",
+    href: "/accounting/collect-fee",
     keywords: [
       "receipt", "fee receipt", "collect money", "receive money",
       "receipt type", "student fee", "payment method", "receive into",
       "split cash bank", "print receipt",
     ],
     summary:
-      "The Receipt page records money coming in. For student fees it reads the student's bill and lets you collect part or all of it, into Cash and/or Bank.",
+      "The Collect Fee page reads the student's bill and lets you collect part or all of the outstanding amount into Cash and/or Bank. Recorded receipts are viewed separately on Fee Receipts.",
     steps: [
       "Choose the Receipt Type — Student Fee (collect from a student's bill) or a general/other receipt.",
       "Pick the Receipt Date and the Payment Method (cash, bank transfer, UPI, cheque, card, etc.).",
@@ -919,6 +919,7 @@ const GUIDES: ChatGuide[] = [
     related: [
       { label: "Student fees", href: "/dashboard/students/[id]/fees" },
       { label: "Record payment", href: "/dashboard/students/[id]/payment" },
+      { label: "Fee Receipts", href: "/accounting/receipt" },
       { label: "Cash / Bank book", href: "/accounting/cash-bank" },
     ],
   },

@@ -926,7 +926,7 @@ export async function getStudentOutstanding(
             `A concession of ${inr(openBills.reduce((sum, b) => sum + b.concession, 0))} has already been applied to these bills.`,
           ]
         : []),
-      "Collect the balance from the Fee Receipts page (Receipt → Student Fee).",
+      "Collect the balance from the Collect Fee page. Use Fee Receipts to view or print recorded receipts.",
     ],
     href: `/dashboard/students/${student.id}/fees`,
     pageLabel: "Open Student Fees",

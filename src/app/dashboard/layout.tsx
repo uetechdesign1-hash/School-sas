@@ -62,6 +62,16 @@ const PRINCIPAL_MENU: MenuItem[] = [
     icon: <IndianRupee size={18} />,
   },
   {
+    name: "Collect Fee",
+    href: "/accounting/collect-fee",
+    icon: <WalletCards size={18} />,
+  },
+  {
+    name: "Fee Receipts",
+    href: "/accounting/receipt",
+    icon: <Receipt size={18} />,
+  },
+  {
     name: "Assign Fees",
     href: "/dashboard/fees/assign",
     icon: <IndianRupee size={18} />,
@@ -157,6 +167,11 @@ const SCHOOL_ADMIN_MENU: MenuItem[] = [
     icon: <GraduationCap size={18} />,
   },
   {
+    name: "Collect Fee",
+    href: "/accounting/collect-fee",
+    icon: <IndianRupee size={18} />,
+  },
+  {
     name: "Fee Receipts",
     href: "/accounting/receipt",
     icon: <Receipt size={18} />,
@@ -218,6 +233,7 @@ function isSchoolAdminRouteAllowed(pathname: string) {
   return (
     pathname === "/dashboard" ||
     pathname === "/dashboard/students" ||
+    pathname === "/accounting/collect-fee" ||
     pathname === "/accounting/receipt" ||
     pathname === "/accounting/payment" ||
     pathname === "/dashboard/expenses" ||

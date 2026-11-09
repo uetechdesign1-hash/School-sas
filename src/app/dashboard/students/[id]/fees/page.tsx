@@ -297,10 +297,25 @@ export default function FeesPage() {
   const [school, setSchool] = useState<School | null>(null);
   const [schoolId, setSchoolId] = useState<string | null>(null);
 
-  const [students, setStudents] = useState<Student[]>([]);
   const [studentSearch, setStudentSearch] = useState("");
   const [loadingStudents, setLoadingStudents] = useState(false);
+  const [studentSearchDelay, setStudentSearchDelay] = useState(0);
+  const [studentSearchTimeout] = useRef<NodeJS.Timeout | null>(null);
+  const [studentPage, setStudentPage] = useState(1);
+  const [studentHasMore, setStudentHasMore] = useState(false);
+  const [studentSearchResults, setStudentSearchResults] = useState<Student[]>([]);
+  const [studentSearchTerm, setStudentSearchTerm] = useState("");
+  const [studentIsSearching, setStudentIsSearching] = useState(false);
+  const [studentSearchError, setStudentSearchError] = useState<string | null>(null);
+  const [studentWillSearch, setStudentWillSearch] = useState(false);
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
+  const [preserveSelectedStudent, setPreserveSelectedStudent] = useState<Student | null>(null);
+
+  // Class/section filtering state
+  const [classes, setClasses] = useState<ClassRow[]>([]);
+  const [selectedClassId, setSelectedClassId] = useState<string | null>(null);
+  const [sections, setSections] = useState<SectionRow[]>([]);
+  const [selectedSectionId, setSelectedSectionId] = useState<string | null>(null);
 
   const [bills, setBills] = useState<FeeBill[]>([]);
   // billId -> "2025-2026 • Class 1 - A" (class the student had in that bill's year)
@@ -614,10 +629,7 @@ export default function FeesPage() {
           return;
         }
 
-        await Promise.all([
-          loadStudents(currentSchoolId),
-          loadFinancialAccounts(currentSchoolId),
-        ]);
+        await loadFinancialAccounts(currentSchoolId);
       } catch (error) {
         console.error("Fee page initialization error:", error);
 
@@ -678,26 +690,11 @@ export default function FeesPage() {
    * --------------------------------------------------
    */
   const filteredStudents = useMemo(() => {
-    const search = studentSearch.trim().toLowerCase();
-
-    if (!search) {
-      return students.slice(0, 30);
+    if (studentSearchTerm.trim()) {
+      return studentSearchResults;
     }
-
-    return students
-      .filter((student) => {
-        const name = getStudentName(student).toLowerCase();
-        const admission = (student.admission_no || "").toLowerCase();
-        const roll = (student.roll_no || "").toLowerCase();
-
-        return (
-          name.includes(search) ||
-          admission.includes(search) ||
-          roll.includes(search)
-        );
-      })
-      .slice(0, 30);
-  }, [students, studentSearch]);
+    return [];
+  }, [studentSearchTerm, studentSearchResults]);
 
   /*
    * --------------------------------------------------

@@ -15,11 +15,13 @@ import {
   ArrowLeft,
   CheckCircle2,
   Eye,
+  IndianRupee,
   Landmark,
   Loader2,
   Pencil,
   Plus,
   Printer,
+  Receipt,
   RefreshCw,
   Trash2,
   User,
@@ -323,9 +325,14 @@ function isIncomeOrReceivableAccount(account: Account) {
 }
 
 
-export default function ReceiptPage() {
+type ReceiptPageProps = {
+  mode?: "collect" | "history";
+};
+
+export default function ReceiptPage({ mode = "history" }: ReceiptPageProps) {
   const supabase = useMemo(() => createClient(), []);
   const { academicYear } = useAccountingAcademicYear();
+  const isCollectMode = mode === "collect";
 
   const [schoolId, setSchoolId] = useState<string | null>(null);
   const [schoolName, setSchoolName] = useState("School");
@@ -335,6 +342,8 @@ export default function ReceiptPage() {
   const [saving, setSaving] = useState(false);
   const [loadingBills, setLoadingBills] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(false);
+  const [inventoryLoaded, setInventoryLoaded] = useState(false);
+  const [loadingInventory, setLoadingInventory] = useState(false);
 
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
@@ -745,6 +754,15 @@ export default function ReceiptPage() {
       return;
     }
 
+    setFeeBills([]);
+    setConcessionsByBillId({});
+    setSelectedBillId("");
+    setReceiptFeeItems([]);
+    setReceiptPaymentLines([]);
+    setFeeManagementName("");
+    setFeeManagementAcademicYear("");
+    setFeeManagementAmount(0);
+
     try {
       setLoadingBills(true);
       setError("");
@@ -763,33 +781,30 @@ export default function ReceiptPage() {
        * selector without deleting historical database records.
        */
 
-      const { data: student, error: studentError } = await supabase
-        .from("students")
-        .select("id, school_id, class_id")
-        .eq("id", studentId)
-        .eq("school_id", schoolId)
-        .maybeSingle();
+      const [studentResult, academicYearResult] = await Promise.all([
+        supabase
+          .from("students")
+          .select("id, school_id, class_id")
+          .eq("id", studentId)
+          .eq("school_id", schoolId)
+          .maybeSingle(),
+        supabase
+          .from("academic_years")
+          .select("id, name, start_date, end_date, is_current")
+          .eq("school_id", schoolId)
+          .eq("is_current", true)
+          .order("start_date", { ascending: false })
+          .limit(1)
+          .maybeSingle(),
+      ]);
+      const { data: student, error: studentError } = studentResult;
+      const { data: academicYear, error: academicYearError } = academicYearResult;
 
       if (studentError) throw new Error(studentError.message);
-
-      if (!student) {
-        throw new Error("Selected student was not found in your school.");
-      }
-
+      if (!student) throw new Error("Selected student was not found in your school.");
       if (!student.class_id) {
-        throw new Error(
-          "This student has no class assigned. Assign a class before collecting fees.",
-        );
+        throw new Error("This student has no class assigned. Assign a class before collecting fees.");
       }
-
-      const { data: academicYear, error: academicYearError } = await supabase
-        .from("academic_years")
-        .select("id, name, start_date, end_date, is_current")
-        .eq("school_id", schoolId)
-        .eq("is_current", true)
-        .order("start_date", { ascending: false })
-        .limit(1)
-        .maybeSingle();
 
       if (academicYearError) {
         throw new Error(
@@ -832,12 +847,21 @@ export default function ReceiptPage() {
         );
       }
 
-      const { data: structureItems, error: structureItemsError } =
-        await supabase
+      const [structureItemsResult, structureBillItemsResult] = await Promise.all([
+        supabase
           .from("fee_structure_items")
           .select("id, fee_category_id, amount, frequency, mandatory")
           .eq("school_id", schoolId)
-          .eq("fee_structure_id", structure.id);
+          .eq("fee_structure_id", structure.id),
+        supabase
+          .from("fee_bill_items")
+          .select("bill_id")
+          .eq("school_id", schoolId)
+          .eq("fee_structure_id", structure.id),
+        ensureCarryForwardRecords(supabase, schoolId, studentId, academicYear.id),
+      ]);
+      const { data: structureItems, error: structureItemsError } = structureItemsResult;
+      const { data: structureBillItems, error: structureBillItemsError } = structureBillItemsResult;
 
       if (structureItemsError) {
         throw new Error(
@@ -859,9 +883,23 @@ export default function ReceiptPage() {
           0,
         );
       const optionalItems = (structureItems || []).filter((item) => !Boolean(item.mandatory) && Boolean(item.fee_category_id));
-      const { data: optionalCategories, error: optionalCategoriesError } = optionalItems.length
-        ? await supabase.from("fee_categories").select("id, name").eq("school_id", schoolId).in("id", optionalItems.map((item) => item.fee_category_id).filter(Boolean))
-        : { data: [], error: null };
+      const [optionalCategoriesResult, pendingCarryForwardsResult] = await Promise.all([
+        optionalItems.length
+          ? supabase
+              .from("fee_categories")
+              .select("id, name")
+              .eq("school_id", schoolId)
+              .in("id", optionalItems.map((item) => item.fee_category_id).filter(Boolean))
+          : Promise.resolve({ data: [], error: null }),
+        supabase
+          .from("fee_carry_forwards")
+          .select("id, source_bill_id, to_academic_year_id, amount, status")
+          .eq("school_id", schoolId)
+          .eq("student_id", studentId)
+          .eq("to_academic_year_id", academicYear.id)
+          .eq("status", "pending"),
+      ]);
+      const { data: optionalCategories, error: optionalCategoriesError } = optionalCategoriesResult;
       if (optionalCategoriesError) throw new Error(optionalCategoriesError.message);
       const categoryNames = new Map((optionalCategories || []).map((category) => [category.id, category.name]));
       setOptionalFeeChoices(optionalItems.map((item) => ({
@@ -872,20 +910,11 @@ export default function ReceiptPage() {
 
       // Unpaid fees from earlier years become carry-forward records for this
       // year (Tuition 1000, Bus 1000, ...). Idempotent.
-      await ensureCarryForwardRecords(supabase, schoolId, studentId, academicYear.id);
-
       /*
        * Pending previous-year carry-forward is part of the student's
        * current fee position in Student Fees.
        */
-      const { data: pendingCarryForwards, error: carryForwardError } =
-        await supabase
-          .from("fee_carry_forwards")
-          .select("id, source_bill_id, to_academic_year_id, amount, status")
-          .eq("school_id", schoolId)
-          .eq("student_id", studentId)
-          .eq("to_academic_year_id", academicYear.id)
-          .eq("status", "pending");
+      const { data: pendingCarryForwards, error: carryForwardError } = pendingCarryForwardsResult;
 
       if (carryForwardError) {
         throw new Error(
@@ -905,13 +934,6 @@ export default function ReceiptPage() {
        * Direct linkage:
        * fee_bill_items.fee_structure_id -> fee_structures.id
        */
-      const { data: structureBillItems, error: structureBillItemsError } =
-        await supabase
-          .from("fee_bill_items")
-          .select("bill_id")
-          .eq("school_id", schoolId)
-          .eq("fee_structure_id", structure.id);
-
       if (structureBillItemsError) {
         throw new Error(
           `Unable to link fee bills to Fee Management: ${structureBillItemsError.message}`,
@@ -985,45 +1007,32 @@ export default function ReceiptPage() {
       setFeeBills(bills);
       setSelectedBillId(bills[0]?.id || "");
       setManualBillNumber(bills[0]?.bill_number || "");
+      setFeeManagementName(structure.name);
+      setFeeManagementAcademicYear(academicYear.name);
+      setFeeManagementAmount(currentFeeManagementAmount);
       if (bills[0]) {
-        const items = await loadReceiptFeeItems(bills[0].id);
+        const [items, concessionsResult] = await Promise.all([
+          loadReceiptFeeItems(bills[0].id),
+          supabase
+            .from("fee_concessions")
+            .select("id, school_id, student_id, bill_id, concession_type, percentage, amount, reason")
+            .eq("school_id", schoolId)
+            .eq("student_id", studentId)
+            .in("bill_id", [bills[0].id]),
+        ]);
+        if (concessionsResult.error) throw new Error(concessionsResult.error.message);
         const firstAvailable = items.find((item) => item.balance > 0);
         setReceiptPaymentLines(
           firstAvailable ? [{ feeBillItemId: firstAvailable.id, amount: "" }] : [],
         );
+        const totals: Record<string, number> = {};
+        ((concessionsResult.data || []) as FeeConcession[]).forEach((item) => {
+          totals[item.bill_id] = (totals[item.bill_id] || 0) + Number(item.amount || 0);
+        });
+        setConcessionsByBillId(totals);
       } else {
         setReceiptFeeItems([]);
         setReceiptPaymentLines([]);
-      }
-      setFeeManagementName(structure.name);
-      setFeeManagementAcademicYear(academicYear.name);
-      setFeeManagementAmount(currentFeeManagementAmount);
-
-      const billIds = bills.map((bill) => bill.id);
-
-      if (billIds.length) {
-        const { data: concessions, error: concessionError } =
-          await supabase
-            .from("fee_concessions")
-            .select(
-              "id, school_id, student_id, bill_id, concession_type, percentage, amount, reason",
-            )
-            .eq("school_id", schoolId)
-            .eq("student_id", studentId)
-            .in("bill_id", billIds);
-
-        if (concessionError) {
-          throw new Error(concessionError.message);
-        }
-
-        const totals: Record<string, number> = {};
-        ((concessions || []) as FeeConcession[]).forEach((item) => {
-          totals[item.bill_id] =
-            (totals[item.bill_id] || 0) + Number(item.amount || 0);
-        });
-
-        setConcessionsByBillId(totals);
-      } else {
         setConcessionsByBillId({});
       }
 
@@ -1637,6 +1646,28 @@ export default function ReceiptPage() {
     pdf.save(`receipt-history-${historyCategoryFilter === "all" ? "all" : historyCategoryFilter}-${historyFromDate || "all"}-${historyToDate || "all"}.pdf`);
   }
 
+  async function loadInventoryForCollection() {
+    if (!schoolId || inventoryLoaded || loadingInventory) return;
+
+    try {
+      setLoadingInventory(true);
+      const [inventoryRows, stockRows] = await Promise.all([
+        listInventoryItems(supabase, schoolId),
+        getStockSummary(supabase, schoolId),
+      ]);
+      setInventoryItems(inventoryRows.filter((item) => item.is_active));
+      setInventoryStock(
+        Object.fromEntries(stockRows.map((item) => [item.id, item.closingQuantity])),
+      );
+      setInventoryLoaded(true);
+    } catch (err: unknown) {
+      setIncludeInventory(false);
+      setError(err instanceof Error ? err.message : "Unable to load inventory items.");
+    } finally {
+      setLoadingInventory(false);
+    }
+  }
+
   async function loadPage() {
     try {
       setLoading(true);
@@ -1669,26 +1700,21 @@ export default function ReceiptPage() {
 
       setSchoolId(currentSchoolId);
 
-      const [schoolNameResult, schoolLogoResult] = await Promise.all([
-        supabase.from("schools").select("name").eq("id", currentSchoolId).maybeSingle(),
-        supabase.from("schools").select("logo_url").eq("id", currentSchoolId).maybeSingle(),
-      ]);
-      setSchoolName(schoolNameResult.data?.name || "School");
-      setSchoolLogoUrl(schoolLogoResult.error ? null : schoolLogoResult.data?.logo_url || null);
-
-      const [inventoryRows, stockRows] = await Promise.all([
-        listInventoryItems(supabase, currentSchoolId),
-        getStockSummary(supabase, currentSchoolId),
-      ]);
-      setInventoryItems(inventoryRows.filter((item) => item.is_active));
-      setInventoryStock(Object.fromEntries(stockRows.map((item) => [item.id, item.closingQuantity])));
+      const { data: schoolData, error: schoolDataError } = await supabase
+        .from("schools")
+        .select("name, logo_url")
+        .eq("id", currentSchoolId)
+        .maybeSingle();
+      if (schoolDataError) throw schoolDataError;
+      setSchoolName(schoolData?.name || "School");
+      setSchoolLogoUrl(schoolData?.logo_url || null);
 
       await Promise.all([
         loadAccounts(currentSchoolId),
         loadClasses(currentSchoolId),
         loadSections(currentSchoolId),
         loadStudents(currentSchoolId),
-        loadHistory(currentSchoolId),
+        ...(isCollectMode ? [] : [loadHistory(currentSchoolId)]),
       ]);
     } catch (err: any) {
       console.error("RECEIPT PAGE LOAD ERROR:", err);
@@ -1838,6 +1864,13 @@ export default function ReceiptPage() {
   async function handleStudentChange(studentId: string) {
     setSelectedStudentId(studentId);
     setSelectedBillId("");
+    setFeeBills([]);
+    setReceiptFeeItems([]);
+    setReceiptPaymentLines([]);
+    setConcessionsByBillId({});
+    setFeeManagementName("");
+    setFeeManagementAcademicYear("");
+    setFeeManagementAmount(0);
     setAmount("");
     setIncludeInventory(false);
     setInventoryIssueLines([{ inventoryItemId: "", quantity: "1" }]);
@@ -2681,7 +2714,7 @@ export default function ReceiptPage() {
 
         setSuccess(`Receipt ${manualReceiptNumber.trim()} saved successfully.`);
         resetPaymentFields();
-        await loadHistory(schoolId!);
+        if (!isCollectMode) await loadHistory(schoolId!);
         return;
       }
 
@@ -2786,7 +2819,7 @@ export default function ReceiptPage() {
 
       resetPaymentFields();
 
-      await loadHistory(schoolId!);
+      if (!isCollectMode) await loadHistory(schoolId!);
     } catch (err: any) {
       if (createdReceiptId) {
         await supabase
@@ -3011,7 +3044,7 @@ export default function ReceiptPage() {
         );
 
         setEditingId(null);
-        await loadHistory(schoolId);
+        if (!isCollectMode) await loadHistory(schoolId);
         return;
       }
 
@@ -3057,7 +3090,7 @@ export default function ReceiptPage() {
       );
 
       setEditingId(null);
-      await loadHistory(schoolId);
+      if (!isCollectMode) await loadHistory(schoolId);
     } catch (err: any) {
       console.error("UPDATE RECEIPT ERROR:", err);
 
@@ -3174,7 +3207,7 @@ export default function ReceiptPage() {
           } deleted successfully.`
         );
 
-        await loadHistory(schoolId);
+        if (!isCollectMode) await loadHistory(schoolId);
         return;
       }
 
@@ -3199,7 +3232,7 @@ export default function ReceiptPage() {
         } deleted successfully.`
       );
 
-      await loadHistory(schoolId);
+      if (!isCollectMode) await loadHistory(schoolId);
     } catch (err: any) {
       console.error("DELETE RECEIPT ERROR:", err);
 
@@ -3224,6 +3257,29 @@ export default function ReceiptPage() {
   return (
     <>
       <style>{`
+        .collect-fee-form .input {
+          min-height: 48px;
+          border-radius: 14px;
+          border-color: #dbe4f0;
+          background-color: #fff;
+          padding-left: 14px;
+          padding-right: 14px;
+          box-shadow: 0 1px 2px rgb(15 23 42 / 4%);
+          transition: border-color 150ms ease, box-shadow 150ms ease;
+        }
+
+        .collect-fee-form .input:focus {
+          border-color: #7c9cff;
+          box-shadow: 0 0 0 4px rgb(99 130 255 / 13%);
+          outline: none;
+        }
+
+        .collect-fee-form label {
+          color: #475569;
+          font-size: 13px;
+          font-weight: 650;
+        }
+
         @media print {
           body {
             background: white !important;
@@ -3252,8 +3308,8 @@ export default function ReceiptPage() {
         }
       `}</style>
 
-      <main className="min-h-screen bg-slate-50">
-        <div className="border-b bg-white no-print">
+      <main className="min-h-screen bg-[#f3f6fc]">
+        <div className="border-b border-white/80 bg-white/90 shadow-sm backdrop-blur-xl no-print">
           <div className="mx-auto max-w-7xl px-6 py-6">
             <Link
               href="/dashboard"
@@ -3265,25 +3321,36 @@ export default function ReceiptPage() {
 
             <div className="flex flex-wrap items-end justify-between gap-4">
               <div>
-                <div className="text-sm font-semibold text-blue-600">
-                  Accounting
+                <div className="text-sm font-bold uppercase tracking-[0.16em] text-blue-600">
+                  {isCollectMode ? "Fee desk" : "Accounting"}
                 </div>
 
-                <h1 className="mt-1 text-3xl font-bold text-slate-900">
-                  Receipt
+                <h1 className="mt-1 text-3xl font-bold tracking-tight text-slate-900">
+                  {isCollectMode ? "Collect Fee" : "Fee Receipts"}
                 </h1>
 
-                <p className="mt-1 text-sm text-slate-500">
-                  Create, view, edit, delete and print school receipts.
+                <p className="mt-1 max-w-2xl text-sm text-slate-500">
+                  {isCollectMode
+                    ? "Select a student, review the outstanding fees, and record a payment."
+                    : "View, filter, export, and manage recorded school receipts."}
                 </p>
               </div>
               <Link
+                href={isCollectMode ? "/accounting/receipt" : "/accounting/collect-fee"}
+                className="inline-flex items-center gap-2 rounded-xl border border-blue-100 bg-blue-50 px-4 py-2.5 text-sm font-semibold text-blue-700 shadow-sm transition hover:bg-blue-100"
+              >
+                {isCollectMode ? <Receipt size={16} /> : <Plus size={16} />}
+                {isCollectMode ? "Fee Receipts" : "Collect Fee"}
+              </Link>
+            </div>
+            {isCollectMode && (
+              <Link
                 href="/dashboard/accounting/inventory"
-                className="inline-flex items-center rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-sm font-semibold text-emerald-800 hover:bg-emerald-100"
+                className="mt-4 inline-flex items-center rounded-lg text-xs font-semibold text-slate-500 transition hover:text-blue-700"
               >
                 Inventory sale / issue receipt
               </Link>
-            </div>
+            )}
           </div>
         </div>
 
@@ -3313,17 +3380,20 @@ export default function ReceiptPage() {
             </section>
           ) : (
             <>
-              <section className="rounded-2xl border bg-white p-6 shadow-sm no-print">
+              {(isCollectMode || editingId) && <section className="overflow-hidden rounded-3xl border border-white bg-white p-5 shadow-[0_18px_55px_-30px_rgba(37,99,235,0.35)] sm:p-7 no-print">
                 <div className="mb-6 flex items-start justify-between gap-4">
                   <div>
+                    <div className="mb-2 inline-flex items-center gap-2 rounded-full bg-blue-50 px-3 py-1 text-xs font-bold text-blue-700">
+                      <IndianRupee size={14} /> Student payment
+                    </div>
                     <h2 className="text-xl font-bold text-slate-900">
-                      {editingId ? "Edit Receipt" : "New Receipt"}
+                      {editingId ? "Edit Receipt" : "Collect Student Fee"}
                     </h2>
 
                     <p className="mt-1 text-sm text-slate-500">
                       {editingId
                         ? "Update the receipt and its double-entry accounting."
-                        : "Select who paid and where the money was received."}
+                        : "Choose the student, review the fee balance, and enter the payment details."}
                     </p>
                   </div>
 
@@ -3345,8 +3415,28 @@ export default function ReceiptPage() {
                       ? updateReceipt
                       : createReceipt
                   }
-                  className="space-y-6"
+                  className="collect-fee-form space-y-6"
                 >
+                  {isCollectMode && !editingId && (
+                    <ol className="grid grid-cols-3 gap-2 rounded-2xl bg-slate-50 p-2 sm:gap-3 sm:p-3" aria-label="Fee collection steps">
+                      {[
+                        { number: "01", label: "Choose student", complete: Boolean(selectedStudent) },
+                        { number: "02", label: "Enter payment", complete: receiptPaymentTotal > 0 },
+                        { number: "03", label: "Save receipt", complete: false },
+                      ].map((step, index) => (
+                        <li key={step.number} className={`flex min-w-0 items-center gap-2 rounded-xl px-2 py-2.5 sm:gap-3 sm:px-3 ${step.complete ? "bg-white shadow-sm" : ""}`}>
+                          <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-bold ${step.complete ? "bg-emerald-100 text-emerald-700" : "bg-blue-100 text-blue-700"}`}>
+                            {step.complete ? <CheckCircle2 size={16} /> : step.number}
+                          </span>
+                          <span className="min-w-0">
+                            <span className="block text-[10px] font-semibold uppercase tracking-wide text-slate-400">Step {index + 1}</span>
+                            <span className={`block truncate text-xs font-bold sm:text-sm ${step.complete ? "text-emerald-800" : "text-slate-700"}`}>{step.label}</span>
+                          </span>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+
                   <div>
                     <label className="mb-2 block text-sm font-semibold text-slate-700">
                       Receipt Type
@@ -3359,10 +3449,10 @@ export default function ReceiptPage() {
                         onClick={() =>
                           changeReceiptType("student_fee")
                         }
-                        className={`rounded-xl border p-4 text-left ${
+                        className={`rounded-2xl border p-4 text-left shadow-sm transition-all ${
                           receiptType === "student_fee"
-                            ? "border-blue-500 bg-blue-50 ring-1 ring-blue-500"
-                            : "border-slate-200"
+                            ? "border-blue-400 bg-gradient-to-br from-blue-50 to-indigo-50 ring-2 ring-blue-100"
+                            : "border-slate-200 bg-white hover:border-blue-200 hover:bg-blue-50/40"
                         } ${
                           editingId
                             ? "cursor-not-allowed opacity-70"
@@ -3392,10 +3482,10 @@ export default function ReceiptPage() {
                           type="button"
                           disabled={!!editingId}
                           onClick={() => changeReceiptType("other_income")}
-                          className={`rounded-xl border p-4 text-left ${
+                          className={`rounded-2xl border p-4 text-left shadow-sm transition-all ${
                             receiptType === "other_income"
-                              ? "border-emerald-500 bg-emerald-50 ring-1 ring-emerald-500"
-                              : "border-slate-200"
+                              ? "border-emerald-400 bg-gradient-to-br from-emerald-50 to-teal-50 ring-2 ring-emerald-100"
+                              : "border-slate-200 bg-white hover:border-emerald-200 hover:bg-emerald-50/40"
                           } ${
                             editingId ? "cursor-not-allowed opacity-70" : ""
                           }`}
@@ -3548,14 +3638,15 @@ export default function ReceiptPage() {
                   )}
 
                   {receiptType === "student_fee" && (
-                    <div className="rounded-xl border border-blue-100 bg-blue-50/50 p-5">
+                    <div className="rounded-3xl border border-blue-100 bg-gradient-to-br from-blue-50 via-indigo-50/70 to-white p-4 shadow-sm sm:p-6">
                       <div className="mb-5">
-                        <h3 className="font-semibold text-slate-900">
-                          Student Fee Collection
+                        <h3 className="flex items-center gap-2 font-bold text-slate-900">
+                          <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-blue-600 text-sm font-bold text-white shadow-sm">1</span>
+                          Select student
                         </h3>
 
-                        <p className="mt-1 text-xs text-slate-500">
-                          Filter by Class  Section  Student  Fee Bill.
+                        <p className="mt-2 text-sm text-slate-500">
+                          Choose the class, section, and student to load their current fee balance.
                         </p>
                       </div>
 
@@ -3655,10 +3746,10 @@ export default function ReceiptPage() {
                       </div>
 
                       {feeManagementName && (
-                        <div className="mb-4 rounded-xl border border-emerald-100 bg-emerald-50 p-4">
+                        <div className="mb-4 rounded-2xl border border-emerald-100 bg-gradient-to-r from-emerald-50 to-teal-50 p-4 shadow-sm">
                           <div className="flex flex-wrap items-start justify-between gap-3">
                             <div>
-                              <div className="text-xs font-bold uppercase tracking-wide text-emerald-700">
+                              <div className="text-[11px] font-bold uppercase tracking-[0.14em] text-emerald-700">
                                 Fee Management
                               </div>
                               <div className="mt-1 font-semibold text-slate-900">
@@ -3672,7 +3763,7 @@ export default function ReceiptPage() {
                               <div className="text-xs text-slate-500">
                                 Current Fee
                               </div>
-                              <div className="text-lg font-bold text-emerald-700">
+                              <div className="text-xl font-extrabold tracking-tight text-emerald-700">
                                 {money(feeManagementAmount)}
                               </div>
                             </div>
@@ -3717,12 +3808,12 @@ export default function ReceiptPage() {
 
                         <Field label="Fee Bill Status">
                           <div className="input flex items-center bg-slate-50 text-slate-700">
-                            {loadingBills
-                              ? "Checking current fee..."
-                              : !selectedStudentId
-                                ? "Select Student first"
-                                : feeBills[0]
-                                  ? `Outstanding ${money(Number(feeBills[0].balance_amount || 0))}`
+                            {feeBills[0]
+                              ? `Outstanding ${money(Number(feeBills[0].balance_amount || 0))}`
+                              : loadingBills
+                                ? "Checking current fee..."
+                                : !selectedStudentId
+                                  ? "Select Student first"
                                   : `Current Fee ${money(Number(feeManagementAmount || 0))}`}
                           </div>
                           <p className="mt-1 text-xs text-slate-500">
@@ -3731,15 +3822,15 @@ export default function ReceiptPage() {
                         </Field>
                       </div>
 
-                      <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50/50 p-4">
+                      <div className="mt-4 rounded-2xl border border-emerald-100 bg-white/80 p-4 shadow-sm">
                         <label className="flex cursor-pointer items-start gap-3">
-                          <input type="checkbox" checked={includeInventory} disabled={!!editingId || !feeBills[0]} onChange={(event) => setIncludeInventory(event.target.checked)} className="mt-1 h-4 w-4 rounded border-slate-300 text-emerald-600 disabled:opacity-40" />
+                          <input type="checkbox" checked={includeInventory} disabled={!!editingId || !feeBills[0]} onChange={(event) => { setIncludeInventory(event.target.checked); if (event.target.checked) void loadInventoryForCollection(); }} className="mt-1 h-4 w-4 rounded border-slate-300 text-emerald-600 disabled:opacity-40" />
                           <span>
                             <span className="block text-sm font-bold text-slate-900">Add inventory items to this student’s bill</span>
                             <span className="mt-1 block text-xs text-slate-600">Issued quantities reduce stock and add the school’s sale price to the student’s outstanding balance.{selectedStudentId && !feeBills[0] ? " A current fee bill is required." : ""}</span>
                           </span>
                         </label>
-                        {includeInventory && <div className="mt-4 space-y-3">
+                        {includeInventory && (loadingInventory ? <div className="mt-4 flex items-center gap-2 text-sm text-slate-500"><Loader2 size={16} className="animate-spin" /> Loading inventory…</div> : <div className="mt-4 space-y-3">
                           {inventoryIssueLines.map((line, index) => {
                             const item = inventoryItems.find((candidate) => candidate.id === line.inventoryItemId);
                             return <div key={`inventory-${index}`} className="grid gap-3 md:grid-cols-[minmax(0,1fr)_150px_140px_auto] md:items-end">
@@ -3760,7 +3851,7 @@ export default function ReceiptPage() {
                           })}
                           <button type="button" onClick={() => setInventoryIssueLines((current) => [...current, { inventoryItemId: "", quantity: "1" }])} className="rounded-lg border border-emerald-200 bg-white px-3 py-2 text-xs font-semibold text-emerald-700">+ Add inventory item</button>
                           <button type="button" onClick={addInventoryToStudentBill} disabled={saving || !feeBills[0]} className="ml-2 rounded-lg bg-emerald-700 px-4 py-2 text-xs font-bold text-white disabled:opacity-50">{saving ? "Adding to bill…" : "Issue inventory & add optional fee"}</button>
-                        </div>}
+                        </div>)}
                       </div>
 
                       {optionalFeeChoices.length > 0 && feeBills[0] && <div className="mt-4 rounded-xl border border-blue-200 bg-blue-50/50 p-4">
@@ -3908,7 +3999,7 @@ export default function ReceiptPage() {
                                               </div>
                                             )}
 
-                                            <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4">
+                                            <div className="mt-4 rounded-2xl border border-blue-100 bg-white p-4 shadow-sm sm:p-5">
                         <div className="flex items-start justify-between gap-3">
                           <div>
                             <h4 className="text-sm font-bold text-slate-900">Fee Categories & Payment Amounts</h4>
@@ -3924,7 +4015,7 @@ export default function ReceiptPage() {
                           {receiptPaymentLines.map((line, index) => {
                             const item = receiptFeeItems.find((candidate) => candidate.id === line.feeBillItemId);
                             return (
-                              <div key={`${line.feeBillItemId}-${index}`} className="grid gap-3 md:grid-cols-[minmax(0,1fr)_180px_auto] md:items-end">
+                              <div key={`${line.feeBillItemId}-${index}`} className="grid gap-3 rounded-2xl border border-slate-100 bg-slate-50/80 p-3 sm:p-4 md:grid-cols-[minmax(0,1fr)_180px_auto] md:items-end">
                                 <Field label="Fee Category">
                                   <select
                                     value={line.feeBillItemId}
@@ -4052,11 +4143,12 @@ export default function ReceiptPage() {
                               </div>
                             ) : null}
 
-                            <div className="mt-4 rounded-lg border border-red-100 bg-red-50 p-3">
-                              <div className="text-xs font-medium text-red-600">
-                                Outstanding
-                              </div>
-                              <div className="mt-1 text-xl font-bold text-red-700">
+                            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-rose-100 bg-gradient-to-r from-rose-50 to-orange-50 p-4">
+                              <div>
+                                <div className="text-xs font-bold uppercase tracking-[0.12em] text-rose-600">
+                                  Outstanding balance
+                                </div>
+                                <div className="mt-1 text-2xl font-extrabold tracking-tight text-rose-700">
                                 {money(
                                   selectedBill
                                     ? Number(selectedBill.balance_amount)
@@ -4066,6 +4158,11 @@ export default function ReceiptPage() {
                                         0
                                       )
                                 )}
+                                </div>
+                              </div>
+                              <div className="rounded-xl bg-white/80 px-3 py-2 text-right shadow-sm">
+                                <div className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Paying now</div>
+                                <div className="text-lg font-extrabold text-blue-700">{money(receiptPaymentTotal)}</div>
                               </div>
                               {selectedBillConcession > 0 && (
                                 <div className="mt-1 text-xs text-red-600">
@@ -4241,7 +4338,7 @@ export default function ReceiptPage() {
 
                     <button
                       type="submit"
-                      disabled={saving}
+                      disabled={saving || loadingInventory}
                       className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-5 py-2.5 font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
                     >
                       {saving ? (
@@ -4260,15 +4357,15 @@ export default function ReceiptPage() {
                       ) : (
                         <>
                           <Plus size={17} />
-                          Save Receipt
+                          Collect Fee & Generate Receipt
                         </>
                       )}
                     </button>
                   </div>
                 </form>
-              </section>
+              </section>}
 
-              <section className="mt-6 overflow-hidden rounded-2xl border bg-white no-print">
+              {!isCollectMode && !editingId && <section className="mt-6 overflow-hidden rounded-3xl border border-white bg-white shadow-[0_18px_55px_-30px_rgba(37,99,235,0.3)] no-print">
                 <div className="flex flex-col gap-4 border-b px-4 py-4 sm:px-5 lg:flex-row lg:items-center lg:justify-between">
                   <div>
                     <h2 className="font-semibold">
@@ -4515,7 +4612,7 @@ export default function ReceiptPage() {
                     </table>
                   </div>
                 )}
-              </section>
+              </section>}
             </>
           )}
 
