@@ -14,11 +14,13 @@ import {
   Trash2,
   Wallet,
   Lock,
+  Unlock,
   RefreshCw,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import {
+  deleteCanonicalJournalForSource,
   ensureSchoolAccountingSetup,
   postPayrollAccrualJournal,
 } from "@/lib/accounting/canonical-accounting";
@@ -83,6 +85,22 @@ type PayrollRun = {
   updated_at: string;
   finalized_at: string | null;
   finalized_by: string | null;
+};
+
+type SavedPayrollItem = {
+  employee_id: string;
+  staff_id: string;
+  working_days: number | null;
+  paid_leave_days: number | null;
+  unpaid_days: number | null;
+  payable_days: number | null;
+  gross_salary: number | null;
+  total_deductions: number | null;
+  lop_amount: number | null;
+  net_salary: number | null;
+  paid_amount: number | null;
+  paid: boolean | null;
+  status: string | null;
 };
 
 const supabase = createClient();
@@ -216,28 +234,21 @@ function calculate(
   weekOff: number,
   unpaidDays: number,
   calendarDays: number,
-  elapsedDays: number,
 ) {
   const w = Math.max(0, n(worked));
   const p = Math.max(0, n(paidLeave));
   const h = Math.max(0, n(holiday));
   const off = Math.max(0, n(weekOff));
-  const elapsed = Math.max(0, Math.min(n(calendarDays), n(elapsedDays)));
-  const unpaid = Math.min(elapsed, Math.max(0, n(unpaidDays)));
-  const payable = Math.min(elapsed, w + p + h + off);
+  const unpaid = Math.max(0, n(unpaidDays));
+  const payable = w + p + h + off;
   if (!salary) {
     return { payable, unpaid, gross: 0, lop: 0, deductions: 0, net: 0 };
   }
 
-  // Gross is the portion of the monthly salary earned through the current
-  // payroll date. LOP separately reduces that earned amount for absences.
-  const monthFraction = elapsed / Math.max(1, n(calendarDays));
-  const gross = salary.gross_salary * monthFraction;
+  const gross = salary.gross_salary;
   const monthDays = Math.max(1, n(calendarDays));
-  const lop = monthDays > 0
-    ? salary.gross_salary * (unpaid / monthDays)
-    : 0;
-  const deductions = salary.deductions * monthFraction;
+  const lop = salary.gross_salary * (unpaid / monthDays);
+  const deductions = salary.deductions;
   const net = Math.max(gross - lop - deductions, 0);
 
   return { payable, unpaid, gross, lop, deductions, net };
@@ -247,12 +258,14 @@ export default function PayrollPage() {
   const [month, setMonth] = useState(() => new Date().toISOString().slice(0, 7));
   const [schoolId, setSchoolId] = useState("");
   const [rows, setRows] = useState<Row[]>([]);
+  const [savedPayrollItems, setSavedPayrollItems] = useState<SavedPayrollItem[]>([]);
   const [savedRun, setSavedRun] = useState<PayrollRun | null>(null);
   const [editing, setEditing] = useState(true);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [preparing, setPreparing] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [unlocking, setUnlocking] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [search, setSearch] = useState("");
@@ -260,16 +273,46 @@ export default function PayrollPage() {
   const employeeForStaffRef = useRef<Map<string, Record<string, unknown>>>(new Map());
 
   const locked = savedRun?.status === "prepared" || savedRun?.status === "finalized";
+  const hasRecordedSalaryPayments = savedPayrollItems.some(
+    (item) =>
+      Boolean(item.paid) ||
+      item.status === "paid" ||
+      Number(item.paid_amount || 0) > 0.005,
+  );
   // Calendar days used as denominator for salary calculations.
   // Schools on "30_day_fixed" model treat every month as exactly 30 days.
   // Schools on "actual_calendar" model use actual days in month (28/29/30/31).
   const salaryCalendarDays = attendanceModel === "30_day_fixed" ? 30 : daysInMonth(month);
-  const elapsedPayrollDays = elapsedDaysInMonth(month);
-  const payrollCalendarDays = salaryCalendarDays;
+
+  const savedPayrollItemByStaffId = useMemo(
+    () => new Map(savedPayrollItems.map((item) => [item.staff_id, item])),
+    [savedPayrollItems],
+  );
+
+  const displayRows = useMemo(() => {
+    if (!savedRun || editing || savedPayrollItems.length === 0) return rows;
+
+    return rows
+      .filter((row) => savedPayrollItemByStaffId.has(row.staff.id))
+      .map((row) => {
+        const item = savedPayrollItemByStaffId.get(row.staff.id)!;
+        return {
+          ...row,
+          workingDays: Number(item.working_days ?? row.workingDays),
+          paidLeave: Number(item.paid_leave_days ?? row.paidLeave),
+          unpaid: Number(item.unpaid_days ?? row.unpaid),
+          payable: Number(item.payable_days ?? row.payable),
+          gross: Number(item.gross_salary ?? row.gross),
+          deductions: Number(item.total_deductions ?? row.deductions),
+          lopAmount: Number(item.lop_amount ?? row.lopAmount),
+          net: Number(item.net_salary ?? row.net),
+        };
+      });
+  }, [rows, savedRun, editing, savedPayrollItems.length, savedPayrollItemByStaffId]);
 
   const totals = useMemo(
     () =>
-      rows.reduce(
+      displayRows.reduce(
         (a, r) => ({
           staff: a.staff + 1,
           gross: a.gross + r.gross,
@@ -279,18 +322,18 @@ export default function PayrollPage() {
         }),
         { staff: 0, gross: 0, deductions: 0, lop: 0, net: 0 },
       ),
-    [rows],
+    [displayRows],
   );
 
   const filteredRows = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return rows;
-    return rows.filter((r) =>
+    if (!q) return displayRows;
+    return displayRows.filter((r) =>
       `${staffName(r.staff)} ${r.staff.employee_no} ${r.staff.designation || ""}`
         .toLowerCase()
         .includes(q),
     );
-  }, [rows, search]);
+  }, [displayRows, search]);
 
   const loadPayroll = useCallback(async () => {
     setLoading(true);
@@ -414,7 +457,6 @@ export default function PayrollPage() {
           if (status === "holiday") monthHolidays++;
           if (status === "week_off") monthWeekOffs++;
 
-          if (day > elapsedDays) continue;
           if (status === "present") present++;
           if (status === "absent") absent++;
           if (status === "half_day") halfDay++;
@@ -457,8 +499,27 @@ export default function PayrollPage() {
           } as PayrollRun)
         : null;
 
+      const savedItemsResult = run?.id
+        ? await supabase
+            .from("payroll_items")
+            .select(
+              "employee_id, staff_id, working_days, paid_leave_days, unpaid_days, payable_days, gross_salary, total_deductions, lop_amount, net_salary, paid_amount, paid, status",
+            )
+            .eq("school_id", sid)
+            .eq("payroll_run_id", run.id)
+        : { data: [], error: null };
+
+      if (savedItemsResult.error) {
+        throw new Error(`Payroll items: ${savedItemsResult.error.message}`);
+      }
+
+      setSavedPayrollItems(
+        (savedItemsResult.data || []) as SavedPayrollItem[],
+      );
       setSavedRun(run);
-      setEditing(!run || run.status !== "prepared");
+      setEditing(
+        !run || (run.status !== "prepared" && run.status !== "finalized"),
+      );
 
       const { data: staffData, error: staffError } = await supabase
         .from("staff")
@@ -474,7 +535,9 @@ export default function PayrollPage() {
       const { data: salaryData, error: salaryError } = await supabase
         .from("staff_salary_structures")
         .select("*")
-        .eq("school_id", sid);
+        .eq("school_id", sid)
+        .lte("effective_from", `${month}-${String(defaultDays).padStart(2, "0")}`)
+        .order("effective_from", { ascending: false });
 
       if (salaryError) throw new Error(`Salary structure: ${salaryError.message}`);
 
@@ -483,7 +546,9 @@ export default function PayrollPage() {
         const id = raw.staff_id || raw.employee_id;
         if (!id) continue;
         const salary = normalizeSalary(raw, String(id));
-        if (raw.is_active !== false) salaryMap.set(String(id), salary);
+        if (raw.is_active !== false && !salaryMap.has(String(id))) {
+          salaryMap.set(String(id), salary);
+        }
       }
 
       const nextRows: Row[] = ((staffData || []) as Staff[]).map((s) => {
@@ -504,7 +569,6 @@ export default function PayrollPage() {
           weekOff,
           unpaid,
           defaultDays,
-          elapsedDays,
         );
 
         return {
@@ -859,6 +923,7 @@ export default function PayrollPage() {
       }
 
       setSavedRun(run);
+      setSavedPayrollItems(items as SavedPayrollItem[]);
       setEditing(false);
       setSuccess(`Payroll saved for ${monthText(month)}. You can edit it again before payment.`);
       return run;
@@ -908,6 +973,7 @@ export default function PayrollPage() {
       if (runError) throw new Error(`Unable to delete payroll run: ${runError.message}`);
 
       setSavedRun(null);
+      setSavedPayrollItems([]);
       setEditing(true);
       await loadPayroll();
       setSuccess(`Saved payroll for ${monthText(month)} was deleted. Attendance and salary data were kept.`);
@@ -916,6 +982,83 @@ export default function PayrollPage() {
       setError(e instanceof Error ? e.message : "Unable to delete Payroll.");
     } finally {
       setDeleting(false);
+    }
+  }
+
+  async function unlockPayroll() {
+    if (!savedRun?.id || !schoolId || !locked) return;
+    if (hasRecordedSalaryPayments) {
+      setError("Reverse all recorded staff salary payments before unlocking this payroll.");
+      return;
+    }
+    if (!window.confirm(`Unlock the ${monthText(month)} payroll? Its salary accrual will be removed so it can be recalculated from Attendance.`)) {
+      return;
+    }
+
+    setUnlocking(true);
+    setError("");
+    setSuccess("");
+
+    try {
+      const { data: legacyTransactions, error: legacyReadError } = await supabase
+        .from("transactions")
+        .select("id")
+        .eq("school_id", schoolId)
+        .eq("transaction_type", "expense")
+        .eq("reference_type", "payroll")
+        .eq("reference_id", savedRun.id);
+
+      if (legacyReadError) throw legacyReadError;
+
+      for (const transaction of legacyTransactions || []) {
+        const { error: entriesError } = await supabase
+          .from("transaction_entries")
+          .delete()
+          .eq("school_id", schoolId)
+          .eq("transaction_id", transaction.id);
+        if (entriesError) throw entriesError;
+
+        const { error: transactionError } = await supabase
+          .from("transactions")
+          .delete()
+          .eq("school_id", schoolId)
+          .eq("id", transaction.id);
+        if (transactionError) throw transactionError;
+      }
+
+      await deleteCanonicalJournalForSource(supabase, {
+        schoolId,
+        sourceRecordId: savedRun.id,
+        sourceModule: "payroll",
+        sourceTable: "payroll_runs",
+      });
+
+      const { error: itemsError } = await supabase
+        .from("payroll_items")
+        .update({ paid: false, paid_amount: 0, status: "draft" })
+        .eq("school_id", schoolId)
+        .eq("payroll_run_id", savedRun.id);
+      if (itemsError) throw itemsError;
+
+      const { error: runError } = await supabase
+        .from("payroll_runs")
+        .update({
+          status: "draft",
+          finalized_at: null,
+          finalized_by: null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("school_id", schoolId)
+        .eq("id", savedRun.id);
+      if (runError) throw runError;
+
+      await loadPayroll();
+      setSuccess(`Payroll for ${monthText(month)} is unlocked and recalculated from Attendance. Save it before preparing payment.`);
+    } catch (error) {
+      console.error("UNLOCK PAYROLL ERROR", error);
+      setError(error instanceof Error ? error.message : "Unable to unlock payroll.");
+    } finally {
+      setUnlocking(false);
     }
   }
 
@@ -1321,9 +1464,11 @@ export default function PayrollPage() {
         (accrual.journalEntry as { entry_number?: string } | null)
           ?.entry_number || null;
 
-      const staffItems = rows
+      const staffItems = displayRows
         .map((r) => ({
-          employee_id: employeeForStaffRef.current.get(r.staff.id)?.id,
+          employee_id:
+            savedPayrollItems.find((item) => item.staff_id === r.staff.id)?.employee_id ||
+            employeeForStaffRef.current.get(r.staff.id)?.id,
           employee_no: r.staff.employee_no,
           name: staffName(r.staff),
           designation: r.staff.designation || "",
@@ -1496,7 +1641,11 @@ export default function PayrollPage() {
                     <Lock size={15} /> Prepared & Locked
                   </span>
                 ) : savedRun ? (
-                  <span className="text-emerald-700">Saved</span>
+                  editing ? (
+                    <span className="text-amber-700">Recalculated · Save before payment</span>
+                  ) : (
+                    <span className="text-emerald-700">Saved</span>
+                  )
                 ) : (
                   <span className="text-amber-700">Not Saved</span>
                 )}
@@ -1541,11 +1690,29 @@ export default function PayrollPage() {
             <div>
               <h2 className="font-bold text-slate-900">Monthly Payroll</h2>
               <p className="mt-1 text-xs text-slate-500">
-                Salary accrued through {elapsedPayrollDays} of {payrollCalendarDays} calendar days. Working = month days minus weekly offs. Payable = worked + paid leave + holidays + weekly offs; Unpaid comes from absences.
+                Gross is the full monthly salary. Present, holidays, weekly offs and paid leave are paid; Absence is unpaid and Half Day counts as 0.5 unpaid day.
               </p>
             </div>
 
             <div className="flex flex-wrap gap-2">
+              {savedRun && locked && (
+                <button
+                  type="button"
+                  onClick={() => void unlockPayroll()}
+                  disabled={unlocking || loading || hasRecordedSalaryPayments}
+                  title={hasRecordedSalaryPayments ? "Reverse recorded staff salary payments before unlocking." : "Remove the accrual and recalculate this payroll."}
+                  className="inline-flex items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-bold text-amber-800 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {unlocking ? <Loader2 size={15} className="animate-spin" /> : <Unlock size={15} />}
+                  {unlocking ? "Unlocking..." : "Unlock Payroll"}
+                </button>
+              )}
+              {savedRun && locked && hasRecordedSalaryPayments && (
+                <span className="self-center text-xs text-amber-800">
+                  Reverse recorded salary payments before unlocking.
+                </span>
+              )}
+
               {savedRun && !locked && !editing && (
                 <button
                   type="button"

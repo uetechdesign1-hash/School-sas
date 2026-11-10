@@ -2,6 +2,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import {
   AlertCircle,
   Banknote,
@@ -2226,6 +2227,14 @@ export default function ExpensesPage() {
                 <Banknote size={17} />
                 Add Vendor Payment
               </button>
+
+              <Link
+                href="/accounting/payment?type=salary"
+                className="inline-flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm font-semibold text-amber-800 hover:bg-amber-100"
+              >
+                <Banknote size={17} />
+                Salary Payment
+              </Link>
 
               <button
                 onClick={() => {

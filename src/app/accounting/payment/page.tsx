@@ -92,6 +92,13 @@ type PaymentRow = {
 
 type PaymentType = "expense" | "vendor" | "salary";
 
+type PayrollMonthOption = {
+  value: string;
+  label: string;
+  runId: string;
+  amount: number;
+};
+
 type VendorOption = {
   id: string;
   name: string;
@@ -287,6 +294,7 @@ export default function PaymentPage() {
 
   const [payrollRunId, setPayrollRunId] =
     useState("");
+
   const [payrollPayableAccountId, setPayrollPayableAccountId] =
     useState("");
   const [payrollAccountingTransactionNumber, setPayrollAccountingTransactionNumber] =
@@ -295,6 +303,9 @@ export default function PaymentPage() {
   // PAYMENT TYPE + VENDOR PAYMENT CONTEXT
   const [paymentType, setPaymentType] =
     useState<PaymentType>("expense");
+
+  const [payrollMonthOptions, setPayrollMonthOptions] =
+    useState<PayrollMonthOption[]>([]);
 
   const [vendors, setVendors] =
     useState<VendorOption[]>([]);
@@ -971,6 +982,57 @@ export default function PaymentPage() {
     );
   }
 
+  async function loadPayrollMonthOptions(currentSchoolId: string) {
+    const [runsResult, itemsResult] = await Promise.all([
+      supabase
+        .from("payroll_runs")
+        .select("id, month, year, status")
+        .eq("school_id", currentSchoolId)
+        .in("status", ["draft", "prepared"])
+        .order("year", { ascending: false })
+        .order("month", { ascending: false })
+        .order("created_at", { ascending: false }),
+      supabase
+        .from("payroll_items")
+        .select("payroll_run_id, net_salary, paid_amount, paid, status")
+        .eq("school_id", currentSchoolId),
+    ]);
+
+    if (runsResult.error) throw runsResult.error;
+    if (itemsResult.error) throw itemsResult.error;
+
+    const outstandingByRun = new Map<string, number>();
+    for (const item of itemsResult.data || []) {
+      const remaining = item.paid || item.status === "paid"
+        ? 0
+        : Math.max(
+            Number(item.net_salary || 0) - Number(item.paid_amount || 0),
+            0,
+          );
+      outstandingByRun.set(
+        item.payroll_run_id,
+        (outstandingByRun.get(item.payroll_run_id) || 0) + remaining,
+      );
+    }
+
+    const seenMonths = new Set<string>();
+    const options: PayrollMonthOption[] = [];
+    for (const run of runsResult.data || []) {
+      const month = `${run.year}-${String(run.month).padStart(2, "0")}`;
+      const amount = Number(outstandingByRun.get(run.id) || 0);
+      if (seenMonths.has(month) || amount <= 0.005) continue;
+      seenMonths.add(month);
+      options.push({
+        value: month,
+        label: formatPayrollMonthLabel(month),
+        runId: run.id,
+        amount: Number(amount.toFixed(2)),
+      });
+    }
+
+    setPayrollMonthOptions(options);
+  }
+
   /*
    * =====================================================
    * LOAD EVERYTHING
@@ -993,6 +1055,7 @@ export default function PaymentPage() {
         loadAccounts(currentSchoolId),
         loadPayments(currentSchoolId),
         loadVendorData(currentSchoolId),
+        loadPayrollMonthOptions(currentSchoolId),
       ]);
     } catch (err: any) {
       console.error(
@@ -1030,12 +1093,125 @@ export default function PaymentPage() {
     );
   }
 
+  async function loadPayrollRunDetails(
+    runId: string,
+    month: string,
+    preferredEmployeeId = "",
+  ) {
+    const currentSchoolId = schoolId || await getCurrentSchoolId();
+
+    const { data: payrollItems, error: payrollItemsError } = await supabase
+      .from("payroll_items")
+      .select("employee_id, net_salary, paid_amount, paid, status")
+      .eq("payroll_run_id", runId)
+      .eq("school_id", currentSchoolId);
+
+    if (payrollItemsError) throw payrollItemsError;
+
+    const employeeIds = (payrollItems || []).map((item) => item.employee_id);
+    const { data: employees, error: employeesError } = employeeIds.length
+      ? await supabase
+          .from("employees")
+          .select("id, employee_code, name, designation")
+          .eq("school_id", currentSchoolId)
+          .in("id", employeeIds)
+      : { data: [], error: null };
+
+    if (employeesError) throw employeesError;
+
+    const employeesById = new Map(
+      (employees || []).map((employee) => [String(employee.id), employee]),
+    );
+    const staffItems = (payrollItems || [])
+      .map((item) => {
+        const remaining = item.paid || item.status === "paid"
+          ? 0
+          : Math.max(
+              Number(item.net_salary || 0) - Number(item.paid_amount || 0),
+              0,
+            );
+        const employee = employeesById.get(String(item.employee_id));
+        return employee && remaining > 0.005
+          ? {
+              employee_id: String(item.employee_id),
+              employee_no: String(employee.employee_code || ""),
+              name: String(employee.name || "Staff"),
+              designation: String(employee.designation || ""),
+              net_pay: Number(remaining.toFixed(2)),
+            }
+          : null;
+      })
+      .filter((item): item is PayrollStaffItem => item !== null);
+
+    const totalRemaining = staffItems.reduce(
+      (total, item) => total + item.net_pay,
+      0,
+    );
+    const selectedStaff = staffItems.find(
+      (item) => item.employee_id === preferredEmployeeId,
+    );
+
+    setPayrollRunId(runId);
+    setPayrollMonth(month);
+    setPayrollStaffItems(staffItems);
+    setPayrollTotalAmount(totalRemaining.toFixed(2));
+    setSelectedPayrollStaffId(selectedStaff?.employee_id || "");
+    setAmount(selectedStaff ? selectedStaff.net_pay.toFixed(2) : "");
+    if (staffItems.length === 0) {
+      setPayrollRunId("");
+      setPayrollMonth("");
+    }
+    setParticulars(
+      selectedStaff
+        ? `Salary - ${selectedStaff.name} - ${formatPayrollMonthLabel(month)}`
+        : `Salary Payroll - ${formatPayrollMonthLabel(month)}`,
+    );
+    setReferenceNumber(
+      selectedStaff
+        ? `PAYROLL-${month}-${selectedStaff.employee_no}`
+        : `PAYROLL-${month}`,
+    );
+  }
+
+  async function handlePayrollMonthChange(month: string) {
+    setPayrollMonth(month);
+    setPayrollRunId("");
+    setPayrollStaffItems([]);
+    setSelectedPayrollStaffId("");
+    setAmount("");
+
+    const selectedRun = payrollMonthOptions.find(
+      (option) => option.value === month,
+    );
+    if (!selectedRun) {
+      setPayrollTotalAmount("");
+      return;
+    }
+
+    setPayrollTotalAmount(selectedRun.amount.toFixed(2));
+    try {
+      await loadPayrollRunDetails(selectedRun.runId, month);
+      setError("");
+    } catch (error) {
+      setError(
+        error instanceof Error
+          ? error.message
+          : "Unable to load the selected payroll.",
+      );
+    }
+  }
+
   function readPayrollPaymentContext() {
     if (typeof window === "undefined") {
       return;
     }
 
     const params = new URLSearchParams(window.location.search);
+
+    if (params.get("type") === "salary") {
+      setPaymentType("salary");
+      setPayrollMode(true);
+    }
 
     if (params.get("source") !== "payroll") {
       return;
@@ -1155,6 +1331,18 @@ export default function PaymentPage() {
             ? `PAYROLL-${effectiveMonth}`
             : ""),
     );
+
+    void loadPayrollRunDetails(
+      runId,
+      effectiveMonth,
+      selectedId,
+    ).catch((error: unknown) => {
+      setError(
+        error instanceof Error
+          ? error.message
+          : "Unable to load the selected payroll.",
+      );
+    });
   }
 
   function handlePayrollStaffChange(
@@ -1165,16 +1353,7 @@ export default function PaymentPage() {
     );
 
     if (!employeeId) {
-      const total =
-        Number(
-          payrollTotalAmount || 0
-        );
-
-      setAmount(
-        total > 0
-          ? total.toFixed(2)
-          : ""
-      );
+      setAmount("");
 
       setParticulars(
         `Salary Payroll - ${formatPayrollMonthLabel(
@@ -1484,6 +1663,16 @@ export default function PaymentPage() {
       );
     }
 
+    // When switching to salary, reset month; when switching away, clear month
+    if (type === "salary") {
+      setPayrollMonth("");
+      setPayrollRunId("");
+      setPayrollStaffItems([]);
+      setPayrollTotalAmount("");
+      setSelectedPayrollStaffId("");
+      setAmount("");
+    }
+
     setError("");
     setSuccess("");
   }
@@ -1576,9 +1765,7 @@ export default function PaymentPage() {
 
     if (payrollMode) {
       setSelectedPayrollStaffId("");
-      setAmount(
-        payrollTotalAmount || ""
-      );
+      setAmount("");
       setParticulars(
         `Salary Payroll - ${formatPayrollMonthLabel(
           payrollMonth
@@ -1723,7 +1910,7 @@ export default function PaymentPage() {
       return;
     }
 
-    if (!particulars.trim()) {
+    if (!payrollMode && !particulars.trim()) {
       setError("Enter payment particulars.");
       return;
     }
@@ -2120,9 +2307,12 @@ export default function PaymentPage() {
        */
 
       const payrollExpenseDescription = payrollMode && paymentStaff
-        ? `Salary - ${paymentStaff.name} - ${formatPayrollMonthLabel(
-            payrollMonth,
-          )}`
+        ? [
+            `Salary - ${paymentStaff.name} - ${formatPayrollMonthLabel(
+              payrollMonth,
+            )}`,
+            notes.trim() ? `Notes: ${notes.trim()}` : "",
+          ].filter(Boolean).join(" | ")
         : particulars.trim();
 
       const payrollExpenseReference = payrollMode && paymentStaff
@@ -2377,7 +2567,13 @@ export default function PaymentPage() {
       }
 
       resetForm();
-      await loadPayments(schoolId);
+      await Promise.all([
+        loadPayments(schoolId),
+        loadPayrollMonthOptions(schoolId),
+      ]);
+      if (payrollMode && payrollRunId && payrollMonth) {
+        await loadPayrollRunDetails(payrollRunId, payrollMonth);
+      }
     } catch (err: any) {
       console.error("PAYMENT RECORDING ERROR:", err);
 
@@ -3113,14 +3309,10 @@ export default function PaymentPage() {
                   </option>
                 </select>
 
-                {paymentType ===
-                  "salary" &&
-                  !payrollRunId && (
+                {paymentType === "salary" &&
+                  payrollMonthOptions.length === 0 && (
                     <p className="mt-2 text-xs text-amber-600">
-                      Salary payments need a prepared payroll
-                      run. Return to Payroll and click
-                      &ldquo;Prepare Salary Payment&rdquo; to pay
-                      salaries.
+                      No saved payroll with an unpaid balance is available.
                     </p>
                   )}
 
@@ -3144,14 +3336,12 @@ export default function PaymentPage() {
                           ? `Payroll period: ${formatPayrollMonthLabel(
                               payrollMonth
                             )}.`
-                          : "Payroll payment prepared from Payroll."}
-                        {" "}
-                        Select a teacher/staff member for an individual payment or keep All Staff.
+                          : "Select a saved payroll month, then choose a teacher or staff member."}
                       </p>
                     </div>
 
                     <span className="rounded-full bg-white px-3 py-1.5 text-xs font-bold text-blue-700">
-                      Payroll Amount:{" "}
+                      Unpaid Payroll:{" "}
                       {money(
                         Number(
                           payrollTotalAmount ||
@@ -3164,6 +3354,30 @@ export default function PaymentPage() {
               )}
 
               <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+                {payrollMode && (
+                  <div className="md:col-span-2 lg:col-span-4">
+                    <label className="mb-1 block text-sm font-medium text-slate-700">
+                      Payroll Month
+                    </label>
+
+                    <select
+                      value={payrollMonth}
+                      onChange={(e) =>
+                        void handlePayrollMonthChange(e.target.value)
+                      }
+                      disabled={saving || payrollMonthOptions.length === 0}
+                      className="w-full rounded-lg border bg-white px-3 py-2.5 outline-none focus:border-blue-500 disabled:bg-slate-50"
+                    >
+                      <option value="">Select saved payroll month</option>
+                      {payrollMonthOptions.map((option) => (
+                        <option key={option.runId} value={option.value}>
+                          {option.label} — Unpaid {money(option.amount)}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
                 {payrollMode && (
                   <div className="md:col-span-2 lg:col-span-4">
                     <label className="mb-1 block text-sm font-medium text-slate-700">
@@ -3181,15 +3395,7 @@ export default function PaymentPage() {
                       }
                       className="w-full rounded-lg border bg-white px-3 py-2.5 outline-none focus:border-blue-500"
                     >
-                      <option value="">
-                        All Staff —{" "}
-                        {money(
-                          Number(
-                            payrollTotalAmount ||
-                              0
-                          )
-                        )}
-                      </option>
+                      <option value="">Select Teacher / Staff</option>
 
                       {payrollStaffItems.map(
                         (staff) => (
@@ -3539,8 +3745,9 @@ export default function PaymentPage() {
                           e.target.value
                         )
                       }
+                      readOnly={paymentType === "salary"}
                       placeholder="0.00"
-                      className="w-full rounded-lg border py-2.5 pl-8 pr-3 outline-none focus:border-blue-500"
+                      className="w-full rounded-lg border py-2.5 pl-8 pr-3 outline-none focus:border-blue-500 read-only:bg-slate-50"
                     />
                   </div>
                 </div>
@@ -3548,8 +3755,7 @@ export default function PaymentPage() {
               </div>
 
               <div className="grid gap-4 md:grid-cols-2">
-                {paymentType !==
-                  "vendor" && (
+                {paymentType === "expense" && (
                 <div>
                   <label className="mb-1 block text-sm font-medium text-slate-700">
                     Expense Account
@@ -3601,6 +3807,7 @@ export default function PaymentPage() {
                 </div>
                 )}
 
+                {paymentType !== "salary" && (
                 <div>
                   <label className="mb-1 block text-sm font-medium text-slate-700">
                     Particulars
@@ -3620,6 +3827,7 @@ export default function PaymentPage() {
                     className="w-full rounded-lg border px-3 py-2.5 outline-none focus:border-blue-500"
                   />
                 </div>
+                )}
 
                 <div>
                   <label className="mb-1 block text-sm font-medium text-slate-700">
@@ -3842,9 +4050,39 @@ export default function PaymentPage() {
           </div>
 
           <div className="grid gap-3 border-b bg-slate-50 px-5 py-4 md:grid-cols-3">
-            <label className="text-xs font-medium text-slate-600">From date<input type="date" value={historyFrom} onChange={(event) => setHistoryFrom(event.target.value)} className="mt-1 block w-full rounded-lg border bg-white px-3 py-2 text-sm" /></label>
-            <label className="text-xs font-medium text-slate-600">To date<input type="date" value={historyTo} onChange={(event) => setHistoryTo(event.target.value)} className="mt-1 block w-full rounded-lg border bg-white px-3 py-2 text-sm" /></label>
-            <label className="text-xs font-medium text-slate-600">Payment type<select value={historyType} onChange={(event) => setHistoryType(event.target.value)} className="mt-1 block w-full rounded-lg border bg-white px-3 py-2 text-sm"><option value="all">All types</option><option value="expense">Expense</option><option value="salary">Salary</option></select></label>
+            <label className="text-xs font-medium text-slate-600">
+              From date
+              <input
+                type="date"
+                value={historyFrom}
+                onChange={(event) => setHistoryFrom(event.target.value)}
+                className="mt-1 block w-full rounded-lg border bg-white px-3 py-2 text-sm"
+                disabled={paymentType === "salary"}
+              />
+            </label>
+            <label className="text-xs font-medium text-slate-600">
+              To date
+              <input
+                type="date"
+                value={historyTo}
+                onChange={(event) => setHistoryTo(event.target.value)}
+                className="mt-1 block w-full rounded-lg border bg-white px-3 py-2 text-sm"
+                disabled={paymentType === "salary"}
+              />
+            </label>
+            <label className="text-xs font-medium text-slate-600">
+              Payment type
+              <select
+                value={historyType}
+                onChange={(event) => setHistoryType(event.target.value)}
+                className="mt-1 block w-full rounded-lg border bg-white px-3 py-2 text-sm"
+                disabled={paymentType === "salary"}
+              >
+                <option value="all">All types</option>
+                <option value="expense">Expense</option>
+                <option value="salary">Salary</option>
+              </select>
+            </label>
           </div>
 
           {filteredPayments.length ===
