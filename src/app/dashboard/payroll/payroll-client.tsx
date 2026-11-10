@@ -88,6 +88,7 @@ type PayrollRun = {
 };
 
 type SavedPayrollItem = {
+  id?: string;
   employee_id: string;
   staff_id: string;
   working_days: number | null;
@@ -287,6 +288,7 @@ export default function PayrollPage() {
   const [schoolId, setSchoolId] = useState("");
   const [rows, setRows] = useState<Row[]>([]);
   const [savedPayrollItems, setSavedPayrollItems] = useState<SavedPayrollItem[]>([]);
+  const [recoverableSalaryItemIds, setRecoverableSalaryItemIds] = useState<string[]>([]);
   const [savedRun, setSavedRun] = useState<PayrollRun | null>(null);
   const [editing, setEditing] = useState(true);
   const [loading, setLoading] = useState(true);
@@ -477,7 +479,7 @@ export default function PayrollPage() {
         ? await supabase
             .from("payroll_items")
             .select(
-              "employee_id, staff_id, working_days, paid_leave_days, unpaid_days, payable_days, gross_salary, total_deductions, lop_amount, net_salary, paid_amount, paid, status",
+              "id, employee_id, staff_id, working_days, paid_leave_days, unpaid_days, payable_days, gross_salary, total_deductions, lop_amount, net_salary, paid_amount, paid, status",
             )
             .eq("school_id", sid)
             .eq("payroll_run_id", run.id)
@@ -487,9 +489,9 @@ export default function PayrollPage() {
         throw new Error(`Payroll items: ${savedItemsResult.error.message}`);
       }
 
-      setSavedPayrollItems(
-        (savedItemsResult.data || []) as SavedPayrollItem[],
-      );
+      const loadedSavedPayrollItems = (savedItemsResult.data || []) as SavedPayrollItem[];
+      setSavedPayrollItems(loadedSavedPayrollItems);
+      setRecoverableSalaryItemIds([]);
       setSavedRun(run);
       setEditing(
         !run || (run.status !== "prepared" && run.status !== "finalized"),
@@ -505,6 +507,73 @@ export default function PayrollPage() {
         .order("first_name", { ascending: true });
 
       if (staffError) throw new Error(`Staff: ${staffError.message}`);
+
+      const paidItems = loadedSavedPayrollItems.filter(
+        (item) =>
+          Boolean(item.paid) ||
+          item.status === "paid" ||
+          Number(item.paid_amount || 0) > 0.005,
+      );
+      if (run?.id && paidItems.length > 0) {
+        const staffById = new Map(
+          ((staffData || []) as Staff[]).map((staffMember) => [staffMember.id, staffMember]),
+        );
+        const expectedReferences = paidItems
+          .map((item) => staffById.get(item.staff_id)?.employee_no)
+          .filter((employeeNo): employeeNo is string => Boolean(employeeNo))
+          .map((employeeNo) => `PAYROLL-${month}-${employeeNo}`);
+
+        const [referenceExpensesResult, runExpensesResult, monthExpensesResult] = await Promise.all([
+          expectedReferences.length
+            ? supabase
+                .from("expenses")
+                .select("invoice_number, vendor_name, description")
+                .eq("school_id", sid)
+                .in("invoice_number", expectedReferences)
+            : Promise.resolve({ data: [], error: null }),
+          supabase
+            .from("expenses")
+            .select("invoice_number, vendor_name, description")
+            .eq("school_id", sid)
+            .ilike("description", `%Payroll run: ${run.id}%`),
+          supabase
+            .from("expenses")
+            .select("invoice_number, vendor_name, description")
+            .eq("school_id", sid)
+            .ilike("description", `%${monthText(month)}%`),
+        ]);
+
+        if (referenceExpensesResult.error) throw referenceExpensesResult.error;
+        if (runExpensesResult.error) throw runExpensesResult.error;
+        if (monthExpensesResult.error) throw monthExpensesResult.error;
+
+        const expenseRows = [
+          ...(referenceExpensesResult.data || []),
+          ...(runExpensesResult.data || []),
+          ...(monthExpensesResult.data || []),
+        ];
+        const missingItemIds = paidItems.filter((item) => {
+          const staffMember = staffById.get(item.staff_id);
+          if (!staffMember) return false;
+          const expectedReference = `PAYROLL-${month}-${staffMember.employee_no}`;
+          const staffFullName = staffName(staffMember).trim().toLowerCase();
+          return !expenseRows.some((expense) => {
+            const description = String(expense.description || "").toLowerCase();
+            const vendorName = String(expense.vendor_name || "").trim().toLowerCase();
+            return (
+              expense.invoice_number === expectedReference ||
+              (description.includes(`payroll run: ${run.id.toLowerCase()}`) &&
+                description.includes(`payroll employee: ${item.employee_id.toLowerCase()}`)) ||
+              (description.includes("salary") &&
+                description.includes(monthText(month).toLowerCase()) &&
+                (vendorName === staffFullName || description.includes(staffFullName)))
+            );
+          });
+        })
+          .filter((item): item is SavedPayrollItem & { id: string } => Boolean(item.id))
+          .map((item) => item.id);
+        setRecoverableSalaryItemIds(missingItemIds);
+      }
 
       const { data: salaryData, error: salaryError } = await supabase
         .from("staff_salary_structures")
@@ -1067,6 +1136,49 @@ export default function PayrollPage() {
     } catch (error) {
       console.error("UNLOCK PAYROLL ERROR", error);
       setError(error instanceof Error ? error.message : "Unable to unlock payroll.");
+    } finally {
+      setUnlocking(false);
+    }
+  }
+
+  async function recoverMissingSalaryPayments() {
+    if (!savedRun?.id || !schoolId || recoverableSalaryItemIds.length === 0) return;
+    if (!window.confirm(
+      `Reopen ${recoverableSalaryItemIds.length} salary payment(s) with no matching expense record for ${monthText(month)}? The payroll accrual will be kept and these staff items can be paid again.`,
+    )) {
+      return;
+    }
+
+    setUnlocking(true);
+    setError("");
+    setSuccess("");
+
+    try {
+      const { error: itemsError } = await supabase
+        .from("payroll_items")
+        .update({ paid: false, paid_amount: 0, status: "prepared" })
+        .eq("school_id", schoolId)
+        .eq("payroll_run_id", savedRun.id)
+        .in("id", recoverableSalaryItemIds);
+      if (itemsError) throw itemsError;
+
+      const { error: runError } = await supabase
+        .from("payroll_runs")
+        .update({
+          status: "prepared",
+          finalized_at: null,
+          finalized_by: null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("school_id", schoolId)
+        .eq("id", savedRun.id);
+      if (runError) throw runError;
+
+      await loadPayroll();
+      setSuccess(`Recovered ${recoverableSalaryItemIds.length} missing salary payment(s). The payroll accrual was kept; select ${monthText(month)} in Accounting → Payment to record them again.`);
+    } catch (error) {
+      console.error("RECOVER SALARY PAYMENT ERROR", error);
+      setError(error instanceof Error ? error.message : "Unable to recover missing salary payments.");
     } finally {
       setUnlocking(false);
     }
@@ -1705,6 +1817,19 @@ export default function PayrollPage() {
             </div>
 
             <div className="flex flex-wrap gap-2">
+              {savedRun && locked && recoverableSalaryItemIds.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => void recoverMissingSalaryPayments()}
+                  disabled={unlocking || loading}
+                  title="Reopen paid payroll items with no matching salary expense record."
+                  className="inline-flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-sm font-bold text-red-700 disabled:opacity-50"
+                >
+                  {unlocking ? <Loader2 size={15} className="animate-spin" /> : <RefreshCw size={15} />}
+                  Recover Missing Payment ({recoverableSalaryItemIds.length})
+                </button>
+              )}
+
               {savedRun && locked && (
                 <button
                   type="button"

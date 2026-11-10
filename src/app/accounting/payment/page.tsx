@@ -1846,6 +1846,156 @@ export default function PaymentPage() {
     );
   }
 
+  async function saveSalaryPaymentEdit(
+    numericAmount: number,
+    paidFrom: Account,
+  ) {
+    if (!schoolId || !editingId || !payrollRunId || !payrollMonth || !selectedPayrollStaffId) {
+      setError("The linked payroll details are incomplete. Cancel and reopen this salary payment.");
+      return;
+    }
+
+    const salaryPayable = accounts.find(
+      (account) => account.id === payrollPayableAccountId,
+    );
+    const staff = payrollStaffItems.find(
+      (item) => item.employee_id === selectedPayrollStaffId,
+    );
+    const originalPayment = payments.find((item) => item.id === editingId);
+    const expenseId = originalPayment?.source_record_id || originalPayment?.reference_id;
+
+    if (!salaryPayable || !staff || !expenseId) {
+      setError("The salary payment is missing its payroll, account, or expense link.");
+      return;
+    }
+    if (paidFrom.id === salaryPayable.id) {
+      setError("Pay From and Salary Payable cannot be the same account.");
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const { data: payrollItem, error: itemReadError } = await supabase
+        .from("payroll_items")
+        .select("id, paid_amount, paid, status")
+        .eq("school_id", schoolId)
+        .eq("payroll_run_id", payrollRunId)
+        .eq("employee_id", selectedPayrollStaffId)
+        .maybeSingle();
+      if (itemReadError) throw itemReadError;
+
+      const existingPaidAmount = Number(payrollItem?.paid_amount || 0);
+      if (!payrollItem || existingPaidAmount <= 0.005 || Math.abs(existingPaidAmount - numericAmount) > 0.005) {
+        throw new Error("Salary amount must match the amount already paid for this payroll item.");
+      }
+
+      const expenseDescription = [
+        `Salary - ${staff.name} - ${formatPayrollMonthLabel(payrollMonth)}`,
+        `Payroll run: ${payrollRunId}`,
+        `Payroll employee: ${staff.employee_id}`,
+        notes.trim() ? `Notes: ${notes.trim()}` : "",
+      ].filter(Boolean).join(" | ");
+      const reference = referenceNumber.trim() || `PAYROLL-${payrollMonth}-${staff.employee_no}`;
+      const journalDescription = [
+        `Salary payment - ${staff.name} - ${formatPayrollMonthLabel(payrollMonth)}`,
+        `Payroll run: ${payrollRunId}`,
+        `Payroll employee: ${staff.employee_id}`,
+        `Payment method: ${paymentMethod}`,
+        `Reference: ${reference}`,
+        notes.trim() ? `Notes: ${notes.trim()}` : "",
+      ].filter(Boolean).join(" | ");
+
+      const { error: expenseUpdateError } = await supabase
+        .from("expenses")
+        .update({
+          expense_date: paymentDate,
+          amount: numericAmount,
+          paid_from_account_id: paidFrom.id,
+          invoice_number: reference,
+          description: expenseDescription,
+        })
+        .eq("school_id", schoolId)
+        .eq("id", expenseId);
+      if (expenseUpdateError) throw expenseUpdateError;
+
+      if (originalPayment.reference_type === "payment") {
+        const { error: journalUpdateError } = await supabase
+          .from("journal_entries")
+          .update({ entry_date: paymentDate, description: journalDescription })
+          .eq("school_id", schoolId)
+          .eq("id", editingId);
+        if (journalUpdateError) throw journalUpdateError;
+
+        const { data: lines, error: linesError } = await supabase
+          .from("journal_lines")
+          .select("id, debit, credit")
+          .eq("school_id", schoolId)
+          .eq("journal_entry_id", editingId);
+        if (linesError) throw linesError;
+        const debitLine = (lines || []).find((line) => Number(line.debit || 0) > 0);
+        const creditLine = (lines || []).find((line) => Number(line.credit || 0) > 0);
+        if (!debitLine || !creditLine) throw new Error("The salary journal is incomplete.");
+
+        const { error: debitUpdateError } = await supabase
+          .from("journal_lines")
+          .update({ account_id: salaryPayable.id, debit: numericAmount, credit: 0, description: journalDescription })
+          .eq("school_id", schoolId)
+          .eq("id", debitLine.id);
+        if (debitUpdateError) throw debitUpdateError;
+
+        const { error: creditUpdateError } = await supabase
+          .from("journal_lines")
+          .update({ account_id: paidFrom.id, debit: 0, credit: numericAmount, description: journalDescription })
+          .eq("school_id", schoolId)
+          .eq("id", creditLine.id);
+        if (creditUpdateError) throw creditUpdateError;
+      } else {
+        const { error: transactionUpdateError } = await supabase
+          .from("transactions")
+          .update({ transaction_date: paymentDate, description: journalDescription })
+          .eq("school_id", schoolId)
+          .eq("id", editingId);
+        if (transactionUpdateError) throw transactionUpdateError;
+
+        const { data: lines, error: linesError } = await supabase
+          .from("transaction_entries")
+          .select("id, debit, credit")
+          .eq("school_id", schoolId)
+          .eq("transaction_id", editingId);
+        if (linesError) throw linesError;
+        const debitLine = (lines || []).find((line) => Number(line.debit || 0) > 0);
+        const creditLine = (lines || []).find((line) => Number(line.credit || 0) > 0);
+        if (!debitLine || !creditLine) throw new Error("The salary transaction is incomplete.");
+
+        const { error: debitUpdateError } = await supabase
+          .from("transaction_entries")
+          .update({ account_id: salaryPayable.id, debit: numericAmount, credit: 0, description: journalDescription })
+          .eq("school_id", schoolId)
+          .eq("id", debitLine.id);
+        if (debitUpdateError) throw debitUpdateError;
+
+        const { error: creditUpdateError } = await supabase
+          .from("transaction_entries")
+          .update({ account_id: paidFrom.id, debit: 0, credit: numericAmount, description: journalDescription })
+          .eq("school_id", schoolId)
+          .eq("id", creditLine.id);
+        if (creditUpdateError) throw creditUpdateError;
+      }
+
+      setSuccess("Salary payment updated. Payroll and accounting remain linked.");
+      resetForm();
+      await Promise.all([
+        loadPayments(schoolId),
+        loadPayrollMonthOptions(schoolId),
+      ]);
+    } catch (error) {
+      console.error("SALARY PAYMENT EDIT ERROR", error);
+      setError(error instanceof Error ? error.message : "Unable to update salary payment.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   /*
    * =====================================================
    * SAVE PAYMENT
@@ -1917,6 +2067,11 @@ export default function PaymentPage() {
 
     if (!paymentDate) {
       setError("Select payment date.");
+      return;
+    }
+
+    if (editingId && paymentType === "salary") {
+      await saveSalaryPaymentEdit(numericAmount, paidFrom);
       return;
     }
 
@@ -2311,6 +2466,8 @@ export default function PaymentPage() {
             `Salary - ${paymentStaff.name} - ${formatPayrollMonthLabel(
               payrollMonth,
             )}`,
+            `Payroll run: ${payrollRunId}`,
+            `Payroll employee: ${paymentStaff.employee_id}`,
             notes.trim() ? `Notes: ${notes.trim()}` : "",
           ].filter(Boolean).join(" | ")
         : particulars.trim();
@@ -2834,7 +2991,141 @@ export default function PaymentPage() {
    * =====================================================
    */
 
-  function startEdit(
+  async function startEditSalaryPayment(
+    payment: PaymentRow,
+    salaryPayableAccountId: string,
+    paidFromAccountId: string,
+  ) {
+    if (!schoolId) return;
+
+    const expenseId = payment.source_record_id || payment.reference_id;
+    if (!expenseId) {
+      setError("The salary payment is missing its linked expense record.");
+      return;
+    }
+
+    try {
+      const { data: expense, error: expenseError } = await supabase
+        .from("expenses")
+        .select("expense_date, amount, paid_from_account_id, vendor_name, invoice_number, description")
+        .eq("school_id", schoolId)
+        .eq("id", expenseId)
+        .maybeSingle();
+
+      if (expenseError) throw expenseError;
+      if (!expense) throw new Error("The salary expense record could not be found.");
+
+      const payrollRunMatch = expense.description?.match(/Payroll run:\s*([\w-]+)/i);
+      const payrollEmployeeMatch = expense.description?.match(/Payroll employee:\s*([\w-]+)/i);
+      const referenceMatch = expense.invoice_number?.match(/^PAYROLL-(\d{4}-\d{2})-(.+)$/i);
+      const [referenceYear, referenceMonth] = (referenceMatch?.[1] || "-").split("-");
+
+      let payrollRun: { id: string; month: number; year: number } | null = null;
+      if (payrollRunMatch?.[1]) {
+        const { data, error } = await supabase
+          .from("payroll_runs")
+          .select("id, month, year")
+          .eq("school_id", schoolId)
+          .eq("id", payrollRunMatch[1])
+          .maybeSingle();
+        if (error) throw error;
+        payrollRun = data;
+      } else if (referenceMonth && referenceYear !== "-") {
+        const { data, error } = await supabase
+          .from("payroll_runs")
+          .select("id, month, year")
+          .eq("school_id", schoolId)
+          .eq("month", Number(referenceMonth))
+          .eq("year", Number(referenceYear))
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (error) throw error;
+        payrollRun = data;
+      }
+
+      if (!payrollRun) {
+        throw new Error("The linked payroll run could not be found. Recover this payment from Payroll.");
+      }
+
+      let employee: {
+        id: string;
+        employee_code: string | null;
+        name: string | null;
+        designation: string | null;
+      } | null = null;
+      if (payrollEmployeeMatch?.[1]) {
+        const { data, error } = await supabase
+          .from("employees")
+          .select("id, employee_code, name, designation")
+          .eq("school_id", schoolId)
+          .eq("id", payrollEmployeeMatch[1])
+          .maybeSingle();
+        if (error) throw error;
+        employee = data;
+      } else if (referenceMatch?.[2]) {
+        const { data, error } = await supabase
+          .from("employees")
+          .select("id, employee_code, name, designation")
+          .eq("school_id", schoolId)
+          .eq("employee_code", referenceMatch[2])
+          .maybeSingle();
+        if (error) throw error;
+        employee = data;
+      }
+
+      if (!employee) {
+        throw new Error("The staff member could not be matched to this payroll payment.");
+      }
+
+      const { data: payrollItem, error: payrollItemError } = await supabase
+        .from("payroll_items")
+        .select("net_salary, paid_amount, paid, status")
+        .eq("school_id", schoolId)
+        .eq("payroll_run_id", payrollRun.id)
+        .eq("employee_id", employee.id)
+        .maybeSingle();
+
+      if (payrollItemError) throw payrollItemError;
+      if (!payrollItem) throw new Error("The staff payroll item could not be found.");
+
+      const payrollMonth = `${payrollRun.year}-${String(payrollRun.month).padStart(2, "0")}`;
+      const amountValue = Number(expense.amount || 0);
+      const staffItem: PayrollStaffItem = {
+        employee_id: employee.id,
+        employee_no: employee.employee_code || referenceMatch?.[2] || "",
+        name: employee.name || expense.vendor_name || "Staff",
+        designation: employee.designation || "",
+        net_pay: amountValue,
+      };
+
+      setEditingId(payment.id);
+      setPaymentType("salary");
+      setPayrollMode(true);
+      setPayrollRunId(payrollRun.id);
+      setPayrollMonth(payrollMonth);
+      setPayrollPayableAccountId(salaryPayableAccountId);
+      setPayrollAccountingTransactionNumber("");
+      setPayrollStaffItems([staffItem]);
+      setPayrollTotalAmount(amountValue.toFixed(2));
+      setSelectedPayrollStaffId(employee.id);
+      setPaymentDate(expense.expense_date || payment.transaction_date);
+      setPaymentMethod(getPaymentMethod(payment.description, accounts.find((account) => account.id === paidFromAccountId)!));
+      setPaidFromAccountId(expense.paid_from_account_id || paidFromAccountId);
+      setExpenseAccountId("");
+      setAmount(amountValue.toFixed(2));
+      setParticulars(`Salary - ${staffItem.name} - ${formatPayrollMonthLabel(payrollMonth)}`);
+      setReferenceNumber(expense.invoice_number || `PAYROLL-${payrollMonth}-${staffItem.employee_no}`);
+      setNotes(getNotes(expense.description) || getNotes(payment.description));
+      setError("");
+      setSuccess("");
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Unable to open the salary payment for editing.");
+    }
+  }
+
+  async function startEdit(
     payment: PaymentRow
   ) {
     const debitEntry =
@@ -2889,6 +3180,11 @@ export default function PaymentPage() {
       return;
     }
 
+    if (expense.account_type === "payable" || expense.account_type === "liability") {
+      await startEditSalaryPayment(payment, expense.id, paidFrom.id);
+      return;
+    }
+
     setEditingId(
       payment.id
     );
@@ -2908,9 +3204,10 @@ export default function PaymentPage() {
       paidFrom.id
     );
 
-    setExpenseAccountId(
-      expense.id
-    );
+    setExpenseAccountId(expense.id);
+
+    setPaymentType("expense");
+    setPayrollMode(false);
 
     setAmount(
       String(
@@ -3365,7 +3662,7 @@ export default function PaymentPage() {
                       onChange={(e) =>
                         void handlePayrollMonthChange(e.target.value)
                       }
-                      disabled={saving || payrollMonthOptions.length === 0}
+                      disabled={saving || Boolean(editingId) || payrollMonthOptions.length === 0}
                       className="w-full rounded-lg border bg-white px-3 py-2.5 outline-none focus:border-blue-500 disabled:bg-slate-50"
                     >
                       <option value="">Select saved payroll month</option>
@@ -3393,6 +3690,7 @@ export default function PaymentPage() {
                           e.target.value
                         )
                       }
+                      disabled={Boolean(editingId)}
                       className="w-full rounded-lg border bg-white px-3 py-2.5 outline-none focus:border-blue-500"
                     >
                       <option value="">Select Teacher / Staff</option>

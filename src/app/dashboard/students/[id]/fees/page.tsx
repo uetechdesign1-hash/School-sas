@@ -299,6 +299,7 @@ export default function FeesPage() {
 
   const [studentSearch, setStudentSearch] = useState("");
   const [loadingStudents, setLoadingStudents] = useState(false);
+  const [studentsLoaded, setStudentsLoaded] = useState(false);
   const [studentSearchDelay, setStudentSearchDelay] = useState(0);
   const [studentPage, setStudentPage] = useState(1);
   const [studentHasMore, setStudentHasMore] = useState(false);
@@ -485,6 +486,7 @@ export default function FeesPage() {
    */
   const loadStudents = useCallback(async (currentSchoolId: string) => {
     setLoadingStudents(true);
+    setStudentsLoaded(false);
 
     try {
       const { data: studentData, error: studentError } = await supabase
@@ -567,6 +569,7 @@ export default function FeesPage() {
       }));
 
       setStudents(normalizedStudents);
+      setStudentsLoaded(true);
     } finally {
       setLoadingStudents(false);
     }
@@ -629,7 +632,10 @@ export default function FeesPage() {
           return;
         }
 
-        await loadFinancialAccounts(currentSchoolId);
+        await Promise.all([
+          loadStudents(currentSchoolId),
+          loadFinancialAccounts(currentSchoolId),
+        ]);
       } catch (error) {
         console.error("Fee page initialization error:", error);
 
@@ -2124,7 +2130,7 @@ export default function FeesPage() {
    * to that student and load only their ledger.
    */
   useEffect(() => {
-    if (!routeStudentId || !schoolId || loadingStudents || selectedStudent) {
+    if (!routeStudentId || !schoolId || !studentsLoaded || loadingStudents || selectedStudent) {
       return;
     }
 
@@ -2145,6 +2151,7 @@ export default function FeesPage() {
   }, [
     routeStudentId,
     schoolId,
+    studentsLoaded,
     students,
     loadingStudents,
     selectedStudent,
