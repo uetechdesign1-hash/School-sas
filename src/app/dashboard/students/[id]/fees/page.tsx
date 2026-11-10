@@ -300,7 +300,6 @@ export default function FeesPage() {
   const [studentSearch, setStudentSearch] = useState("");
   const [loadingStudents, setLoadingStudents] = useState(false);
   const [studentSearchDelay, setStudentSearchDelay] = useState(0);
-  const [studentSearchTimeout] = useRef<NodeJS.Timeout | null>(null);
   const [studentPage, setStudentPage] = useState(1);
   const [studentHasMore, setStudentHasMore] = useState(false);
   const [studentSearchResults, setStudentSearchResults] = useState<Student[]>([]);
@@ -308,13 +307,14 @@ export default function FeesPage() {
   const [studentIsSearching, setStudentIsSearching] = useState(false);
   const [studentSearchError, setStudentSearchError] = useState<string | null>(null);
   const [studentWillSearch, setStudentWillSearch] = useState(false);
+  const [students, setStudents] = useState<Student[]>([]);
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
   const [preserveSelectedStudent, setPreserveSelectedStudent] = useState<Student | null>(null);
 
   // Class/section filtering state
-  const [classes, setClasses] = useState<ClassRow[]>([]);
+  const [classes, setClasses] = useState<SchoolClass[]>([]);
   const [selectedClassId, setSelectedClassId] = useState<string | null>(null);
-  const [sections, setSections] = useState<SectionRow[]>([]);
+  const [sections, setSections] = useState<Section[]>([]);
   const [selectedSectionId, setSelectedSectionId] = useState<string | null>(null);
 
   const [bills, setBills] = useState<FeeBill[]>([]);

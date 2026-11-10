@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import Link from "next/link";
 import {
@@ -228,30 +228,58 @@ function normalizeSalary(raw: Record<string, unknown>, staffId: string): Salary 
 }
 function calculate(
   salary: Salary | null,
-  worked: number,
-  paidLeave: number,
-  holiday: number,
-  weekOff: number,
-  unpaidDays: number,
+  pCount: number,
+  hCount: number,
+  woCount: number,
+  clCount: number,
+  aCount: number,
+  halfDayCount: number,
   calendarDays: number,
 ) {
-  const w = Math.max(0, n(worked));
-  const p = Math.max(0, n(paidLeave));
-  const h = Math.max(0, n(holiday));
-  const off = Math.max(0, n(weekOff));
-  const unpaid = Math.max(0, n(unpaidDays));
-  const payable = w + p + h + off;
+  const monthDays = Math.max(1, n(calendarDays));
+  const halfDayAmount = Math.max(0, n(halfDayCount)) * 0.5;
+  const worked = Math.max(0, n(pCount)) + halfDayAmount;
+  const paidLeave = Math.max(0, clCount);
+  const holiday = Math.max(0, hCount);
+  const weekOff = Math.max(0, woCount);
+  const payable = worked + paidLeave + holiday + weekOff;
+  const unpaid = Math.max(0, aCount) + halfDayAmount;
+
   if (!salary) {
-    return { payable, unpaid, gross: 0, lop: 0, deductions: 0, net: 0 };
+    return {
+      payable,
+      unpaid,
+      worked,
+      paidLeave,
+      holiday,
+      weekOff,
+      gross: 0,
+      lop: 0,
+      deductions: 0,
+      net: 0,
+    };
   }
 
   const gross = salary.gross_salary;
-  const monthDays = Math.max(1, n(calendarDays));
-  const lop = salary.gross_salary * (unpaid / monthDays);
+
+  // LOP = unpaid absence amount. Every absent day drops that day's share.
+  const lop = (salary.gross_salary * unpaid) / monthDays;
+
   const deductions = salary.deductions;
   const net = Math.max(gross - lop - deductions, 0);
 
-  return { payable, unpaid, gross, lop, deductions, net };
+  return {
+    payable,
+    unpaid,
+    worked,
+    paidLeave,
+    holiday,
+    weekOff,
+    gross,
+    lop,
+    deductions,
+    net,
+  };
 }
 
 export default function PayrollPage() {
@@ -363,10 +391,10 @@ export default function PayrollPage() {
       setSchoolId(sid);
 
       const [year, monthNumber] = month.split("-").map(Number);
-      const defaultDays = salaryCalendarDays;
+      const monthLength = daysInMonth(month);
 
       const firstDate = `${month}-01`;
-      const lastDate = `${month}-${String(defaultDays).padStart(2, "0")}`;
+      const lastDate = `${month}-${String(monthLength).padStart(2, "0")}`;
       const [actualResult, calendarResult, settingsResult, overridesResult] = await Promise.all([
         supabase
           .from("staff_attendance")
@@ -416,61 +444,7 @@ export default function PayrollPage() {
           ? ("30_day_fixed" as const)
           : ("actual_calendar" as const);
       setAttendanceModel(loadedAttendanceModel);
-      const elapsedDays = elapsedDaysInMonth(month);
-
-      function attendanceCounts(staffId: string) {
-        let monthHolidays = 0;
-        let monthWeekOffs = 0;
-        let present = 0;
-        let absent = 0;
-        let halfDay = 0;
-        let paidLeave = 0;
-        let holiday = 0;
-        let weekOff = 0;
-
-        for (let day = 1; day <= defaultDays; day++) {
-          const date = `${month}-${String(day).padStart(2, "0")}`;
-          const override = statusOverrideByStaffDate.get(`${staffId}|${date}`);
-          const actual = actualByStaffDate.get(`${staffId}|${date}`);
-          const calendarType = calendarByDate.get(date);
-          const calendarStatus =
-            calendarType === "holiday" || calendarType === "week_off"
-              ? calendarType
-              : calendarType === "working_day"
-                ? "auto"
-                : new Date(`${date}T00:00:00`).getDay() === weeklyOffDay
-                  ? "week_off"
-                  : "auto";
-          const actualStatus = !actual
-            ? "auto"
-            : actual.status === "absent"
-              ? "absent"
-              : actual.status === "half_day" || actual.status === "late" || actual.is_late
-                ? "half_day"
-                : "present";
-          const status = override || actualStatus !== "auto"
-            ? override || actualStatus
-            : calendarStatus === "auto" && date <= new Date().toISOString().slice(0, 10)
-              ? "absent"
-              : calendarStatus;
-
-          if (status === "holiday") monthHolidays++;
-          if (status === "week_off") monthWeekOffs++;
-
-          if (status === "present") present++;
-          if (status === "absent") absent++;
-          if (status === "half_day") halfDay++;
-          if (status === "paid_leave") paidLeave++;
-          if (status === "holiday") holiday++;
-          if (status === "week_off") weekOff++;
-        }
-
-        const worked = present + halfDay * 0.5;
-        const unpaid = absent + halfDay * 0.5;
-        const workingDays = Math.max(defaultDays - monthWeekOffs, 0);
-        const scheduledDays = Math.max(defaultDays - monthWeekOffs - monthHolidays, 0);
-        return { workingDays, scheduledDays, worked, unpaid, paidLeave, holiday, weekOff };
-      }
+      const defaultDays = loadedAttendanceModel === "30_day_fixed" ? 30 : monthLength;
 
       const { data: runData, error: runError } = await supabase
         .from("payroll_runs")
@@ -551,35 +525,71 @@ export default function PayrollPage() {
         }
       }
 
-      const nextRows: Row[] = ((staffData || []) as Staff[]).map((s) => {
-        const salary = salaryMap.get(s.id) || null;
-        const attendance = attendanceCounts(s.id);
-        const working = attendance.workingDays;
-        const scheduledDays = attendance.scheduledDays;
-        const paid = attendance.paidLeave;
-        const holiday = attendance.holiday;
-        const weekOff = attendance.weekOff;
-        const worked = attendance.worked;
-        const unpaid = attendance.unpaid;
+      const nextRows: Row[] = ((staffData || []) as Staff[]).map((staffMember) => {
+        const salary = salaryMap.get(staffMember.id) || null;
+        let present = 0;
+        let absent = 0;
+        let halfDay = 0;
+        let paidLeave = 0;
+        let holiday = 0;
+        let weekOff = 0;
+
+        for (let day = 1; day <= monthLength; day++) {
+          const date = `${month}-${String(day).padStart(2, "0")}`;
+          const key = `${staffMember.id}|${date}`;
+          const override = statusOverrideByStaffDate.get(key);
+          const actual = actualByStaffDate.get(key);
+          const calendarType = calendarByDate.get(date);
+          const calendarStatus =
+            calendarType === "holiday" || calendarType === "week_off"
+              ? calendarType
+              : calendarType === "working_day"
+                ? "auto"
+                : new Date(`${date}T00:00:00`).getDay() === weeklyOffDay
+                  ? "week_off"
+                  : "auto";
+          const actualStatus = !actual
+            ? "auto"
+            : actual.status === "absent"
+              ? "absent"
+              : actual.status === "half_day" || actual.status === "late" || actual.is_late
+                ? "half_day"
+                : "present";
+          const status = override || actualStatus !== "auto"
+            ? override || actualStatus
+            : calendarStatus === "auto" && date <= new Date().toISOString().slice(0, 10)
+              ? "absent"
+              : calendarStatus;
+
+          if (status === "present") present++;
+          if (status === "absent") absent++;
+          if (status === "half_day") halfDay++;
+          if (status === "paid_leave") paidLeave++;
+          if (status === "holiday") holiday++;
+          if (status === "week_off") weekOff++;
+        }
+
+        const scheduledDays = Math.max(defaultDays - weekOff - holiday, 0);
         const result = calculate(
           salary,
-          worked,
-          paid,
+          present,
           holiday,
           weekOff,
-          unpaid,
+          paidLeave,
+          absent,
+          halfDay,
           defaultDays,
         );
 
         return {
-          staff: s,
+          staff: staffMember,
           salary,
-          workingDays: working,
+          workingDays: Math.max(defaultDays - weekOff, 0),
           scheduledDays,
-          worked,
-          paidLeave: paid,
-          holiday,
-          weekOff,
+          worked: result.worked,
+          paidLeave: result.paidLeave,
+          holiday: result.holiday,
+          weekOff: result.weekOff,
           unpaid: result.unpaid,
           payable: result.payable,
           gross: result.gross,
@@ -907,7 +917,7 @@ export default function PayrollPage() {
         other_deduction: Number(r.deductions.toFixed(2)),
         total_deductions: Number(r.deductions.toFixed(2)),
         status: "draft",
-        notes: `Attendance source: Admin/GPS monthly attendance — ${r.worked} worked, ${r.paidLeave} paid leave, ${r.holiday} holiday, ${r.unpaid} unpaid.`,
+        notes: `Attendance source: Admin/GPS monthly attendance â€” ${r.worked} worked, ${r.paidLeave} paid leave, ${r.holiday} holiday, ${r.unpaid} unpaid.`,
       }));
 
       /*
@@ -1379,7 +1389,7 @@ export default function PayrollPage() {
 
       /*
        * =====================================================
-       * PREPARE SALARY ACCOUNTING — NO DATABASE RPC
+       * PREPARE SALARY ACCOUNTING â€” NO DATABASE RPC
        * -----------------------------------------------------
        * This used to call a `prepare_payroll_accounting` RPC. That function
        * is not defined in any migration in this repository and is not
@@ -1399,7 +1409,7 @@ export default function PayrollPage() {
        *   3. persist payroll_runs.status = 'prepared' so the Payment page
        *      can finalize the run once every staff member has been paid.
        *
-       * Bank/Cash is NOT touched here — individual staff payments post
+       * Bank/Cash is NOT touched here â€” individual staff payments post
        * Dr Salary Payable / Cr Cash-Bank from Accounting -> Payment.
        * =====================================================
        */
@@ -1574,7 +1584,7 @@ export default function PayrollPage() {
               <div>
                 <h1 className="text-3xl font-bold text-slate-900">Payroll</h1>
                 <p className="mt-1 text-sm text-slate-500">
-                  Offline attendance → monthly salary → payment
+                  Offline attendance â†’ monthly salary â†’ payment
                 </p>
               </div>
             </div>
@@ -1642,7 +1652,7 @@ export default function PayrollPage() {
                   </span>
                 ) : savedRun ? (
                   editing ? (
-                    <span className="text-amber-700">Recalculated · Save before payment</span>
+                    <span className="text-amber-700">Recalculated Â· Save before payment</span>
                   ) : (
                     <span className="text-emerald-700">Saved</span>
                   )
@@ -1666,14 +1676,14 @@ export default function PayrollPage() {
             <div>
               <p className="text-sm font-bold text-slate-900">Staff & Monthly Attendance</p>
               <p className="text-xs text-slate-500">
-                Attendance is read from Staff Monthly Attendance. Use Admin Attendance to mark P, A or ½; payroll recalculates automatically.
+                Attendance is read from Staff Monthly Attendance. Use Admin Attendance to mark P, A or Â½; payroll recalculates automatically.
               </p>
             </div>
             <Link
               href="/dashboard/staff"
               className="text-xs font-bold text-blue-700 hover:underline"
             >
-              Open Staff →
+              Open Staff â†’
             </Link>
           </div>
           <input
@@ -1765,7 +1775,7 @@ export default function PayrollPage() {
               <table className="w-full min-w-[1120px] table-fixed text-left text-xs xl:min-w-0">
                 <thead>
                   <tr className="border-b border-slate-200 bg-slate-50">
-                    {["Staff", "Days − W/O", "Worked", "Paid Leave", "Holiday", "W/O", "Unpaid", "Payable", "Gross", "Deductions", "Net", "Action"].map((h) => (
+                    {["Staff", "Days âˆ’ W/O", "Worked", "Paid Leave", "Holiday", "W/O", "Unpaid", "Payable", "Gross", "Deductions", "Net", "Action"].map((h) => (
                       <th key={h} className="whitespace-nowrap px-2 py-2 text-[10px] font-bold uppercase tracking-wide text-slate-500">
                         {h}
                       </th>
@@ -1790,9 +1800,9 @@ export default function PayrollPage() {
 
                       <td className="whitespace-nowrap px-2 py-2 text-center font-bold text-red-600">{r.unpaid}</td>
                       <td className="whitespace-nowrap px-2 py-2 text-center font-bold">{r.payable}</td>
-                      <td className="whitespace-nowrap px-2 py-2 text-right font-semibold">{r.salary ? money(r.gross) : "—"}</td>
-                      <td className="whitespace-nowrap px-2 py-2 text-right">{r.salary ? money(r.deductions) : "—"}</td>
-                      <td className="whitespace-nowrap px-2 py-2 text-right font-bold text-blue-700">{r.salary ? money(r.net) : "—"}</td>
+                      <td className="whitespace-nowrap px-2 py-2 text-right font-semibold">{r.salary ? money(r.gross) : "â€”"}</td>
+                      <td className="whitespace-nowrap px-2 py-2 text-right">{r.salary ? money(r.deductions) : "â€”"}</td>
+                      <td className="whitespace-nowrap px-2 py-2 text-right font-bold text-blue-700">{r.salary ? money(r.net) : "â€”"}</td>
 
                       <td className="whitespace-nowrap px-2 py-2">
                         <div className="flex items-center justify-center gap-1">
@@ -1947,3 +1957,5 @@ function Detail({ label, value }: { label: string; value: string }) {
     </div>
   );
 }
+
+
