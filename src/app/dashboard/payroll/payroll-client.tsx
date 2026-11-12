@@ -132,6 +132,13 @@ function elapsedDaysInMonth(month: string) {
   return Math.min(Number(today.slice(8, 10)), daysInMonth(month));
 }
 
+function displayNetToDate(net: number, month: string) {
+  if (month !== new Date().toISOString().slice(0, 7)) return net;
+  return Number(
+    (net * elapsedDaysInMonth(month) / daysInMonth(month)).toFixed(2),
+  );
+}
+
 function staffName(s: Staff) {
   return [s.first_name, s.middle_name, s.last_name].filter(Boolean).join(" ");
 }
@@ -353,6 +360,14 @@ export default function PayrollPage() {
         { staff: 0, gross: 0, deductions: 0, lop: 0, net: 0 },
       ),
     [displayRows],
+  );
+
+  const displayedNetTotal = useMemo(
+    () => displayRows.reduce(
+      (total, row) => total + displayNetToDate(row.net, month),
+      0,
+    ),
+    [displayRows, month],
   );
 
   const filteredRows = useMemo(() => {
@@ -1779,7 +1794,11 @@ export default function PayrollPage() {
             <Stat label="Staff" value={String(totals.staff)} />
             <Stat label="Gross" value={money(totals.gross)} />
             <Stat label="LOP" value={money(totals.lop)} />
-            <Stat label="Net Payroll" value={money(totals.net)} highlight />
+            <Stat
+              label={month === new Date().toISOString().slice(0, 7) ? "Net to Date" : "Net Payroll"}
+              value={money(displayedNetTotal)}
+              highlight
+            />
           </div>
         </section>
 
@@ -1900,7 +1919,7 @@ export default function PayrollPage() {
               <table className="w-full min-w-[1120px] table-fixed text-left text-xs xl:min-w-0">
                 <thead>
                   <tr className="border-b border-slate-200 bg-slate-50">
-                    {["Staff", "Days âˆ’ W/O", "Worked", "Paid Leave", "Holiday", "W/O", "Unpaid", "Payable", "Gross", "Deductions", "Net", "Action"].map((h) => (
+                    {["Staff", "Days âˆ’ W/O", "Worked", "Paid Leave", "Holiday", "W/O", "Unpaid", "Payable", "Gross", "Deductions", month === new Date().toISOString().slice(0, 7) ? "Net to date" : "Net", "Action"].map((h) => (
                       <th key={h} className="whitespace-nowrap px-2 py-2 text-[10px] font-bold uppercase tracking-wide text-slate-500">
                         {h}
                       </th>
@@ -1927,7 +1946,7 @@ export default function PayrollPage() {
                       <td className="whitespace-nowrap px-2 py-2 text-center font-bold">{r.payable}</td>
                       <td className="whitespace-nowrap px-2 py-2 text-right font-semibold">{r.salary ? money(r.gross) : "â€”"}</td>
                       <td className="whitespace-nowrap px-2 py-2 text-right">{r.salary ? money(r.deductions) : "â€”"}</td>
-                      <td className="whitespace-nowrap px-2 py-2 text-right font-bold text-blue-700">{r.salary ? money(r.net) : "â€”"}</td>
+                      <td className="whitespace-nowrap px-2 py-2 text-right font-bold text-blue-700">{r.salary ? money(displayNetToDate(r.net, month)) : "â€”"}</td>
 
                       <td className="whitespace-nowrap px-2 py-2">
                         <div className="flex items-center justify-center gap-1">
@@ -1986,7 +2005,7 @@ export default function PayrollPage() {
                               <Detail label="Total Allowances" value={money(r.salary.allowances)} />
                               <Detail label="Gross Monthly" value={money(r.salary.gross_salary)} />
                               <Detail label="Fixed Deductions" value={money(r.salary.deductions)} />
-                              <Detail label="Calculated Net" value={money(r.net)} />
+                              <Detail label={month === new Date().toISOString().slice(0, 7) ? "Net to date" : "Calculated Net"} value={money(displayNetToDate(r.net, month))} />
                             </div>
                           </td>
                         </tr>
@@ -2000,7 +2019,7 @@ export default function PayrollPage() {
                     <td colSpan={7} />
                     <td className="px-4 py-4 text-right font-bold">{money(totals.gross)}</td>
                     <td className="px-4 py-4 text-right font-bold">{money(totals.deductions)}</td>
-                    <td className="px-4 py-4 text-right text-lg font-bold text-blue-700">{money(totals.net)}</td>
+                    <td className="px-4 py-4 text-right text-lg font-bold text-blue-700">{money(displayedNetTotal)}</td>
                     <td />
                   </tr>
                 </tfoot>
@@ -2022,6 +2041,11 @@ export default function PayrollPage() {
               <p className="text-xs font-bold uppercase tracking-wide text-slate-400">Amount to Pay</p>
               <p className="mt-1 text-3xl font-bold text-slate-900">{money(totals.net)}</p>
               <p className="mt-1 text-sm text-slate-500">{monthText(month)}</p>
+              {month === new Date().toISOString().slice(0, 7) && (
+                <p className="mt-1 text-xs text-slate-500">
+                  Net to date is display-only; this is the full-month payable amount.
+                </p>
+              )}
             </div>
 
             <button

@@ -20,7 +20,8 @@ import {
   Wallet,
   X,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { createClient } from "@/lib/supabase/client";
 
 const features = [
   {
@@ -82,8 +83,32 @@ const stats = [
 
 export default function HomePage() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [platformLogo, setPlatformLogo] = useState<string | null>(null);
+  const supabase = useMemo(() => createClient(), []);
 
   const closeMobileMenu = () => setMobileMenuOpen(false);
+
+  useEffect(() => {
+    let mounted = true;
+
+    async function loadPlatformLogo() {
+      try {
+        const { data, error } = await supabase.rpc("get_platform_logo");
+        if (error) throw error;
+        if (mounted) {
+          setPlatformLogo(typeof data === "string" ? data : null);
+        }
+      } catch (logoError) {
+        console.error("PLATFORM LOGO ERROR:", logoError);
+      }
+    }
+
+    void loadPlatformLogo();
+
+    return () => {
+      mounted = false;
+    };
+  }, [supabase]);
 
   return (
     <main className="min-h-screen bg-white text-slate-900">
@@ -99,21 +124,29 @@ export default function HomePage() {
 
       {/* Navbar */}
       <header className="sticky top-0 z-50 border-b border-slate-200/70 bg-white/90 backdrop-blur-xl">
-        <div className="mx-auto flex h-[72px] max-w-7xl items-center justify-between px-5 sm:px-6 lg:px-8">
+        <div className="mx-auto flex h-[88px] max-w-7xl items-center justify-between px-5 sm:px-6 lg:px-8">
           <Link
             href="/"
             className="flex items-center gap-3"
             onClick={closeMobileMenu}
           >
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 via-indigo-500 to-purple-500 text-white shadow-lg shadow-indigo-500/40">
-              <GraduationCap className="h-5 w-5" />
-            </div>
+            {platformLogo ? (
+              <img
+                src={platformLogo}
+                alt="SCB platform logo"
+                className="h-[72px] w-[72px] rounded-xl border border-slate-200 bg-white object-contain"
+              />
+            ) : (
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 via-indigo-500 to-purple-500 text-white shadow-lg shadow-indigo-500/40">
+                <GraduationCap className="h-5 w-5" />
+              </div>
+            )}
 
             <div>
-              <div className="text-xl font-bold tracking-tight">EduNexa</div>
+              <div className="text-xl font-bold tracking-tight">SCB</div>
 
               <div className="hidden text-[10px] font-medium uppercase tracking-[0.18em] text-slate-500 sm:block">
-                School Management
+                Smart Campus Board
               </div>
             </div>
           </Link>
@@ -135,10 +168,10 @@ export default function HomePage() {
             </a>
 
             <a
-              href="#why-edunexa"
+              href="#why-scb"
               className="text-sm font-medium text-slate-600 transition hover:text-slate-950"
             >
-              Why EduNexa
+              Why SCB
             </a>
 
             <a
@@ -202,11 +235,11 @@ export default function HomePage() {
               </a>
 
               <a
-                href="#why-edunexa"
+                href="#why-scb"
                 onClick={closeMobileMenu}
                 className="rounded-xl px-4 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
               >
-                Why EduNexa
+                Why SCB
               </a>
 
               <a
@@ -247,7 +280,7 @@ export default function HomePage() {
             <div>
               <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-white/70 bg-white/70 px-3.5 py-2 text-xs font-semibold text-indigo-700 shadow-sm backdrop-blur">
                 <Sparkles className="h-3.5 w-3.5 text-indigo-500" />
-                Complete School Management Platform
+                One Campus. One Platform. Complete Control.
               </div>
 
               <h1 className="max-w-4xl text-5xl font-bold tracking-[-0.04em] text-slate-950 sm:text-6xl lg:text-7xl">
@@ -258,7 +291,7 @@ export default function HomePage() {
               </h1>
 
               <p className="mt-7 max-w-2xl text-lg leading-8 text-slate-600 sm:text-xl">
-                EduNexa brings school administration, students, staff,
+                SCB brings school administration, students, staff,
                 attendance, fees, payroll, expenses, accounting and reports
                 together in one simple platform.
               </p>
@@ -268,7 +301,7 @@ export default function HomePage() {
                   href="/login"
                   className="group inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 px-6 py-3.5 text-sm font-semibold text-white shadow-xl shadow-indigo-500/40 transition hover:-translate-y-0.5 hover:from-blue-700 hover:via-indigo-700 hover:to-purple-700"
                 >
-                  Login to EduNexa
+                  Login to SCB
                   <ArrowRight className="h-4 w-4 transition group-hover:translate-x-1" />
                 </Link>
 
@@ -312,7 +345,7 @@ export default function HomePage() {
                   </div>
 
                   <div className="text-xs font-medium text-slate-400">
-                    EduNexa Dashboard
+                    SCB Dashboard
                   </div>
 
                   <div className="h-7 w-7 rounded-full bg-slate-100" />
@@ -461,7 +494,7 @@ export default function HomePage() {
             </h2>
 
             <p className="mt-5 text-lg leading-8 text-slate-600">
-              EduNexa brings the important school workflows together in one
+              SCB brings the important school workflows together in one
               connected system.
             </p>
           </div>
@@ -510,7 +543,7 @@ export default function HomePage() {
               </h2>
 
               <p className="mt-6 max-w-xl text-lg leading-8 text-slate-400">
-                EduNexa connects operational and financial workflows so your
+                SCB connects operational and financial workflows so your
                 school team can spend less time managing data and more time
                 managing the school.
               </p>
@@ -520,7 +553,7 @@ export default function HomePage() {
                   href="/login"
                   className="group inline-flex items-center gap-2 rounded-xl bg-white px-6 py-3.5 text-sm font-semibold text-slate-950 transition hover:bg-slate-100"
                 >
-                  Enter EduNexa
+                  Enter SCB
                   <ArrowRight className="h-4 w-4 transition group-hover:translate-x-1" />
                 </Link>
               </div>
@@ -571,13 +604,13 @@ export default function HomePage() {
         </div>
       </section>
 
-      {/* Why EduNexa */}
-      <section id="why-edunexa" className="scroll-mt-24">
+      {/* Why SCB */}
+      <section id="why-scb" className="scroll-mt-24">
         <div className="mx-auto max-w-7xl px-5 py-20 sm:px-6 lg:px-8 lg:py-28">
           <div className="grid gap-14 lg:grid-cols-2 lg:items-center">
             <div>
               <div className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">
-                Why EduNexa
+                Why SCB
               </div>
 
               <h2 className="mt-4 text-4xl font-bold tracking-[-0.03em] text-slate-950 sm:text-5xl">
@@ -586,7 +619,7 @@ export default function HomePage() {
 
               <p className="mt-6 text-lg leading-8 text-slate-600">
                 Your school should not need a collection of disconnected
-                tools. EduNexa gives administrators a single place to manage
+                tools. SCB gives administrators a single place to manage
                 everyday operations and financial workflows.
               </p>
             </div>
@@ -625,9 +658,17 @@ export default function HomePage() {
             <div className="absolute left-1/2 top-0 h-64 w-64 -translate-x-1/2 rounded-full bg-white blur-3xl" />
 
             <div className="relative">
-              <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-500 via-indigo-500 to-purple-500 text-white shadow-lg shadow-indigo-500/40">
-                <GraduationCap className="h-6 w-6" />
-              </div>
+              {platformLogo ? (
+                <img
+                  src={platformLogo}
+                  alt="SCB platform logo"
+                  className="mx-auto h-16 w-16 rounded-2xl border border-slate-200 bg-white object-contain"
+                />
+              ) : (
+                <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-500 via-indigo-500 to-purple-500 text-white shadow-lg shadow-indigo-500/40">
+                  <GraduationCap className="h-6 w-6" />
+                </div>
+              )}
 
               <h2 className="mt-6 text-4xl font-bold tracking-[-0.03em] text-slate-950 sm:text-5xl">
                 Ready to manage your school smarter?
@@ -635,7 +676,7 @@ export default function HomePage() {
 
               <p className="mx-auto mt-5 max-w-2xl text-lg leading-8 text-slate-600">
                 Bring your school's administration, attendance, finance,
-                payroll and accounting together with EduNexa.
+                payroll and accounting together with SCB.
               </p>
 
               <div className="mt-8 flex flex-col justify-center gap-3 sm:flex-row">
@@ -643,7 +684,7 @@ export default function HomePage() {
                   href="/login"
                   className="group inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 px-7 py-3.5 text-sm font-semibold text-white shadow-xl shadow-indigo-500/40 transition hover:-translate-y-0.5 hover:from-blue-700 hover:via-indigo-700 hover:to-purple-700"
                 >
-                  Login to EduNexa
+                  Login to SCB
                   <ArrowRight className="h-4 w-4 transition group-hover:translate-x-1" />
                 </Link>
 
@@ -681,11 +722,19 @@ export default function HomePage() {
           <div className="flex flex-col gap-8 md:flex-row md:items-center md:justify-between">
             <div>
               <div className="flex items-center gap-3">
-                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 via-indigo-500 to-purple-500 text-white">
-                  <GraduationCap className="h-5 w-5" />
-                </div>
+                {platformLogo ? (
+                  <img
+                    src={platformLogo}
+                    alt="SCB platform logo"
+                    className="h-14 w-14 rounded-xl border border-slate-200 bg-white object-contain"
+                  />
+                ) : (
+                  <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 via-indigo-500 to-purple-500 text-white">
+                    <GraduationCap className="h-5 w-5" />
+                  </div>
+                )}
 
-                <span className="text-lg font-bold">EduNexa</span>
+                <span className="text-lg font-bold">SCB</span>
               </div>
 
               <p className="mt-3 max-w-md text-sm text-slate-500">

@@ -1,12 +1,13 @@
-﻿import type { Metadata } from "next";
+﻿import DevInspector from '@/components/DevInspector';
+import type { Metadata } from "next";
 import "./globals.css";
 import SchoolAccessGuard from "@/components/auth/SchoolAccessGuard";
 import OfflineAttendanceServiceWorker from "@/components/staff/OfflineAttendanceServiceWorker";
 
 export const metadata: Metadata = {
-  title: "EduNexa | Complete School Management Platform",
+  title: "SCB | Smart Campus Board",
   description:
-    "EduNexa is a complete school management platform for students, staff, attendance, fees, payroll, expenses, accounting and reports.",
+    "Smart Campus Board is a complete school management platform for students, staff, attendance, fees, payroll, expenses, accounting and reports.",
 };
 
 export default function RootLayout({
@@ -19,6 +20,7 @@ export default function RootLayout({
       <body>
         <SchoolAccessGuard>{children}</SchoolAccessGuard>
         <OfflineAttendanceServiceWorker />
+        <DevInspector />
       </body>
     </html>
   );

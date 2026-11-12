@@ -1,10 +1,10 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /**
  * =========================================================
- * EduNexa Data Assistant - Secure Read-Only Data Tools
+ * SCB Data Assistant - Secure Read-Only Data Tools
  * =========================================================
  *
- * LAYER 2 of the EduNexa assistant.
+ * LAYER 2 of the SCB assistant.
  *
  * Every function here is READ-ONLY and is forced to run as
  * the currently authenticated user via the existing Supabase
@@ -14,7 +14,7 @@
  *
  * There are no generic query tools. The assistant can only
  * call the explicitly listed functions below, and each one
- * reads fixed, existing tables/views/RPCs that the EduNexa
+ * reads fixed, existing tables/views/RPCs that the SCB
  * pages already use. No dynamic table names, no raw SQL.
  *
  * Reused existing sources:
@@ -131,7 +131,7 @@ export function sqlRefusalAnswer(): ChatAnswer {
 
 /* =========================================================
    AUTH + SCHOOL CONTEXT
-   Reuses the exact existing mechanism every EduNexa page
+   Reuses the exact existing mechanism every SCB page
    uses: authenticated user -> get_my_school_id() RPC ->
    school_users fallback. The school id ALWAYS comes from
    the server session, never from the browser request.

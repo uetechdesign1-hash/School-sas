@@ -293,7 +293,7 @@ export default function LoginPage() {
           <div className="mb-8 text-center">
 
             {platformLogo ? (
-              <img src={platformLogo} alt="EduNexa platform logo" className="mx-auto h-14 w-14 rounded-2xl border border-slate-200 bg-white object-contain p-1 shadow-sm" />
+              <img src={platformLogo} alt="SCB platform logo" className="mx-auto h-14 w-14 rounded-2xl border border-slate-200 bg-white object-contain p-1 shadow-sm" />
             ) : (
               <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-500 via-indigo-500 to-purple-500 text-white shadow-lg shadow-indigo-500/40">
                 <ShieldCheck className="h-7 w-7" />
@@ -301,7 +301,7 @@ export default function LoginPage() {
             )}
 
             <h1 className="mt-5 bg-gradient-to-r from-blue-600 via-indigo-500 to-purple-500 bg-clip-text text-2xl font-bold text-transparent">
-              School Management
+              Smart Campus Board
             </h1>
 
             <p className="mt-2 text-sm text-slate-500">

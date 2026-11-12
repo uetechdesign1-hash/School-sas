@@ -3,14 +3,16 @@
 
 
 import {
+  ChangeEvent,
   FormEvent,
   useEffect,
+  useRef,
   useState,
 } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
-import { Trash2 } from "lucide-react";
+import { ImagePlus, Loader2, Trash2, Upload } from "lucide-react";
 
 type School = {
   id: string;
@@ -83,9 +85,16 @@ export default function SuperAdminPage() {
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [userEmail, setUserEmail] = useState("");
   const [userName, setUserName] = useState("");
+  const [platformLogo, setPlatformLogo] = useState<string | null>(null);
+  const [uploadingLogo, setUploadingLogo] = useState(false);
+  const [logoError, setLogoError] = useState("");
+  const [logoMessage, setLogoMessage] = useState("");
+  const cloudName = process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME?.trim();
+  const uploadPreset = process.env.NEXT_PUBLIC_CLOUDINARY_UPLOAD_PRESET?.trim();
 
   const [schools, setSchools] = useState<School[]>(
     []
@@ -208,6 +217,19 @@ export default function SuperAdminPage() {
             "Super Admin"
         );
 
+        try {
+          const { data: logoData, error: logoError } =
+            await supabase.rpc("get_platform_logo");
+          if (logoError) throw logoError;
+          if (mounted) {
+            setPlatformLogo(
+              typeof logoData === "string" ? logoData : null,
+            );
+          }
+        } catch (logoError) {
+          console.error("LOAD PLATFORM LOGO ERROR:", logoError);
+        }
+
         await loadSchools();
       } catch (error) {
         console.error(
@@ -299,6 +321,78 @@ export default function SuperAdminPage() {
         active_student_count: counts.get(school.id) || 0,
       })),
     );
+  }
+
+  async function uploadPlatformLogo(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setLogoError("");
+    setLogoMessage("");
+
+    if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
+      setLogoError("Choose a PNG, JPG, or WebP image.");
+      return;
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      setLogoError("The logo must be 2 MB or smaller.");
+      return;
+    }
+    if (!cloudName || !uploadPreset) {
+      setLogoError(
+        "Cloudinary is not configured. Add the Cloud Name and unsigned upload preset to the app environment.",
+      );
+      return;
+    }
+
+    setUploadingLogo(true);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      form.append("upload_preset", uploadPreset);
+      form.append("folder", "platform/logo");
+      const response = await fetch(
+        `https://api.cloudinary.com/v1_1/${encodeURIComponent(cloudName)}/image/upload`,
+        {
+          method: "POST",
+          body: form,
+        },
+      );
+      const result = await response.json();
+      if (!response.ok || !result.secure_url) {
+        throw new Error(
+          result.error?.message || "Cloudinary could not upload this logo.",
+        );
+      }
+
+      const { error: saveError } = await supabase.rpc("update_platform_logo", {
+        p_logo_url: result.secure_url,
+      });
+      if (saveError) {
+        if (
+          saveError.code === "PGRST202" ||
+          saveError.message?.includes("update_platform_logo")
+        ) {
+          throw new Error(
+            "Apply supabase/migrations/20261022120000_platform_logo_cloudinary.sql in Supabase, then try again.",
+          );
+        }
+        throw saveError;
+      }
+
+      setPlatformLogo(result.secure_url);
+      setLogoMessage(
+        "Platform logo saved. It will appear on the school and Super Admin login pages.",
+      );
+    } catch (uploadError) {
+      setLogoError(
+        uploadError instanceof Error
+          ? uploadError.message
+          : "Unable to upload the platform logo.",
+      );
+    } finally {
+      setUploadingLogo(false);
+    }
   }
 
   // --------------------------------------------------
@@ -1084,6 +1178,71 @@ export default function SuperAdminPage() {
               </p>
             </div>
           </div>
+        </section>
+
+        <section className="mt-7 rounded-2xl bg-white p-6 shadow-sm">
+          <h2 className="text-xl font-bold text-slate-900">
+            Platform Logo
+          </h2>
+          <p className="mt-2 text-sm text-slate-500">
+            Upload or replace the platform logo shown on the login pages. School
+            dashboards keep their own logos.
+          </p>
+
+          <div className="mt-5 flex flex-wrap items-center gap-4">
+            <div className="flex h-20 w-20 items-center justify-center rounded-xl border border-slate-200 bg-slate-50">
+              {platformLogo ? (
+                <img
+                  src={platformLogo}
+                  alt="Current platform logo"
+                  className="h-full w-full rounded-xl object-contain p-2"
+                />
+              ) : (
+                <ImagePlus className="text-slate-400" size={28} />
+              )}
+            </div>
+
+            <div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                onChange={uploadPlatformLogo}
+                className="hidden"
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploadingLogo}
+                className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {uploadingLogo ? (
+                  <Loader2 className="animate-spin" size={16} />
+                ) : (
+                  <Upload size={16} />
+                )}
+                {uploadingLogo
+                  ? "Uploading..."
+                  : platformLogo
+                    ? "Replace logo"
+                    : "Upload logo"}
+              </button>
+              <p className="mt-2 text-xs text-slate-500">
+                PNG, JPG, or WebP; maximum size 2 MB.
+              </p>
+            </div>
+          </div>
+
+          {logoError && (
+            <p role="alert" className="mt-4 text-sm font-medium text-red-700">
+              {logoError}
+            </p>
+          )}
+          {logoMessage && (
+            <p role="status" className="mt-4 text-sm font-medium text-emerald-700">
+              {logoMessage}
+            </p>
+          )}
         </section>
 
         {/* SCHOOLS */}

@@ -7,7 +7,7 @@ import {
 
 /**
  * =========================================================
- * EduNexa Assistant - Chat API
+ * SCB Assistant - Chat API
  * =========================================================
  *
  * POST /api/chat
@@ -22,7 +22,7 @@ import {
  *   }
  *
  * The assistant is fully offline: it matches the message
- * against the curated EduNexa knowledge base. No external
+ * against the curated SCB knowledge base. No external
  * AI API is called, so there is no cost or API key needed.
  */
 

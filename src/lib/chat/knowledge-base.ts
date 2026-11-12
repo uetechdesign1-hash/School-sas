@@ -1,11 +1,11 @@
 /**
  * =========================================================
- * EduNexa Assistant - Knowledge Base & Matching Engine
+ * SCB Assistant - Knowledge Base & Matching Engine
  * =========================================================
  *
- * This module is the brain of the EduNexa in-app chat agent.
+ * This module is the brain of the SCB in-app chat agent.
  *
- * It contains a curated guide for every EduNexa page: what
+ * It contains a curated guide for every SCB page: what
  * the page is for, exactly what to enter (field by field),
  * the step-by-step workflow, tips and related pages.
  *
@@ -116,7 +116,7 @@ const GUIDES: ChatGuide[] = [
   /* ------------- AUTH & ONBOARDING ------------- */
   {
     id: "login",
-    title: "Log in to EduNexa",
+    title: "Log in to SCB",
     pageLabel: "Login",
     href: "/login",
     keywords: [
@@ -124,9 +124,9 @@ const GUIDES: ChatGuide[] = [
       "enter email and password", "cant login", "cannot sign in",
     ],
     summary:
-      "The login page is where you sign in to your EduNexa account with the email and password you registered with.",
+      "The login page is where you sign in to your SCB account with the email and password you registered with.",
     steps: [
-      "Open the EduNexa website and click Login (or open the login page directly).",
+      "Open the SCB website and click Login (or open the login page directly).",
       "Enter the email address you used when your account was created.",
       "Type your password. Passwords are case-sensitive, so check that Caps Lock is off.",
       "Click the Sign In button. You will land on your dashboard.",
@@ -143,7 +143,7 @@ const GUIDES: ChatGuide[] = [
   },
   {
     id: "signup",
-    title: "Create an EduNexa account",
+    title: "Create an SCB account",
     pageLabel: "Sign Up",
     href: "/signup",
     keywords: [
@@ -151,7 +151,7 @@ const GUIDES: ChatGuide[] = [
       "open account", "create login", "school owner account",
     ],
     summary:
-      "Sign up creates your EduNexa account. After signing up you will set up your school details on the onboarding page.",
+      "Sign up creates your SCB account. After signing up you will set up your school details on the onboarding page.",
     steps: [
       "Click 'Sign up' from the home page or open the signup page.",
       "Fill in your name, email and a strong password.",
@@ -210,7 +210,7 @@ const GUIDES: ChatGuide[] = [
     steps: [
       "Go to the Forgot password page from the login screen.",
       "Type the email address registered on the account.",
-      "Click the reset button — EduNexa emails a password-reset link.",
+      "Click the reset button — SCB emails a password-reset link.",
       "Open the link from your inbox, enter a new password and confirm it.",
       "Return to Login and sign in with the new password.",
     ],
@@ -348,7 +348,7 @@ const GUIDES: ChatGuide[] = [
       "student admission details",
     ],
     summary:
-      "This form registers a new student with EduNexa. Required fields are marked; the rest can be filled as available.",
+      "This form registers a new student with SCB. Required fields are marked; the rest can be filled as available.",
     steps: [
       "Fill Admission Number and Roll Number (the numbers your school uses for this student).",
       "Enter the student's full name: First Name (required), Middle Name and Last Name.",
@@ -495,7 +495,7 @@ const GUIDES: ChatGuide[] = [
       "collect fees from student",
     ],
     summary:
-      "Use this page when a student pays you money so EduNexa can record it against their bill and issue a receipt.",
+      "Use this page when a student pays you money so SCB can record it against their bill and issue a receipt.",
     steps: [
       "Open the student and open Record Payment (their outstanding balance is shown).",
       "Enter the amount being paid; partial payments are allowed.",
@@ -615,7 +615,7 @@ const GUIDES: ChatGuide[] = [
       "register staff", "create staff login",
     ],
     summary:
-      "This form registers a new employee in EduNexa. Fill the basics now — salary, attendance and payslips can be added later from their profile.",
+      "This form registers a new employee in SCB. Fill the basics now — salary, attendance and payslips can be added later from their profile.",
     steps: [
       "Employee Number (required) — your school's unique code for this person, e.g. 'EMP-101'.",
       "Enter the full name: First Name (required), Middle Name, Last Name.",
@@ -647,7 +647,7 @@ const GUIDES: ChatGuide[] = [
       "net salary", "monthly salary",
     ],
     summary:
-      "Defines how much an employee is paid each month. EduNexa adds the allowances and subtracts deductions to calculate their Gross and Net pay.",
+      "Defines how much an employee is paid each month. SCB adds the allowances and subtracts deductions to calculate their Gross and Net pay.",
     steps: [
       "Open the staff member and go to their Salary page.",
       "Enter the Basic Salary.",
@@ -794,7 +794,7 @@ const GUIDES: ChatGuide[] = [
       "Enter the Journal particulars (a narration — what this entry is about).",
       "Add the reference number if there is one (e.g. an invoice number).",
       "Add lines: for each, choose the account and enter the amount in Debit or Credit.",
-      "Keep adding lines until the total debits equal the total credits (EduNexa keeps the running totals).",
+      "Keep adding lines until the total debits equal the total credits (SCB keeps the running totals).",
       "Save the entry — it posts to the Ledger and reports automatically.",
     ],
     tips: [
@@ -1099,7 +1099,7 @@ const GUIDES: ChatGuide[] = [
       "reconcile bank",
     ],
     summary:
-      "Bank Reconciliation helps you make sure the Bank Book in EduNexa matches your real bank account. You enter the bank statement's closing balance and compare entries.",
+      "Bank Reconciliation helps you make sure the Bank Book in SCB matches your real bank account. You enter the bank statement's closing balance and compare entries.",
     steps: [
       "Open Bank Reconciliation and pick the account + period.",
       "Enter the Bank Statement Closing Balance shown on your real bank statement.",
@@ -1211,12 +1211,12 @@ function guideToAnswer(guide: ChatGuide): ChatAnswer {
    ========================================================= */
 
 const WELCOME_TEXT =
-  "Hi! I'm the EduNexa Assistant. 👋 I know every page in EduNexa and can walk you through any task step by step — what to enter, what each field is for, and what happens after you save. Try asking a question like 'How do I add a student?'";
+  "Hi! I'm the SCB Assistant. 👋 I know every page in SCB and can walk you through any task step by step — what to enter, what each field is for, and what happens after you save. Try asking a question like 'How do I add a student?'";
 
 const CAPABILITIES: ChatAnswer = {
   kind: "smalltalk",
   text:
-    "I can guide you through everything in EduNexa with clear, step-by-step instructions. For example:",
+    "I can guide you through everything in SCB with clear, step-by-step instructions. For example:",
   steps: [
     "'How do I add a student?' — all the fields explained in order.",
     "'What to enter in the admission form?' — field-by-field guidance.",
@@ -1258,7 +1258,7 @@ function detectSmalltalk(raw: string): ChatAnswer | null {
   }
 
   if (
-    /(who are you|what can you do|what do you do|help me|how do i use this|features|what is edunexa|about you)/.test(
+    /(who are you|what can you do|what do you do|help me|how do i use this|features|what is scb|about you)/.test(
       text,
     )
   ) {
