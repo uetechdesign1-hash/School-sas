@@ -93,6 +93,215 @@ export async function loadReceiptLogoDataUrl(logoUrl: string | null) {
   }
 }
 
+export type AdmissionReceiptData = {
+  schoolName: string;
+  schoolLogoDataUrl?: string | null;
+  schoolAddress?: string;
+  schoolPhone?: string | null;
+  schoolEmail?: string | null;
+  receiptNumber: string;
+  receiptDate: string;
+  billNumber?: string | null;
+  studentName: string;
+  admissionNumber: string;
+  className?: string | null;
+  section?: string | null;
+  fatherName?: string | null;
+  motherName?: string | null;
+  mobileNumber?: string | null;
+  dateOfBirth?: string | null;
+  gender?: string | null;
+  studentAddress?: string | null;
+  amount: number;
+  paymentMode: string;
+  paymentAccountName?: string | null;
+  referenceNumber?: string | null;
+};
+
+export function generateAdmissionReceiptPDF(data: AdmissionReceiptData) {
+  const pdf = new jsPDF({
+    orientation: "portrait",
+    unit: "mm",
+    format: "a4",
+    compress: true,
+  });
+  const pageWidth = pdf.internal.pageSize.getWidth();
+  const margin = 18;
+  const left = margin;
+  const right = pageWidth - margin;
+  const contentWidth = right - left;
+  const schoolHeaderCenter = left + 39 + (contentWidth - 39) / 2;
+
+  pdf.setDrawColor(203, 213, 225);
+  pdf.setLineWidth(0.5);
+  pdf.roundedRect(12, 12, pageWidth - 24, 273, 4, 4, "S");
+
+  pdf.setFillColor(15, 23, 42);
+  pdf.roundedRect(left, 20, contentWidth, 54, 4, 4, "F");
+  pdf.rect(left, 58, contentWidth, 16, "F");
+
+  if (data.schoolLogoDataUrl) {
+    pdf.addImage(data.schoolLogoDataUrl, "PNG", left + 9, 30, 30, 30);
+  }
+
+  pdf.setTextColor(255, 255, 255);
+  pdf.setFont("helvetica", "bold");
+  pdf.setFontSize(18);
+  pdf.text(
+    pdf.splitTextToSize(safeText(data.schoolName), 128).slice(0, 2),
+    schoolHeaderCenter,
+    39,
+    { align: "center" },
+  );
+
+  pdf.setFont("helvetica", "normal");
+  pdf.setFontSize(9);
+  if (data.schoolAddress) {
+    pdf.text(
+      pdf.splitTextToSize(data.schoolAddress, 128).slice(0, 2),
+      schoolHeaderCenter,
+      52,
+      { align: "center" },
+    );
+  }
+  const contact = [data.schoolPhone, data.schoolEmail]
+    .filter(Boolean)
+    .join("  |  ");
+  if (contact) {
+    pdf.setFontSize(8);
+    pdf.text(
+      pdf.splitTextToSize(contact, 128).slice(0, 1),
+      schoolHeaderCenter,
+      67,
+      { align: "center" },
+    );
+  }
+
+  pdf.setTextColor(15, 23, 42);
+  pdf.setFont("helvetica", "bold");
+  pdf.setFontSize(18);
+  pdf.text("ADMISSION FEE RECEIPT", pageWidth / 2, 94, { align: "center" });
+
+  pdf.setDrawColor(226, 232, 240);
+  pdf.line(left, 104, right, 104);
+
+  const infoY = 116;
+  pdf.setFontSize(8);
+  pdf.setTextColor(100, 116, 139);
+  pdf.text("RECEIPT NUMBER", left + 2, infoY);
+  pdf.text("PAYMENT DATE", 112, infoY);
+  pdf.setFont("helvetica", "bold");
+  pdf.setFontSize(11);
+  pdf.setTextColor(15, 23, 42);
+  pdf.text(safeText(data.receiptNumber), left + 2, infoY + 7);
+  pdf.text(formatDate(data.receiptDate), 112, infoY + 7);
+
+  pdf.setFont("helvetica", "normal");
+  pdf.setFontSize(8);
+  pdf.setTextColor(100, 116, 139);
+  pdf.text("BILL NUMBER", left + 2, infoY + 20);
+  pdf.setFont("helvetica", "bold");
+  pdf.setFontSize(10);
+  pdf.setTextColor(15, 23, 42);
+  pdf.text(safeText(data.billNumber), left + 2, infoY + 27);
+
+  pdf.setDrawColor(226, 232, 240);
+  pdf.line(left, 154, right, 154);
+
+  pdf.setFont("helvetica", "bold");
+  pdf.setFontSize(11);
+  pdf.setTextColor(30, 41, 59);
+  pdf.text("STUDENT DETAILS", left + 2, 165);
+
+  const detailRows = [
+    ["Student Name", data.studentName, "Admission Number", data.admissionNumber],
+    ["Class", data.className || "—", "Section", data.section || "—"],
+    ["Father's Name", data.fatherName || "—", "Mother's Name", data.motherName || "—"],
+    [
+      "Parent / Guardian Mobile",
+      data.mobileNumber || "—",
+      "Date of Birth / Gender",
+      [
+        data.dateOfBirth ? formatDate(data.dateOfBirth) : "—",
+        data.gender || "—",
+      ].join(" / "),
+    ],
+    ["Address", data.studentAddress || "—", "", ""],
+  ];
+  let detailY = 174;
+  for (const [leftLabel, leftValue, rightLabel, rightValue] of detailRows) {
+    pdf.setFont("helvetica", "normal");
+    pdf.setFontSize(8);
+    pdf.setTextColor(100, 116, 139);
+    pdf.text(leftLabel, left + 2, detailY);
+    if (rightLabel) pdf.text(rightLabel, 112, detailY);
+
+    pdf.setFont("helvetica", "bold");
+    pdf.setFontSize(10);
+    pdf.setTextColor(15, 23, 42);
+    pdf.text(
+      pdf
+        .splitTextToSize(
+          safeText(leftValue),
+          rightLabel ? 78 : contentWidth - 4,
+        )
+        .slice(0, rightLabel ? 1 : 2),
+      left + 2,
+      detailY + 6,
+    );
+    if (rightLabel) {
+      pdf.text(
+        pdf.splitTextToSize(safeText(rightValue), 78).slice(0, 1),
+        112,
+        detailY + 6,
+      );
+    }
+    detailY += 11;
+  }
+
+  pdf.setFillColor(239, 246, 255);
+  pdf.roundedRect(left, 239, contentWidth, 29, 3, 3, "F");
+  pdf.setFont("helvetica", "normal");
+  pdf.setFontSize(10);
+  pdf.setTextColor(30, 64, 175);
+  pdf.text("ADMISSION FEE RECEIVED", left + 8, 249);
+  pdf.setFont("helvetica", "bold");
+  pdf.setFontSize(23);
+  pdf.setTextColor(15, 23, 42);
+  pdf.text(money(data.amount), right - 8, 258, { align: "right" });
+
+  pdf.setFont("helvetica", "normal");
+  pdf.setFontSize(9);
+  pdf.setTextColor(71, 85, 105);
+  const paymentDetails = [
+    `Payment method: ${safeText(data.paymentMode).replace(/_/g, " ").toUpperCase()}`,
+    data.paymentAccountName ? `Account: ${data.paymentAccountName}` : "",
+  ]
+    .filter(Boolean)
+    .join(" | ");
+  pdf.text(pdf.splitTextToSize(paymentDetails, 105).slice(0, 1), left + 2, 274);
+  if (data.referenceNumber) {
+    pdf.text(`UTR: ${safeText(data.referenceNumber)}`, left + 2, 280);
+  }
+  pdf.setDrawColor(100, 116, 139);
+  pdf.line(right - 58, 274, right, 274);
+  pdf.setFontSize(8);
+  pdf.text("Authorized Signature", right - 58, 280);
+
+  pdf.setTextColor(100, 116, 139);
+  pdf.setFontSize(8);
+  pdf.text("Computer-generated receipt", pageWidth / 2, 284, {
+    align: "center",
+  });
+
+  const safeReceiptNumber = safeText(data.receiptNumber).replace(
+    /[^a-zA-Z0-9-_]/g,
+    "-",
+  );
+  pdf.save(`Admission-Receipt-${safeReceiptNumber}.pdf`);
+  return pdf;
+}
+
 export function generateReceiptPDF(data: ReceiptData) {
   // EXACT A5 LANDSCAPE:
   // width  = 210 mm

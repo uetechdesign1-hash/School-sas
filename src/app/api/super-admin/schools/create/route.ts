@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { getLoginRecycleConflict } from "@/lib/auth/login-recycle";
 
 export const dynamic = "force-dynamic";
 
@@ -297,31 +298,14 @@ export async function POST(request: Request) {
     }
 
     if (existingLoginId) {
-      const { data: activeMemberships, error: membershipLookupError } =
-        await admin
-          .from("school_users")
-          .select("id")
-          .eq("user_id", existingLoginId)
-          .eq("is_active", true)
-          .limit(1);
+      const recycleConflict = await getLoginRecycleConflict(
+        admin,
+        existingLoginId,
+        loginEmail,
+      );
 
-      if (membershipLookupError) {
-        return json(
-          { success: false, error: membershipLookupError.message },
-          400,
-        );
-      }
-
-      if (activeMemberships && activeMemberships.length > 0) {
-        return json(
-          {
-            success: false,
-            error:
-              `The email ${loginEmail} is already used by an active school login. ` +
-              "Use a different owner email, or delete that school first.",
-          },
-          409,
-        );
+      if (recycleConflict) {
+        return json({ success: false, error: recycleConflict }, 409);
       }
 
       console.log(

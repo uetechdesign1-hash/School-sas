@@ -352,16 +352,17 @@ const GUIDES: ChatGuide[] = [
     steps: [
       "Fill Admission Number and Roll Number (the numbers your school uses for this student).",
       "Enter the student's full name: First Name (required), Middle Name and Last Name.",
+      "Father's Name and Mother's Name are optional.",
       "Pick the Date of Birth, Gender, and the Admission Date.",
-      "Enter the Admission Fee if one is charged — otherwise leave it blank or 0. Saving a positive value creates an admission fee bill.",
       "Choose the Status (Active is the default), and fill Blood Group if available.",
       "Select the Academic Year (required), Class and Section — these come from the years/classes you created.",
       "Fill Address, City, State, Postal Code and Notes (optional).",
-      "Click Save. The student now appears in the Students list.",
+      "Optionally enter the Admission Fee being paid now, manual receipt number and payment details. Bank payments require the receiving account and UTR.",
+      "Click Save. The student is created; a successful admission payment downloads an A4 receipt PDF.",
     ],
     tips: [
       "Set up Academic Years and Classes before adding students, or the dropdowns will be empty.",
-      "A positive Admission Fee automatically creates a fee bill for the student — you can collect it later in their Fees page.",
+      "Admission payment creates a separate Admission Fee bill line and is recorded through the fee-payment accounting flow.",
     ],
     related: [
       { label: "Students list", href: "/dashboard/students" },

@@ -63,6 +63,9 @@ type Student = {
   first_name: string;
   middle_name: string | null;
   last_name: string | null;
+  father_name: string | null;
+  mother_name: string | null;
+  parent_phone: string | null;
   date_of_birth: string | null;
   gender: Gender | null;
   class_id: string | null;
@@ -147,6 +150,15 @@ export default function StudentDetailsPage() {
     useState("");
 
   const [lastName, setLastName] =
+    useState("");
+
+  const [fatherName, setFatherName] =
+    useState("");
+
+  const [motherName, setMotherName] =
+    useState("");
+
+  const [parentPhone, setParentPhone] =
     useState("");
 
   const [dateOfBirth, setDateOfBirth] =
@@ -492,6 +504,9 @@ export default function StudentDetailsPage() {
             first_name,
             middle_name,
             last_name,
+            father_name,
+            mother_name,
+            parent_phone,
             date_of_birth,
             gender,
             class_id,
@@ -1102,6 +1117,18 @@ export default function StudentDetailsPage() {
       record.last_name || ""
     );
 
+    setFatherName(
+      record.father_name || ""
+    );
+
+    setMotherName(
+      record.mother_name || ""
+    );
+
+    setParentPhone(
+      record.parent_phone || ""
+    );
+
     setDateOfBirth(
       record.date_of_birth || ""
     );
@@ -1217,6 +1244,15 @@ export default function StudentDetailsPage() {
         last_name:
           lastName.trim() || null,
 
+        father_name:
+          fatherName.trim() || null,
+
+        mother_name:
+          motherName.trim() || null,
+
+        parent_phone:
+          parentPhone.trim() || null,
+
         date_of_birth:
           dateOfBirth || null,
 
@@ -1277,6 +1313,9 @@ export default function StudentDetailsPage() {
             first_name,
             middle_name,
             last_name,
+            father_name,
+            mother_name,
+            parent_phone,
             date_of_birth,
             gender,
             class_id,
@@ -1576,6 +1615,34 @@ export default function StudentDetailsPage() {
                         event.target.value
                       )
                     }
+                    className={inputClass}
+                  />
+                </Field>
+
+                <Field label="Father's Name">
+                  <input
+                    value={fatherName}
+                    onChange={(event) => setFatherName(event.target.value)}
+                    className={inputClass}
+                  />
+                </Field>
+
+                <Field label="Mother's Name">
+                  <input
+                    value={motherName}
+                    onChange={(event) => setMotherName(event.target.value)}
+                    className={inputClass}
+                  />
+                </Field>
+
+                <Field label="Parent / Guardian Mobile Number">
+                  <input
+                    type="tel"
+                    value={parentPhone}
+                    onChange={(event) =>
+                      setParentPhone(event.target.value)
+                    }
+                    autoComplete="tel"
                     className={inputClass}
                   />
                 </Field>
@@ -2085,6 +2152,21 @@ export default function StudentDetailsPage() {
                   value={
                     student.admission_no
                   }
+                />
+
+                <Info
+                  label="Father's Name"
+                  value={student.father_name || "—"}
+                />
+
+                <Info
+                  label="Mother's Name"
+                  value={student.mother_name || "—"}
+                />
+
+                <Info
+                  label="Parent / Guardian Mobile Number"
+                  value={student.parent_phone || "—"}
                 />
 
                 <Info

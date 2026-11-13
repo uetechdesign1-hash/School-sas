@@ -1,5 +1,9 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
+import {
+  getAnonymousRedirectPath,
+  getAuthenticatedLoginRedirectPath,
+} from "@/lib/auth/proxy-access";
 
 export async function proxy(request: NextRequest) {
   let response = NextResponse.next({
@@ -41,10 +45,15 @@ export async function proxy(request: NextRequest) {
   /*
    * Protect school dashboard
    */
-  if (pathname.startsWith("/dashboard") && !user) {
+  const anonymousRedirectPath = getAnonymousRedirectPath(
+    pathname,
+    Boolean(user),
+  );
+
+  if (anonymousRedirectPath) {
     const loginUrl = request.nextUrl.clone();
 
-    loginUrl.pathname = "/login";
+    loginUrl.pathname = anonymousRedirectPath;
     loginUrl.search = "";
 
     return NextResponse.redirect(loginUrl);
@@ -64,18 +73,13 @@ export async function proxy(request: NextRequest) {
       .eq("user_id", user.id)
       .eq("is_active", true);
 
-    const hasStaffMembership = !membershipError && memberships?.some(
-      ({ role }) =>
-        ["staff", "teacher", "employee"].includes(
-          String(role || "").trim().toLowerCase()
-        )
+    const redirectPath = getAuthenticatedLoginRedirectPath(
+      memberships?.map(({ role }) => role) || null,
+      Boolean(membershipError),
     );
-
     const dashboardUrl = request.nextUrl.clone();
 
-    dashboardUrl.pathname = hasStaffMembership
-      ? "/dashboard/staff/home"
-      : "/dashboard";
+    dashboardUrl.pathname = redirectPath;
     dashboardUrl.search = "";
 
     return NextResponse.redirect(dashboardUrl);
@@ -87,6 +91,7 @@ export async function proxy(request: NextRequest) {
 export const config = {
   matcher: [
     "/dashboard/:path*",
+    "/accounting/:path*",
     "/login",
     "/signup",
     "/onboarding/:path*",

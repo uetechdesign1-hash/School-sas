@@ -35,6 +35,7 @@ type Student = {
   first_name: string;
   middle_name: string | null;
   last_name: string | null;
+  parent_phone: string | null;
   gender: "male" | "female" | "other" | null;
   class_id: string | null;
   section_id: string | null;
@@ -209,6 +210,7 @@ export default function StudentsPage() {
               first_name,
               middle_name,
               last_name,
+              parent_phone,
               gender,
               class_id,
               section_id,
@@ -1297,6 +1299,10 @@ export default function StudentsPage() {
                     </th>
 
                     <th className="px-5 py-4 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      Guardian Mobile
+                    </th>
+
+                    <th className="px-5 py-4 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
                       Admission No.
                     </th>
 
@@ -1409,6 +1415,10 @@ export default function StudentsPage() {
                               </p>
                             </div>
                           </div>
+                        </td>
+
+                        <td className="px-5 py-4 text-sm text-slate-600">
+                          {student.parent_phone || "—"}
                         </td>
 
                         <td className="px-5 py-4 text-sm font-medium text-slate-700">

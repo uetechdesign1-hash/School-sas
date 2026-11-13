@@ -180,6 +180,7 @@ export async function POST(request: Request) {
           first_name: firstName,
           middle_name: middleName || null,
           last_name: lastName || null,
+          parent_phone: clean(entry.parent_phone) || null,
           gender,
           class_id: classId,
           section_id: sectionId,
