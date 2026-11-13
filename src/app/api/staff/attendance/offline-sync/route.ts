@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import {
+  requireSchoolRole,
+  UnauthenticatedError,
+  UnauthorizedError,
+} from "@/lib/auth/server";
+import { requireSchoolModule } from "@/lib/auth/module";
 
 export const dynamic = "force-dynamic";
 
@@ -23,38 +28,10 @@ function json(
 
 export async function POST(request: NextRequest) {
   try {
-    const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const publishableKey =
-      process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
-    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-    if (!url || !publishableKey || !serviceRoleKey) {
-      return json(
-        { success: false, error: "Supabase server configuration is incomplete." },
-        500,
-      );
-    }
-
-    const authorization = request.headers.get("authorization") || "";
-    if (!authorization.startsWith("Bearer ")) {
-      return json({ success: false, error: "Please sign in again." }, 401);
-    }
-
-    const token = authorization.slice(7).trim();
-    const authClient = createClient(url, publishableKey, {
-      auth: { autoRefreshToken: false, persistSession: false },
-    });
-    const {
-      data: { user },
-      error: authError,
-    } = await authClient.auth.getUser(token);
-
-    if (authError || !user) {
-      return json(
-        { success: false, error: "Your login session is invalid or expired." },
-        401,
-      );
-    }
+    const auth = await requireSchoolRole(request, [
+      "owner", "admin", "principal", "accountant", "staff", "teacher", "employee",
+    ]);
+    await requireSchoolModule(auth, "payroll");
 
     let body: OfflineAttendanceRequest;
     try {
@@ -85,7 +62,7 @@ export async function POST(request: NextRequest) {
     if (!uuidPattern.test(requestId)) {
       return json({ success: false, error: "Invalid attendance request ID." }, 400);
     }
-    if (ownerUserId !== user.id) {
+    if (ownerUserId !== auth.userId) {
       return json(
         { success: false, error: "Sign in with the staff account that captured this attendance." },
         409,
@@ -108,13 +85,19 @@ export async function POST(request: NextRequest) {
       return json({ success: false, error: "Valid GPS coordinates are required." }, 400);
     }
 
-    const admin = createClient(url, serviceRoleKey, {
-      auth: { autoRefreshToken: false, persistSession: false },
-    });
-    const { data, error } = await admin.rpc(
+    const { data: staff, error: staffError } = await auth.admin
+      .from("staff")
+      .select("id")
+      .eq("id", staffId)
+      .eq("school_id", auth.schoolId)
+      .maybeSingle();
+    if (staffError) throw new Error(`Unable to verify staff school: ${staffError.message}`);
+    if (!staff) return json({ success: false, error: "Staff profile is not in your active school." }, 403);
+
+    const { data, error } = await auth.admin.rpc(
       "sync_staff_offline_attendance",
       {
-        p_user_id: user.id,
+        p_user_id: auth.userId,
         p_staff_id: staffId,
         p_request_id: requestId,
         p_action: action,
@@ -138,6 +121,9 @@ export async function POST(request: NextRequest) {
 
     return json({ success: true, result: data });
   } catch (error) {
+    if (error instanceof UnauthenticatedError || error instanceof UnauthorizedError) {
+      return json({ success: false, error: error.message }, error.status);
+    }
     console.error("OFFLINE STAFF ATTENDANCE SYNC ERROR:", error);
     return json(
       {

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
+import { useSchoolContext } from "@/lib/school-context";
 import {
   generateAdmissionReceiptPDF,
   loadReceiptLogoDataUrl,
@@ -58,6 +59,8 @@ type SchoolReceiptDetails = {
 
 export default function NewStudentPage() {
   const router = useRouter();
+  const { modules } = useSchoolContext();
+  const hasFees = modules.includes("fees");
 
   const [admissionNo, setAdmissionNo] = useState("");
   const [rollNo, setRollNo] = useState("");
@@ -493,6 +496,10 @@ export default function NewStudentPage() {
     }
 
     const rawAdmissionFee = admissionFee.trim() ? Number(admissionFee) : 0;
+    if (rawAdmissionFee > 0 && !hasFees) {
+      setError("This module is not included in your plan");
+      return;
+    }
     if (!Number.isFinite(rawAdmissionFee) || rawAdmissionFee < 0) {
       setError("Admission fee must be zero or a valid positive amount.");
       return;
@@ -830,7 +837,7 @@ export default function NewStudentPage() {
             </div>
           </section>
 
-          <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          {hasFees && <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
             <h2 className="text-lg font-bold text-slate-900">
               Admission Fee Payment
             </h2>
@@ -920,7 +927,7 @@ export default function NewStudentPage() {
                 </>
               )}
             </div>
-          </section>
+          </section>}
 
           <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
             <h2 className="text-lg font-bold text-slate-900">

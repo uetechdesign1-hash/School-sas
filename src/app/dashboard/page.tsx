@@ -2,7 +2,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
   ArrowRight,
@@ -30,6 +30,10 @@ import {
 } from "lucide-react";
 
 import { createClient } from "@/lib/supabase/client";
+import { loadFinancialStats } from "@/lib/dashboard/financial-stats";
+import { useSchoolContext } from "@/lib/school-context";
+import { isModuleRouteAllowed } from "@/lib/school-context/module-routes";
+import type { ModuleCode } from "@/lib/modules";
 
 type School = {
   id: string;
@@ -37,7 +41,6 @@ type School = {
   code: string | null;
   school_code: string | null;
   status: string;
-  plan_code: string | null;
   student_limit: number | null;
   timezone: string | null;
   currency_code: string | null;
@@ -60,6 +63,12 @@ type QuickActionProps = {
   description: string;
   href: string;
   icon: React.ReactNode;
+};
+
+const MODULE_NAMES: Record<ModuleCode, string> = {
+  fees: "Fees",
+  payroll: "Payroll",
+  transport: "Transport",
 };
 
 /*
@@ -148,6 +157,13 @@ const QUICK_ACTIONS: QuickActionProps[] = [
 ];
 
 export default function DashboardPage() {
+  const {
+    schoolId: moduleSchoolId,
+    modules,
+    loading: modulesLoading,
+    error: modulesError,
+  } = useSchoolContext();
+  const hasFees = !modulesError && modules.includes("fees");
   const [school, setSchool] = useState<School | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
 
@@ -163,11 +179,7 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  useEffect(() => {
-    void loadDashboard();
-  }, []);
-
-  async function loadDashboard() {
+  const loadDashboard = useCallback(async () => {
     try {
       setLoading(true);
       setError("");
@@ -200,6 +212,10 @@ export default function DashboardPage() {
         return;
       }
 
+      if (hasFees && membership.school_id !== moduleSchoolId) {
+        throw new Error("Unable to verify the school for module access.");
+      }
+
       const [
         { data: profileData },
         { data: schoolData, error: schoolError },
@@ -213,7 +229,7 @@ export default function DashboardPage() {
         supabase
           .from("schools")
           .select(
-            "id, name, code, school_code, status, plan_code, student_limit, timezone, currency_code",
+            "id, name, code, school_code, status, student_limit, timezone, currency_code",
           )
           .eq("id", membership.school_id)
           .maybeSingle(),
@@ -281,8 +297,7 @@ export default function DashboardPage() {
       const [
         studentResult,
         classResult,
-        paymentResult,
-        expenseResult,
+        financialStats,
         attendanceResult,
       ] = await Promise.all([
         supabase
@@ -301,19 +316,13 @@ export default function DashboardPage() {
           })
           .eq("school_id", membership.school_id),
 
-        supabase
-          .from("fee_payments")
-          .select("amount")
-          .eq("school_id", membership.school_id)
-          .gte("payment_date", monthStartDate)
-          .lt("payment_date", nextMonthStartDate),
-
-        supabase
-          .from("expenses")
-          .select("amount")
-          .eq("school_id", membership.school_id)
-          .gte("expense_date", monthStartDate)
-          .lt("expense_date", nextMonthStartDate),
+        loadFinancialStats(
+          supabase,
+          membership.school_id,
+          monthStartDate,
+          nextMonthStartDate,
+          hasFees,
+        ),
 
         supabase
           .from("student_attendance")
@@ -330,27 +339,9 @@ export default function DashboardPage() {
         throw classResult.error;
       }
 
-      if (paymentResult.error) {
-        throw paymentResult.error;
-      }
-
-      if (expenseResult.error) {
-        throw expenseResult.error;
-      }
-
       if (attendanceResult.error) {
         throw attendanceResult.error;
       }
-
-      const feeCollection = (paymentResult.data || []).reduce(
-        (total, row) => total + Number(row.amount || 0),
-        0,
-      );
-
-      const expenses = (expenseResult.data || []).reduce(
-        (total, row) => total + Number(row.amount || 0),
-        0,
-      );
 
       const attendanceRows = attendanceResult.data || [];
       const attendanceTotal = attendanceRows.length;
@@ -382,8 +373,7 @@ export default function DashboardPage() {
       setStats({
         studentCount: studentResult.count || 0,
         classCount: classResult.count || 0,
-        feeCollection,
-        expenses,
+        ...financialStats,
         attendancePercentage,
       });
     } catch (loadError) {
@@ -397,7 +387,11 @@ export default function DashboardPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [hasFees, moduleSchoolId]);
+
+  useEffect(() => {
+    if (!modulesLoading) void loadDashboard();
+  }, [loadDashboard, modulesLoading]);
 
   const displayName =
     profile?.full_name ||
@@ -473,7 +467,7 @@ export default function DashboardPage() {
     const adminActions = [
       {
         title: "Students",
-        description: "Find students and check fee balances.",
+        description: hasFees ? "Find students and check fee balances." : "Find and manage students.",
         href: "/dashboard/students",
         icon: <GraduationCap size={22} />,
         color: "from-sky-500 to-blue-600",
@@ -499,7 +493,11 @@ export default function DashboardPage() {
         icon: <ReceiptText size={22} />,
         color: "from-orange-500 to-rose-500",
       },
-    ];
+    ].filter((action) =>
+      action.href === ACCOUNTING_ROUTES.payment
+        ? hasFees
+        : isModuleRouteAllowed(action.href, modules),
+    );
 
     function downloadSummary() {
       const rows = [
@@ -507,8 +505,10 @@ export default function DashboardPage() {
         ["Generated", new Date().toLocaleString("en-IN")],
         ["Students", String(stats.studentCount)],
         ["Classes", String(stats.classCount)],
-        ["Fee collection this month", String(stats.feeCollection)],
-        ["Expenses this month", String(stats.expenses)],
+        ...(hasFees ? [
+          ["Fee collection this month", String(stats.feeCollection)],
+          ["Expenses this month", String(stats.expenses)],
+        ] : []),
         ["Attendance today", `${stats.attendancePercentage}%`],
       ];
       const csv = rows
@@ -571,10 +571,16 @@ export default function DashboardPage() {
                   Your school, at a glance
                 </h2>
                 <p className="mt-2 max-w-xl text-sm leading-6 text-indigo-50">
-                  Collect fees and record new payments or expenses. Existing
-                  transactions are view-only; editing and deletion are reserved
-                  for the Principal.
+                  {hasFees
+                    ? "Collect fees and record new payments or expenses. Existing transactions are view-only; editing and deletion are reserved for the Principal."
+                    : "Manage your school and access the modules enabled for your account."}
                 </p>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {modules.map((module) => (
+                    <DashboardBadge key={module} label="Module" value={MODULE_NAMES[module]} />
+                  ))}
+                </div>
+                {modulesError && <p role="alert" className="mt-3 text-sm text-white">{modulesError}</p>}
               </div>
               <div className="rounded-2xl border border-white/15 bg-white/10 px-5 py-4 backdrop-blur-sm">
                 <p className="text-xs font-semibold uppercase tracking-wide text-indigo-100">
@@ -597,21 +603,33 @@ export default function DashboardPage() {
               icon={<GraduationCap size={20} />}
             />
             <AdminStatCard
-              title="Fees collected"
-              value={formatINR(stats.feeCollection)}
-              note="This month"
-              color="text-emerald-700"
-              background="bg-emerald-100"
-              icon={<IndianRupee size={20} />}
+              title="Classes"
+              value={String(stats.classCount)}
+              note="School classes"
+              color="text-blue-700"
+              background="bg-blue-100"
+              icon={<School size={20} />}
             />
-            <AdminStatCard
-              title="Expenses"
-              value={formatINR(stats.expenses)}
-              note="This month"
-              color="text-orange-700"
-              background="bg-orange-100"
-              icon={<ReceiptText size={20} />}
-            />
+            {hasFees && (
+              <>
+                <AdminStatCard
+                  title="Fees collected"
+                  value={formatINR(stats.feeCollection)}
+                  note="This month"
+                  color="text-emerald-700"
+                  background="bg-emerald-100"
+                  icon={<IndianRupee size={20} />}
+                />
+                <AdminStatCard
+                  title="Expenses"
+                  value={formatINR(stats.expenses)}
+                  note="This month"
+                  color="text-orange-700"
+                  background="bg-orange-100"
+                  icon={<ReceiptText size={20} />}
+                />
+              </>
+            )}
             <AdminStatCard
               title="Attendance"
               value={`${stats.attendancePercentage}%`}
@@ -732,12 +750,12 @@ export default function DashboardPage() {
                 value={school.status || "trial"}
               />
 
-              <DashboardBadge
-                label="Plan"
-                value={school.plan_code || "starter"}
-              />
+              {modules.map((module) => (
+                <DashboardBadge key={module} label="Module" value={MODULE_NAMES[module]} />
+              ))}
             </div>
           </div>
+          {modulesError && <p role="alert" className="mt-3 text-sm text-white">{modulesError}</p>}
         </section>
 
         {/* STAT CARDS */}
@@ -760,19 +778,22 @@ export default function DashboardPage() {
             icon={<School size={21} />}
           />
 
-          <StatCard
-            title="Fee Collection"
-            value={formatINR(stats.feeCollection)}
-            subtitle="This month"
-            icon={<IndianRupee size={21} />}
-          />
-
-          <StatCard
-            title="Expenses"
-            value={formatINR(stats.expenses)}
-            subtitle="This month"
-            icon={<ReceiptText size={21} />}
-          />
+          {hasFees && (
+            <>
+              <StatCard
+                title="Fee Collection"
+                value={formatINR(stats.feeCollection)}
+                subtitle="This month"
+                icon={<IndianRupee size={21} />}
+              />
+              <StatCard
+                title="Expenses"
+                value={formatINR(stats.expenses)}
+                subtitle="This month"
+                icon={<ReceiptText size={21} />}
+              />
+            </>
+          )}
         </section>
 
         {/* SECONDARY STATS */}
@@ -854,7 +875,7 @@ export default function DashboardPage() {
           </div>
 
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {QUICK_ACTIONS.map((action) => (
+            {QUICK_ACTIONS.filter((action) => isModuleRouteAllowed(action.href, modules)).map((action) => (
               <QuickAction
                 key={`${action.href}-${action.title}`}
                 {...action}
@@ -864,7 +885,7 @@ export default function DashboardPage() {
         </section>
 
         {/* ACCOUNTING CONTROL CENTER */}
-        <section className="mt-8 rounded-3xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+        {hasFees && <section className="mt-8 rounded-3xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <p className="text-xs font-bold uppercase tracking-wide text-blue-600">
@@ -997,7 +1018,7 @@ export default function DashboardPage() {
               />
             </AccountingGroup>
           </div>
-        </section>
+        </section>}
 
         {/* SCHOOL INFORMATION + ACCOUNT */}
         <section className="mt-8 grid gap-6 lg:grid-cols-2">
@@ -1034,8 +1055,8 @@ export default function DashboardPage() {
               />
 
               <InfoRow
-                label="Plan"
-                value={school.plan_code || "Starter"}
+                label="Modules"
+                value={modules.map((module) => MODULE_NAMES[module]).join(", ") || "Unavailable"}
               />
 
               <InfoRow

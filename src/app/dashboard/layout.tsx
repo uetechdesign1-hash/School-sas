@@ -30,6 +30,8 @@ import {
 } from "lucide-react";
 
 import { createClient } from "@/lib/supabase/client";
+import { ModuleGuard, SchoolProvider, useSchoolContext } from "@/lib/school-context";
+import { moduleForRoute } from "@/lib/school-context/module-routes";
 
 type Props = {
   children: ReactNode;
@@ -100,6 +102,16 @@ const PRINCIPAL_MENU: MenuItem[] = [
     name: "Staff",
     href: "/dashboard/staff",
     icon: <Users size={18} />,
+  },
+  {
+    name: "Payroll",
+    href: "/dashboard/payroll",
+    icon: <WalletCards size={18} />,
+  },
+  {
+    name: "Transport",
+    href: "/dashboard/transport",
+    icon: <School size={18} />,
   },
   {
     name: "Reports",
@@ -192,6 +204,11 @@ const SCHOOL_ADMIN_MENU: MenuItem[] = [
     icon: <CalendarRange size={18} />,
   },
   {
+    name: "Transport",
+    href: "/dashboard/transport",
+    icon: <School size={18} />,
+  },
+  {
     name: "School Profile",
     href: "/dashboard/school-settings",
     icon: <School size={18} />,
@@ -233,6 +250,7 @@ function isSchoolAdminRouteAllowed(pathname: string) {
   return (
     pathname === "/dashboard" ||
     pathname === "/dashboard/students" ||
+    pathname === "/dashboard/transport" ||
     pathname === "/accounting/collect-fee" ||
     pathname === "/accounting/receipt" ||
     pathname === "/accounting/payment" ||
@@ -249,8 +267,13 @@ function isSchoolAdminRouteAllowed(pathname: string) {
 export default function DashboardLayout({
   children,
 }: Props) {
+  return <SchoolProvider><DashboardLayoutContent>{children}</DashboardLayoutContent></SchoolProvider>;
+}
+
+function DashboardLayoutContent({ children }: Props) {
   const router = useRouter();
   const pathname = usePathname();
+  const { modules } = useSchoolContext();
 
   const supabase = useMemo(
     () => createClient(),
@@ -702,12 +725,18 @@ export default function DashboardLayout({
   const isStaff =
     role === "staff";
 
-  const menu =
+  const menu = (
     isStaff
       ? STAFF_MENU
       : role === "admin"
         ? SCHOOL_ADMIN_MENU
-        : PRINCIPAL_MENU;
+        : PRINCIPAL_MENU
+  ).filter((item) => {
+    if (item.name === "Dashboard") return true;
+    const path = item.href.split("?")[0];
+    const required = path.startsWith("/accounting/") ? "fees" : moduleForRoute(path);
+    return !required || modules.includes(required);
+  });
   /* =======================================================
      RENDER
      ======================================================= */
@@ -935,7 +964,7 @@ export default function DashboardLayout({
             ================================================= */}
 
         <main className="min-w-0 flex-1 pb-20 md:pb-0">
-          {children}
+          <ModuleGuard>{children}</ModuleGuard>
         </main>
 
       </div>

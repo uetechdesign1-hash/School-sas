@@ -44,6 +44,7 @@ export async function requireSchoolRole(
   }
 
   const authClient = createClient(url, publishableKey, {
+    global: { headers: { Authorization: `Bearer ${token}` } },
     auth: {
       autoRefreshToken: false,
       persistSession: false,
@@ -58,20 +59,7 @@ export async function requireSchoolRole(
     throw new UnauthenticatedError("You must be signed in.");
   }
 
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-  if (!serviceRoleKey) {
-    throw new Error("Supabase server configuration is missing.");
-  }
-
-  const admin = createClient(url, serviceRoleKey, {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false,
-    },
-  });
-
-  const { data: memberships, error: membershipError } = await admin
+  const { data: memberships, error: membershipError } = await authClient
     .from("school_users")
     .select("school_id,role,created_at")
     .eq("user_id", user.id)
@@ -101,6 +89,17 @@ export async function requireSchoolRole(
       "Your account does not have an allowed role for this school.",
     );
   }
+
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!serviceRoleKey) {
+    throw new Error("Supabase server configuration is missing.");
+  }
+  const admin = createClient(url, serviceRoleKey, {
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false,
+    },
+  });
 
   const { data: school, error: schoolError } = await admin
     .from("schools")

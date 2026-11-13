@@ -63,6 +63,8 @@ function createFetch({ memberships = [], school, invalidToken = false }) {
     }
 
     if (url.pathname === "/rest/v1/school_users") {
+      assert.equal(new Headers(init.headers).get("apikey"), "publishable-test-key");
+      assert.equal(new Headers(init.headers).get("authorization"), "Bearer valid-token");
       assert.equal(url.searchParams.get("user_id"), "eq.user-1");
       assert.equal(url.searchParams.get("is_active"), "eq.true");
       assert.match(url.searchParams.get("order"), /created_at\.asc/);
