@@ -14,6 +14,8 @@ import {
 
 import { createClient } from "@/lib/supabase/client";
 import Link from "next/link";
+import { getTransportMemberships } from "@/lib/transport/memberships";
+import { transportDestination } from "@/lib/transport/roles";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -127,6 +129,13 @@ export default function LoginPage() {
       }
 
       if (!schoolUsers?.length) {
+        const transportMemberships = await getTransportMemberships(supabase, data.user.id);
+        const transportPath = transportDestination(transportMemberships[0]?.role);
+        if (transportPath) {
+          router.replace(transportPath);
+          return;
+        }
+        if (transportMemberships.length) throw new Error("Invalid transport membership role.");
         await supabase.auth.signOut();
 
         throw new Error(

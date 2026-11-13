@@ -9,6 +9,9 @@ const PUBLIC_PREFIXES = [
   "/login",
   "/subscription-expired",
   "/super-admin",
+  // These portals are checked by their server layouts, not school_users.
+  "/driver",
+  "/parent",
 ];
 
 function isPublicPath(pathname: string) {
@@ -49,7 +52,7 @@ export default function SchoolAccessGuard({
     let cancelled = false;
 
     async function checkAccess() {
-      // Public pages do not require school authentication.
+      // Public pages and server-guarded portals skip the school membership check.
       if (isPublicPath(pathname)) {
         if (!cancelled) {
           setAllowed(true);
@@ -200,7 +203,7 @@ export default function SchoolAccessGuard({
     };
   }, [pathname, router, supabase]);
 
-  // Public pages render immediately.
+  // Public pages and server-guarded portals render immediately.
   if (isPublicPath(pathname)) {
     return <>{children}</>;
   }
