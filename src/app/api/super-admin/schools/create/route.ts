@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
 import { getLoginRecycleConflict } from "@/lib/auth/login-recycle";
+import { requireSuperAdmin, SuperAdminAuthError } from "@/lib/auth/super-admin";
+import { validateModules } from "@/lib/modules";
 
 export const dynamic = "force-dynamic";
 
@@ -10,56 +11,6 @@ function json(data: unknown, status = 200) {
 
 function clean(value: unknown) {
   return String(value ?? "").trim();
-}
-
-async function getSuperAdmin(request: Request) {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-  if (!url || !serviceRoleKey) {
-    throw new Error("Supabase server configuration is missing.");
-  }
-
-  const admin = createClient(url, serviceRoleKey, {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false,
-    },
-  });
-
-  const token = request.headers
-    .get("authorization")
-    ?.replace(/^Bearer\s+/i, "");
-
-  if (!token) {
-    throw new Error("Authorization token is required.");
-  }
-
-  const {
-    data: { user },
-    error: authError,
-  } = await admin.auth.getUser(token);
-
-  if (authError || !user) {
-    throw new Error("You must be signed in as Super Admin.");
-  }
-
-  const { data: profile, error: profileError } = await admin
-    .from("user_profiles")
-    .select("platform_role,is_active")
-    .eq("id", user.id)
-    .maybeSingle();
-
-  if (
-    profileError ||
-    !profile ||
-    profile.platform_role !== "super_admin" ||
-    profile.is_active !== true
-  ) {
-    throw new Error("Super Admin access required.");
-  }
-
-  return { admin, user };
 }
 
 /**
@@ -82,7 +33,7 @@ export async function POST(request: Request) {
   const created: { schoolId?: string; ownerId?: string } = {};
 
   try {
-    const { admin, user } = await getSuperAdmin(request);
+    const { admin, user } = await requireSuperAdmin(request);
 
     const body: Record<string, unknown> = await request
       .json()
@@ -108,7 +59,7 @@ export async function POST(request: Request) {
     const state = read("state");
     const postalCode = read("postalCode", "postal_code");
 
-    const planCode = read("planCode", "plan_code").toLowerCase() || "starter";
+    const planCode = "starter";
     const studentLimit = Number(read("studentLimit", "student_limit") || 300);
     const startsOn = read("startsOn", "starts_on");
     const expiresOn = read("expiresOn", "expires_on");
@@ -118,6 +69,14 @@ export async function POST(request: Request) {
     const ownerPhone = read("ownerPhone", "owner_phone");
     const ownerEmail = read("ownerEmail", "owner_email").toLowerCase();
     const password = read("password", "ownerPassword", "owner_password");
+
+    let modules;
+    try {
+      modules = validateModules(body.modules);
+    } catch (error) {
+      if (!(error instanceof TypeError)) throw error;
+      return json({ success: false, error: error.message }, 400);
+    }
 
     // --------------------------------------------------
     // VALIDATION
@@ -354,6 +313,7 @@ export async function POST(request: Request) {
         state: state || null,
         postal_code: postalCode || null,
         plan_code: planCode,
+        enabled_modules: modules,
         student_limit: studentLimit,
         starts_on: startsOn,
         expires_on: expiresOn,
@@ -531,6 +491,9 @@ export async function POST(request: Request) {
       201,
     );
   } catch (error) {
+    if (error instanceof SuperAdminAuthError) {
+      return json({ success: false, error: error.message }, error.status);
+    }
     console.error("CREATE SCHOOL API ERROR:", error);
 
     return json(

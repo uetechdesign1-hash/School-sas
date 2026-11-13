@@ -12,6 +12,7 @@ import {
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
+import { MODULES, type ModuleCode } from "@/lib/modules";
 import { ImagePlus, Loader2, Trash2, Upload } from "lucide-react";
 
 type School = {
@@ -20,7 +21,7 @@ type School = {
   code: string | null;
   school_code: string | null;
   status: string;
-  plan_code: string | null;
+  enabled_modules: ModuleCode[];
   student_limit: number | null;
   active_student_count: number;
   starts_on: string | null;
@@ -47,7 +48,7 @@ type FormData = {
   city: string;
   state: string;
   postalCode: string;
-  planCode: string;
+  modules: ModuleCode[];
   studentLimit: string;
   startsOn: string;
   expiresOn: string;
@@ -67,7 +68,7 @@ const emptyForm: FormData = {
   city: "",
   state: "",
   postalCode: "",
-  planCode: "starter",
+  modules: ["fees", "payroll"],
   studentLimit: "300",
   startsOn: new Date().toISOString().slice(0, 10),
   expiresOn: "",
@@ -76,6 +77,18 @@ const emptyForm: FormData = {
   ownerEmail: "",
   ownerPhone: "",
   ownerPassword: "",
+};
+
+const MODULE_COLORS: Record<ModuleCode, string> = {
+  fees: "bg-blue-100 text-blue-700",
+  payroll: "bg-emerald-100 text-emerald-700",
+  transport: "bg-amber-100 text-amber-700",
+};
+
+const MODULE_DESCRIPTIONS: Record<ModuleCode, string> = {
+  fees: "Manage student fees and payments.",
+  payroll: "Manage staff attendance and payroll.",
+  transport: "Track school buses live when available.",
 };
 
 export default function SuperAdminPage() {
@@ -121,7 +134,7 @@ export default function SuperAdminPage() {
     city: "",
     state: "",
     postalCode: "",
-    planCode: "starter",
+    modules: ["fees", "payroll"] as ModuleCode[],
     studentLimit: "300",
     startsOn: "",
     expiresOn: "",
@@ -267,7 +280,7 @@ export default function SuperAdminPage() {
     } = await supabase
       .from("schools")
       .select(
-        "id, name, code, school_code, status, plan_code, student_limit, starts_on, expires_on, email, phone, address, city, state, postal_code, created_at"
+        "id, name, code, school_code, status, enabled_modules, student_limit, starts_on, expires_on, email, phone, address, city, state, postal_code, created_at"
       )
       .order(
         "created_at",
@@ -430,7 +443,7 @@ export default function SuperAdminPage() {
   // --------------------------------------------------
 
   function updateField(
-    field: keyof FormData,
+    field: Exclude<keyof FormData, "modules">,
     value: string
   ) {
     setForm((current) => ({
@@ -488,22 +501,26 @@ export default function SuperAdminPage() {
       return;
     }
 
+    if (form.modules.length === 0) {
+      setErrorMessage("Select at least one module.");
+      return;
+    }
+
     setCreating(true);
 
     try {
-      /*
-       * The logged-in Supabase session is automatically
-       * attached by supabase.functions.invoke().
-       */
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) {
+        throw new Error("Your login session has expired. Please log in again.");
+      }
 
-      const {
-        data,
-        error,
-      } =
-        await supabase.functions.invoke(
-          "create-school",
-          {
-            body: {
+      const response = await fetch("/api/super-admin/schools/create", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({
               school_name:
                 form.schoolName.trim(),
 
@@ -536,8 +553,7 @@ export default function SuperAdminPage() {
                 form.postalCode.trim() ||
                 null,
 
-              plan_code:
-                form.planCode,
+              modules: form.modules,
 
               student_limit:
                 Number(
@@ -564,48 +580,11 @@ export default function SuperAdminPage() {
 
               owner_password:
                 form.ownerPassword,
-            },
-          }
-        );
+        }),
+      });
+      const data = await response.json();
 
-      if (error) {
-        console.error(
-          "CREATE SCHOOL FUNCTION ERROR:",
-          error
-        );
-
-        let message =
-          error.message ||
-          "Unable to create school.";
-
-        /*
-         * Supabase Edge Functions sometimes
-         * return the actual JSON error in
-         * error.context.
-         */
-
-        try {
-          if (
-            error.context &&
-            typeof error.context.json ===
-              "function"
-          ) {
-            const body =
-              await error.context.json();
-
-            if (body?.error) {
-              message = body.error;
-            }
-          }
-        } catch {
-          // Keep original error message.
-        }
-
-        setErrorMessage(message);
-        return;
-      }
-
-      if (!data?.success) {
+      if (!response.ok || !data?.success) {
         setErrorMessage(
           data?.error ||
             "School creation failed."
@@ -614,7 +593,7 @@ export default function SuperAdminPage() {
       }
 
       setSuccessMessage(
-        "School and owner created successfully."
+        data.message || "School and owner created successfully."
       );
 
       setShowCreateModal(false);
@@ -656,7 +635,7 @@ export default function SuperAdminPage() {
       city: school.city || "",
       state: school.state || "",
       postalCode: school.postal_code || "",
-      planCode: school.plan_code || "starter",
+      modules: school.enabled_modules,
       studentLimit: String(school.student_limit ?? 300),
       startsOn: school.starts_on || "",
       expiresOn: school.expires_on || "",
@@ -700,6 +679,7 @@ export default function SuperAdminPage() {
 
       setEditForm((current) => ({
         ...current,
+        modules: result.school.enabled_modules,
         ownerName: result.owner?.name || "",
         ownerPhone: result.owner?.phone || "",
         ownerEmail: result.owner?.email || "",
@@ -749,6 +729,11 @@ export default function SuperAdminPage() {
       return;
     }
 
+    if (editForm.modules.length === 0) {
+      setErrorMessage("Select at least one module.");
+      return;
+    }
+
     setSavingSchool(true);
 
     try {
@@ -771,6 +756,7 @@ export default function SuperAdminPage() {
           body: JSON.stringify({
             action: "update",
             schoolId: editingSchool.id,
+            modules: editForm.modules,
             school: {
               name: editForm.schoolName.trim(),
               code: editForm.schoolCode.trim().toUpperCase(),
@@ -780,7 +766,6 @@ export default function SuperAdminPage() {
               city: editForm.city.trim() || null,
               state: editForm.state.trim() || null,
               postal_code: editForm.postalCode.trim() || null,
-              plan_code: editForm.planCode,
               student_limit: studentLimit,
               starts_on: editForm.startsOn || null,
               expires_on: editForm.expiresOn || null,
@@ -1292,7 +1277,7 @@ export default function SuperAdminPage() {
                     </th>
 
                     <th className="px-4 py-3 text-xs font-semibold uppercase text-slate-400">
-                      Plan
+                      Modules
                     </th>
 
                     <th className="px-4 py-3 text-xs font-semibold uppercase text-slate-400">
@@ -1343,9 +1328,17 @@ export default function SuperAdminPage() {
                             "-"}
                         </td>
 
-                        <td className="px-4 py-4 text-sm capitalize text-slate-600">
-                          {school.plan_code ||
-                            "starter"}
+                        <td className="px-4 py-4">
+                          <div className="flex flex-wrap gap-1">
+                            {school.enabled_modules.map((code) => {
+                              const definition = MODULES.find((item) => item.code === code);
+                              return (
+                                <span key={code} className={`rounded-full px-2 py-1 text-xs font-semibold ${MODULE_COLORS[code]}`}>
+                                  {definition?.label || code}
+                                </span>
+                              );
+                            })}
+                          </div>
                         </td>
 
                         <td className="px-4 py-4 text-sm text-slate-600">
@@ -1670,30 +1663,12 @@ export default function SuperAdminPage() {
                       Subscription
                     </h3>
 
+                    <ModuleSelector
+                      value={editForm.modules}
+                      onChange={(modules) => setEditForm((current) => ({ ...current, modules }))}
+                      disabled={savingSchool}
+                    />
                     <div className="mt-4 grid gap-4 sm:grid-cols-2">
-                      <Select
-                        label="Plan"
-                        value={editForm.planCode}
-                        onChange={(value) =>
-                          setEditForm((current) => ({
-                            ...current,
-                            planCode: value,
-                          }))
-                        }
-                        disabled={savingSchool}
-                        options={[
-                          { value: "starter", label: "Starter" },
-                          {
-                            value: "professional",
-                            label: "Professional",
-                          },
-                          {
-                            value: "enterprise",
-                            label: "Enterprise",
-                          },
-                        ]}
-                      />
-
                       <Input
                         label="Student Limit"
                         type="number"
@@ -2102,33 +2077,12 @@ export default function SuperAdminPage() {
                   Subscription
                 </h3>
 
+                <ModuleSelector
+                  value={form.modules}
+                  onChange={(modules) => setForm((current) => ({ ...current, modules }))}
+                  disabled={creating}
+                />
                 <div className="mt-4 grid gap-4 sm:grid-cols-2">
-                  <Select
-                    label="Plan"
-                    value={form.planCode}
-                    onChange={(value) =>
-                      updateField(
-                        "planCode",
-                        value
-                      )
-                    }
-                    disabled={creating}
-                    options={[
-                      {
-                        value: "starter",
-                        label: "Starter",
-                      },
-                      {
-                        value: "professional",
-                        label: "Professional",
-                      },
-                      {
-                        value: "enterprise",
-                        label: "Enterprise",
-                      },
-                    ]}
-                  />
-
                   <Input
                     label="Student Limit"
                     type="number"
@@ -2266,6 +2220,47 @@ export default function SuperAdminPage() {
         </div>
       )}
     </main>
+  );
+}
+
+function ModuleSelector({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: ModuleCode[];
+  onChange: (value: ModuleCode[]) => void;
+  disabled: boolean;
+}) {
+  return (
+    <fieldset className="mt-4 space-y-3" disabled={disabled}>
+      <legend className="text-sm font-semibold text-slate-700">Enabled modules *</legend>
+      {MODULES.map((module) => (
+        <label key={module.code} className="flex items-start gap-3 rounded-xl border border-slate-200 p-3">
+          <input
+            type="checkbox"
+            className="mt-1"
+            checked={value.includes(module.code)}
+            onChange={(event) =>
+              onChange(event.target.checked
+                ? [...value, module.code]
+                : value.filter((code) => code !== module.code))
+            }
+          />
+          <span>
+            <span className="text-sm font-semibold text-slate-800">{module.label}</span>
+            {module.code === "transport" && (
+              <span className="ml-2 rounded-full bg-amber-100 px-2 py-1 text-xs font-semibold text-amber-700">
+                Coming soon
+              </span>
+            )}
+            <span className="mt-1 block text-xs text-slate-500">
+              {MODULE_DESCRIPTIONS[module.code]}
+            </span>
+          </span>
+        </label>
+      ))}
+    </fieldset>
   );
 }
 

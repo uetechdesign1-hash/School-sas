@@ -1,63 +1,15 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { requireSuperAdmin, SuperAdminAuthError } from "@/lib/auth/super-admin";
+import { validateModules } from "@/lib/modules";
+import { errorText } from "@/lib/supabase/postgrest-errors";
 
 function json(data: unknown, status = 200) {
   return NextResponse.json(data, { status });
 }
 
-async function getSuperAdmin(request: Request) {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-  if (!url || !serviceRoleKey) {
-    throw new Error("Supabase server configuration is missing.");
-  }
-
-  const admin = createClient(url, serviceRoleKey, {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false,
-    },
-  });
-
-  const token = request.headers
-    .get("authorization")
-    ?.replace(/^Bearer\s+/i, "");
-
-  if (!token) {
-    throw new Error("Authorization token is required.");
-  }
-
-  const {
-    data: { user },
-    error: authError,
-  } = await admin.auth.getUser(token);
-
-  if (authError || !user) {
-    throw new Error("You must be signed in as Super Admin.");
-  }
-
-  const { data: profile, error: profileError } = await admin
-    .from("user_profiles")
-    .select("platform_role,is_active")
-    .eq("id", user.id)
-    .maybeSingle();
-
-  if (
-    profileError ||
-    !profile ||
-    profile.platform_role !== "super_admin" ||
-    profile.is_active !== true
-  ) {
-    throw new Error("Super Admin access required.");
-  }
-
-  return { admin, user };
-}
-
 export async function POST(request: Request) {
   try {
-    const { admin } = await getSuperAdmin(request);
+    const { admin } = await requireSuperAdmin(request);
     const body = await request.json();
 
     const action = String(body?.action || "");
@@ -74,7 +26,7 @@ export async function POST(request: Request) {
       const { data: school, error: schoolError } = await admin
         .from("schools")
         .select(
-          "id,name,code,school_code,status,plan_code,student_limit,starts_on,expires_on,email,phone,address,city,state,postal_code",
+          "id,name,code,school_code,status,plan_code,enabled_modules,student_limit,starts_on,expires_on,email,phone,address,city,state,postal_code",
         )
         .eq("id", schoolId)
         .maybeSingle();
@@ -156,6 +108,14 @@ export async function POST(request: Request) {
       const school = body?.school || {};
       const owner = body?.owner || {};
 
+      let modules;
+      try {
+        modules = validateModules(body?.modules);
+      } catch (error) {
+        if (!(error instanceof TypeError)) throw error;
+        return json({ success: false, error: error.message }, 400);
+      }
+
       const studentLimit = Number(school.student_limit);
 
       if (!String(school.name || "").trim()) {
@@ -190,7 +150,8 @@ export async function POST(request: Request) {
           city: String(school.city || "").trim() || null,
           state: String(school.state || "").trim() || null,
           postal_code: String(school.postal_code || "").trim() || null,
-          plan_code: String(school.plan_code || "starter"),
+          plan_code: "starter",
+          enabled_modules: modules,
           student_limit: studentLimit,
           starts_on: school.starts_on || null,
           expires_on: school.expires_on || null,
@@ -369,6 +330,7 @@ export async function POST(request: Request) {
       // Using raw SQL for cascade delete since we need to delete from multiple tables
 
       const tablesToDelete = [
+        "audit_logs",
         // Accounting
         "accounting_audit_log",
         "accounting_events",
@@ -394,7 +356,7 @@ export async function POST(request: Request) {
         "academic_years",
         // User associations (delete before auth users)
         "school_users",
-        // Optional modules (will fail silently if not exist)
+        // Optional modules
         "transport_routes",
         "transport_fees",
         "library_transactions",
@@ -428,13 +390,32 @@ export async function POST(request: Request) {
         "school_subscriptions",
       ];
 
-      // Delete from each table
+      const cleanupErrors: { table: string; error: string }[] = [];
+
       for (const table of tablesToDelete) {
         try {
-          await admin.from(table).delete().eq("school_id", schoolId);
-        } catch {
-          // Table might not exist or have no records - ignore
+          const { error } = await admin.from(table).delete().eq("school_id", schoolId);
+          if (error) {
+            const missingRelation = error.code === "42P01" &&
+              (error.message === `relation "${table}" does not exist` ||
+               error.message === `relation "public.${table}" does not exist`);
+            const missingCacheEntry = error.code === "PGRST205" &&
+              error.message === `Could not find the table 'public.${table}' in the schema cache`;
+            if (!missingRelation && !missingCacheEntry) {
+              cleanupErrors.push({ table, error: errorText(error, "Unable to delete school data.") });
+            }
+          }
+        } catch (error) {
+          cleanupErrors.push({ table, error: errorText(error, "Unable to delete school data.") });
         }
+      }
+
+      if (cleanupErrors.length > 0) {
+        return json({
+          success: false,
+          error: `School cleanup failed; some data may already have been deleted. ${cleanupErrors.map(({ table, error }) => `${table}: ${error}`).join("; ")}`,
+          cleanupErrors,
+        }, 500);
       }
 
       // --------------------------------------------------
@@ -502,6 +483,9 @@ export async function POST(request: Request) {
       400,
     );
   } catch (error) {
+    if (error instanceof SuperAdminAuthError) {
+      return json({ success: false, error: error.message }, error.status);
+    }
     console.error("SUPER ADMIN SCHOOL MANAGEMENT API ERROR:", error);
 
     return json(

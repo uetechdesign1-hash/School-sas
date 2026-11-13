@@ -28,6 +28,17 @@ test("validates known modules and preserves their order", () => {
   ]);
 });
 
+test("accepts every nonempty combination of supported modules", () => {
+  const combinations = [
+    ["fees"], ["payroll"], ["transport"],
+    ["fees", "payroll"], ["fees", "transport"], ["payroll", "transport"],
+    ["fees", "payroll", "transport"],
+  ];
+  for (const modules of combinations) {
+    assert.deepEqual(validateModules(modules), modules);
+  }
+});
+
 test("rejects unknown modules", () => {
   assert.throws(() => validateModules(["fees", "books"]), /Unknown module: books/);
 });
