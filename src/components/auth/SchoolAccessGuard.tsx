@@ -9,9 +9,6 @@ const PUBLIC_PREFIXES = [
   "/login",
   "/subscription-expired",
   "/super-admin",
-  // These portals are checked by their server layouts, not school_users.
-  "/driver",
-  "/parent",
 ];
 
 function isPublicPath(pathname: string) {
@@ -52,7 +49,7 @@ export default function SchoolAccessGuard({
     let cancelled = false;
 
     async function checkAccess() {
-      // Public pages and server-guarded portals skip the school membership check.
+      // Public pages do not require school authentication.
       if (isPublicPath(pathname)) {
         if (!cancelled) {
           setAllowed(true);
@@ -116,13 +113,20 @@ export default function SchoolAccessGuard({
           .maybeSingle();
 
         if (membershipError || !membership?.school_id) {
+          if (membershipError) {
+            console.error("SCHOOL MEMBERSHIP ERROR:", membershipError);
+          }
           if (!cancelled) {
             setAllowed(false);
             setChecking(false);
           }
 
           await supabase.auth.signOut();
-          router.replace("/login");
+          router.replace(
+            membershipError
+              ? "/login?reason=access-check-failed"
+              : "/login?reason=no-school",
+          );
           return;
         }
 
@@ -203,7 +207,7 @@ export default function SchoolAccessGuard({
     };
   }, [pathname, router, supabase]);
 
-  // Public pages and server-guarded portals render immediately.
+  // Public pages render immediately.
   if (isPublicPath(pathname)) {
     return <>{children}</>;
   }

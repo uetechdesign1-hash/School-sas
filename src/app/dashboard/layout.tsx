@@ -263,9 +263,6 @@ export default function DashboardLayout({
   const [schoolLogo, setSchoolLogo] =
     useState<string | null>(null);
 
-  const [platformLogo, setPlatformLogo] =
-    useState<string | null>(null);
-
   const [role, setRole] =
     useState("");
 
@@ -345,11 +342,23 @@ export default function DashboardLayout({
         }
 
         if (!memberships?.length) {
-          console.error(
-            "NO ACTIVE SCHOOL MEMBERSHIP"
-          );
+          const { data: profile, error: profileError } = await supabase
+            .from("user_profiles")
+            .select("platform_role, is_active")
+            .eq("id", user.id)
+            .maybeSingle();
 
-          router.replace("/login");
+          if (profileError) {
+            console.error("PROFILE LOOKUP ERROR:", profileError);
+            router.replace("/login?reason=access-check-failed");
+            return;
+          }
+
+          router.replace(
+            profile?.platform_role === "super_admin" && profile.is_active === true
+              ? "/super-admin"
+              : "/login?reason=no-school",
+          );
           return;
         }
 
@@ -480,23 +489,6 @@ export default function DashboardLayout({
           .eq("id", membership.school_id)
           .maybeSingle();
         setSchoolLogo(logoError ? null : logoData?.logo_url || null);
-
-        try {
-          const {
-            data: platformLogoData,
-            error: platformLogoError,
-          } = await supabase.rpc("get_platform_logo");
-          if (platformLogoError) throw platformLogoError;
-          if (!cancelled) {
-            setPlatformLogo(
-              typeof platformLogoData === "string"
-                ? platformLogoData
-                : null,
-            );
-          }
-        } catch (platformLogoError) {
-          console.error("PLATFORM LOGO ERROR:", platformLogoError);
-        }
 
         setRole(
           currentRole
@@ -715,8 +707,6 @@ export default function DashboardLayout({
       : role === "admin"
         ? SCHOOL_ADMIN_MENU
         : PRINCIPAL_MENU;
-  const dashboardLogo = platformLogo || schoolLogo;
-
   /* =======================================================
      RENDER
      ======================================================= */
@@ -736,11 +726,11 @@ export default function DashboardLayout({
 
           <div className="flex items-center gap-3">
 
-            {dashboardLogo ? (
+            {schoolLogo ? (
               <img
-                src={dashboardLogo}
-                alt={platformLogo ? "SCB platform logo" : `${schoolName} logo`}
-                className={`${platformLogo ? "h-14 w-14" : "h-10 w-10 p-1"} rounded-2xl border border-slate-200 bg-white object-contain`}
+                src={schoolLogo}
+                alt={`${schoolName} logo`}
+                className="h-10 w-10 rounded-2xl border border-slate-200 bg-white object-contain p-1"
               />
             ) : (
               <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-500 via-indigo-500 to-purple-500 text-lg font-bold text-white shadow-lg shadow-indigo-500/40">

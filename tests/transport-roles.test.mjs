@@ -83,10 +83,16 @@ const { default: ParentPage } = await import(portalUrls[1]);
 const { PortalGuard } = await import(portalGuardUrl);
 const { default: SchoolAccessGuard } = await import(rootGuardUrl);
 
-function supabase({ schoolRoles = [], transportRoles = [], user = true, modules = ["transport"], status = "active", expiresOn = null, membershipError = null, transportError = null } = {}) {
+function supabase({ schoolRoles = [], transportRoles = [], user = true, modules = ["transport"], status = "active", expiresOn = null, schoolRows = null, membershipError = null, transportError = null } = {}) {
   const requests = [];
   const schoolMemberships = schoolRoles.map((role, index) => ({ role, school_id: `school-${index}` }));
   const transportMemberships = transportRoles.map((role, index) => ({ role, school_id: `transport-school-${index}` }));
+  const portalSchools = schoolRows || transportMemberships.map(({ school_id }) => ({
+    id: school_id,
+    enabled_modules: modules,
+    status,
+    expires_on: expiresOn,
+  }));
   globalThis.adminCreated = 0;
   process.env.NEXT_PUBLIC_SUPABASE_URL = "https://transport.test";
   process.env.SUPABASE_SERVICE_ROLE_KEY = "service-role-test-key";
@@ -98,7 +104,15 @@ function supabase({ schoolRoles = [], transportRoles = [], user = true, modules 
       const query = {
         select() { return query; },
         eq(column, value) { request.filters.push([column, value]); return query; },
-        maybeSingle: async () => ({ data: { enabled_modules: modules, status, expires_on: expiresOn }, error: null }),
+        in(column, values) { request.filters.push([column, values]); return query; },
+        maybeSingle: async () => ({ data: portalSchools[0] || null, error: null }),
+        then(resolve, reject) {
+          const ids = request.filters.find(([column]) => column === "id")?.[1] || [];
+          return Promise.resolve({
+            data: portalSchools.filter(({ id }) => ids.includes(id)),
+            error: null,
+          }).then(resolve, reject);
+        },
       };
       return query;
     },
@@ -124,7 +138,12 @@ function supabase({ schoolRoles = [], transportRoles = [], user = true, modules 
             : { data: transportMemberships, error: transportError };
           return Promise.resolve(result).then(resolve, reject);
         },
-        maybeSingle: async () => ({ data: { id: "staff-1", status: "active" }, error: null }),
+        maybeSingle: async () => ({
+          data: table === "schools"
+            ? { enabled_modules: modules }
+            : { id: "staff-1", status: "active" },
+          error: null,
+        }),
       };
       return query;
     },
@@ -180,12 +199,73 @@ test("dashboard fails closed if membership lookup fails", async () => {
   assert.equal(response.status, 503);
 });
 
+test("proxy enforces each subscription plan on school pages", async () => {
+  const cases = [
+    // [modules, path, expected redirect or null when allowed]
+    [["transport"], "/dashboard/students", null],
+    [["transport"], "/dashboard/students/new", null],
+    [["transport"], "/dashboard/classes", null],
+    [["transport"], "/dashboard/academic-years", null],
+    [["transport"], "/dashboard/transport", null],
+    [["transport"], "/dashboard/fees/structure", "/dashboard"],
+    [["transport"], "/accounting/ledger", "/dashboard"],
+    [["transport"], "/dashboard/staff", "/dashboard"],
+    [["transport"], "/dashboard/payroll", "/dashboard"],
+    [["fees"], "/dashboard/students", null],
+    [["fees"], "/accounting/ledger", null],
+    [["fees"], "/dashboard/reports", null],
+    [["fees"], "/dashboard/staff", "/dashboard"],
+    [["fees"], "/dashboard/payroll", "/dashboard"],
+    [["fees"], "/dashboard/transport", "/dashboard"],
+    [["payroll"], "/dashboard/staff", null],
+    [["payroll"], "/dashboard/payroll", null],
+    [["payroll"], "/dashboard/students", "/dashboard"],
+    [["payroll"], "/accounting/ledger", "/dashboard"],
+    [["fees", "payroll", "transport"], "/dashboard/transport", null],
+    [["fees", "payroll", "transport"], "/accounting/ledger", null],
+  ];
+
+  for (const [modules, path, expected] of cases) {
+    supabase({ schoolRoles: ["owner"], modules });
+    const response = await proxy(new NextRequest(`https://school.test${path}`));
+    assert.equal(destination(response), expected, `${modules.join("+")} ${path}`);
+  }
+});
+
+test("a user with no school membership is routed, not trapped, on school pages", async () => {
+  supabase({ transportRoles: ["driver"] });
+  assert.equal(
+    destination(await proxy(new NextRequest("https://school.test/dashboard/students"))),
+    "/driver",
+  );
+  supabase({});
+  assert.equal(
+    destination(await proxy(new NextRequest("https://school.test/accounting/ledger"))),
+    "/login",
+  );
+});
+
+test("proxy blocks a school dashboard module that is not entitled", async () => {
+  supabase({ schoolRoles: ["owner"], modules: ["payroll"] });
+  const response = await proxy(
+    new NextRequest("https://school.test/dashboard/fees/structure"),
+  );
+  assert.equal(destination(response), "/dashboard");
+  assert.equal(new URL(response.headers.get("location")).search, "?module=fees");
+
+  supabase({ schoolRoles: ["staff"], modules: ["fees"] });
+  const staffResponse = await proxy(
+    new NextRequest("https://school.test/dashboard/staff/home"),
+  );
+  assert.equal(destination(staffResponse), "/dashboard/staff/profile");
+});
+
 test("portal access checks the selected membership and its school's module", async () => {
   for (const role of ["driver", "parent"]) {
     const client = supabase({ transportRoles: [role] });
     assert.equal(await getPortalAccess(role), "allowed");
     const schoolRequest = client.requests.find(({ table }) => table === "schools");
-    assert.deepEqual(schoolRequest.filters, [["id", "transport-school-0"]]);
+    assert.deepEqual(schoolRequest.filters, [["id", ["transport-school-0"]]]);
     const transportRequest = client.requests.find(({ table }) => table === "transport_users");
     assert.deepEqual(transportRequest.filters, [["user_id", "user-1"], ["is_active", true]]);
     assert.equal(globalThis.adminCreated, 1);
@@ -203,12 +283,54 @@ test("portal access checks the selected membership and its school's module", asy
     assert.equal(await getPortalAccess(role), "school-unavailable");
     supabase({ transportRoles: [role], expiresOn: "2000-01-01" });
     assert.equal(await getPortalAccess(role), "school-unavailable");
+    supabase({ transportRoles: [role], expiresOn: "not-a-date" });
+    assert.equal(await getPortalAccess(role), "school-unavailable");
   }
   supabase({ transportError: { message: "unavailable" } });
   await assert.rejects(getPortalAccess("driver"), /Unable to verify transport membership/);
   assert.equal(globalThis.adminCreated, 0);
   supabase({ user: false });
   await assert.rejects(getPortalAccess("driver"), /REDIRECT:\/login/);
+});
+
+test("transport portal skips unavailable memberships and uses an eligible school", async () => {
+  supabase({
+    transportRoles: ["driver", "driver"],
+    schoolRows: [
+      {
+        id: "transport-school-0",
+        enabled_modules: ["transport"],
+        status: "suspended",
+        expires_on: null,
+      },
+      {
+        id: "transport-school-1",
+        enabled_modules: ["transport"],
+        status: "active",
+        expires_on: null,
+      },
+    ],
+  });
+  assert.equal(await getPortalAccess("driver"), "allowed");
+
+  supabase({
+    transportRoles: ["parent", "parent"],
+    schoolRows: [
+      {
+        id: "transport-school-0",
+        enabled_modules: ["transport"],
+        status: "active",
+        expires_on: "2000-01-01",
+      },
+      {
+        id: "transport-school-1",
+        enabled_modules: ["transport"],
+        status: "active",
+        expires_on: null,
+      },
+    ],
+  });
+  assert.equal(await getPortalAccess("parent"), "allowed");
 });
 
 test("transport migration grants only self-select to authenticated users", () => {

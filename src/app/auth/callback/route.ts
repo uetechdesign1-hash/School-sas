@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { getTransportMemberships } from "@/lib/transport/memberships";
-import { transportDestination } from "@/lib/transport/roles";
 
 export async function GET(request: NextRequest) {
   const requestUrl = new URL(request.url);
@@ -30,18 +28,6 @@ export async function GET(request: NextRequest) {
         )
       ) {
         destination = "/dashboard/staff/home";
-      } else if (!error && !memberships?.length) {
-        try {
-          const transportMemberships = await getTransportMemberships(supabase, data.user.id);
-          const transportPath = transportDestination(transportMemberships[0]?.role);
-          if (transportMemberships.length && !transportPath) {
-            throw new Error("Invalid transport membership role.");
-          }
-          destination = transportPath || destination;
-        } catch (transportError) {
-          console.error("TRANSPORT MEMBERSHIP ERROR:", transportError);
-          return new NextResponse("Unable to verify transport access.", { status: 503 });
-        }
       }
     }
   }
