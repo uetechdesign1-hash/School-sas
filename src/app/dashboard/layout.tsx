@@ -30,6 +30,7 @@ import {
 } from "lucide-react";
 
 import { createClient } from "@/lib/supabase/client";
+import { SchoolProvider } from "@/lib/school-context";
 
 type Props = {
   children: ReactNode;
@@ -934,7 +935,7 @@ export default function DashboardLayout({
             ================================================= */}
 
         <main className="min-w-0 flex-1 pb-20 md:pb-0">
-          {children}
+          <SchoolProvider>{children}</SchoolProvider>
         </main>
 
       </div>
