@@ -7,7 +7,6 @@ import {
   BarChart3,
   Bell,
   BookOpen,
-  Bus,
   CalendarCheck,
   ChevronDown,
   CreditCard,
@@ -49,11 +48,6 @@ const navigation = [
     label: "Payments",
     href: "/dashboard/payments",
     icon: Wallet,
-  },
-  {
-    label: "Transport",
-    href: "/dashboard/transport",
-    icon: Bus,
   },
   {
     label: "Attendance",
