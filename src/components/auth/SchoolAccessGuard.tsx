@@ -113,13 +113,20 @@ export default function SchoolAccessGuard({
           .maybeSingle();
 
         if (membershipError || !membership?.school_id) {
+          if (membershipError) {
+            console.error("SCHOOL MEMBERSHIP ERROR:", membershipError);
+          }
           if (!cancelled) {
             setAllowed(false);
             setChecking(false);
           }
 
           await supabase.auth.signOut();
-          router.replace("/login");
+          router.replace(
+            membershipError
+              ? "/login?reason=access-check-failed"
+              : "/login?reason=no-school",
+          );
           return;
         }
 

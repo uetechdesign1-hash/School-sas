@@ -7,7 +7,6 @@ import {
   BarChart3,
   Bell,
   BookOpen,
-  Bus,
   CalendarCheck,
   ChevronDown,
   CreditCard,
@@ -23,10 +22,8 @@ import {
   X,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
-import { useSchoolContext } from "@/lib/school-context";
-import type { ModuleCode } from "@/lib/modules";
 
-const navigation: { label: string; href: string; icon: typeof Users; module?: ModuleCode }[] = [
+const navigation = [
   {
     label: "Dashboard",
     href: "/dashboard",
@@ -46,19 +43,11 @@ const navigation: { label: string; href: string; icon: typeof Users; module?: Mo
     label: "Fees",
     href: "/dashboard/fees",
     icon: CreditCard,
-    module: "fees",
   },
   {
     label: "Payments",
     href: "/dashboard/payments",
     icon: Wallet,
-    module: "fees",
-  },
-  {
-    label: "Transport",
-    href: "/dashboard/transport",
-    icon: Bus,
-    module: "transport",
   },
   {
     label: "Attendance",
@@ -69,13 +58,11 @@ const navigation: { label: string; href: string; icon: typeof Users; module?: Mo
     label: "Staff & Payroll",
     href: "/dashboard/staff",
     icon: Users,
-    module: "payroll",
   },
   {
     label: "Accounts",
     href: "/dashboard/accounts",
     icon: DollarSign,
-    module: "fees",
   },
   {
     label: "Reports",
@@ -102,7 +89,6 @@ export function DashboardShell({
   const pathname = usePathname();
   const router = useRouter();
   const supabase = createClient();
-  const { modules } = useSchoolContext();
 
   const [mobileOpen, setMobileOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
@@ -138,9 +124,7 @@ export function DashboardShell({
         </p>
 
         <nav className="space-y-1">
-          {navigation.filter((item) =>
-            !item.module || modules.includes(item.module)
-          ).map((item) => {
+          {navigation.map((item) => {
             const Icon = item.icon;
 
             const active =

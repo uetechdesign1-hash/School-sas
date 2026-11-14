@@ -2,13 +2,9 @@
 
 import Link from "next/link";
 import { FormEvent, useCallback, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
-import { useSchoolContext } from "@/lib/school-context";
-import {
-  generateAdmissionReceiptPDF,
-  loadReceiptLogoDataUrl,
-} from "@/lib/fees/generateReceipt";
+import { loadReceiptLogoDataUrl } from "@/lib/fees/generateReceipt";
+import { createAdmissionPdf, type AdmissionPdfData } from "@/lib/students/admission-pdf";
 
 type Gender = "male" | "female" | "other";
 
@@ -39,49 +35,80 @@ type AcademicYear = {
   is_current: boolean;
 };
 
-type PaymentAccount = {
+type Account = {
   id: string;
   name: string;
-  code: string | null;
+  code: string;
   account_type: string;
 };
 
-type SchoolReceiptDetails = {
+type School = {
   name: string;
   logo_url: string | null;
   address: string | null;
   city: string | null;
   state: string | null;
   postal_code: string | null;
-  phone: string | null;
-  email: string | null;
 };
 
-export default function NewStudentPage() {
-  const router = useRouter();
-  const { modules } = useSchoolContext();
-  const hasFees = modules.includes("fees");
+type CompletedAdmission = {
+  studentId: string;
+  admissionNo: string;
+  school: School;
+  document: AdmissionPdfData;
+  receipt: AdmissionPdfData | null;
+};
 
+function localDate() {
+  const date = new Date();
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+async function getSchoolId(supabase: ReturnType<typeof createClient>) {
+  const { data: { user }, error: userError } = await supabase.auth.getUser();
+  if (userError) throw userError;
+  if (!user) {
+    window.location.href = "/login";
+    return null;
+  }
+  const { data: membership, error: membershipError } = await supabase
+    .from("school_users")
+    .select("school_id, role, is_active")
+    .eq("user_id", user.id)
+    .eq("is_active", true)
+    .limit(1)
+    .maybeSingle();
+  if (membershipError) throw membershipError;
+  if (!membership?.school_id) throw new Error("Your account is not assigned to a school.");
+  return membership.school_id as string;
+}
+
+export default function NewStudentPage() {
   const [admissionNo, setAdmissionNo] = useState("");
   const [rollNo, setRollNo] = useState("");
   const [firstName, setFirstName] = useState("");
   const [middleName, setMiddleName] = useState("");
   const [lastName, setLastName] = useState("");
-  const [fatherName, setFatherName] = useState("");
-  const [motherName, setMotherName] = useState("");
-  const [parentPhone, setParentPhone] = useState("");
   const [dateOfBirth, setDateOfBirth] = useState("");
   const [gender, setGender] = useState<Gender | "">("");
   const [admissionDate, setAdmissionDate] = useState("");
   const [admissionFee, setAdmissionFee] = useState("");
-  const [admissionReceiptNumber, setAdmissionReceiptNumber] = useState("");
-  const [admissionPaymentMethod, setAdmissionPaymentMethod] = useState("cash");
-  const [cashAccountId, setCashAccountId] = useState("");
-  const [bankAccounts, setBankAccounts] = useState<PaymentAccount[]>([]);
-  const [bankAccountId, setBankAccountId] = useState("");
-  const [utrNumber, setUtrNumber] = useState("");
+  const [billNumber, setBillNumber] = useState("");
+  const [receiptNumber, setReceiptNumber] = useState("");
+  const [paymentMode, setPaymentMode] = useState<"cash" | "bank_transfer">("cash");
+  const [accountId, setAccountId] = useState("");
+  const [paymentDate, setPaymentDate] = useState(localDate);
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [school, setSchool] = useState<School | null>(null);
   const [status, setStatus] = useState<StudentStatus>("active");
   const [bloodGroup, setBloodGroup] = useState("");
+  const [fatherName, setFatherName] = useState("");
+  const [motherName, setMotherName] = useState("");
+  const [parentPhone, setParentPhone] = useState("");
+  const [previousSchool, setPreviousSchool] = useState("");
+  const [nationality, setNationality] = useState("");
+  const [emergencyContact, setEmergencyContact] = useState("");
+  const [medicalInformation, setMedicalInformation] = useState("");
 
   const [academicYearId, setAcademicYearId] = useState("");
   const [academicYears, setAcademicYears] = useState<AcademicYear[]>([]);
@@ -103,136 +130,85 @@ export default function NewStudentPage() {
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [recoveryStudentId, setRecoveryStudentId] = useState<string | null>(null);
-  const [admissionPaymentRecorded, setAdmissionPaymentRecorded] = useState(false);
+  const [completed, setCompleted] = useState<CompletedAdmission | null>(null);
 
-  const getSchoolId = useCallback(async (
-    supabase: ReturnType<typeof createClient>,
-  ) => {
-    const {
-      data: { user },
-      error: userError,
-    } = await supabase.auth.getUser();
+  const loadFormData = useCallback(async () => {
+    try {
+      const supabase = createClient();
+      const schoolId = await getSchoolId(supabase);
 
-    if (userError) {
-      throw userError;
+      if (!schoolId) {
+        return;
+      }
+
+      const [yearsResult, classesResult, accountsResult, schoolResult] = await Promise.all([
+        supabase
+          .from("academic_years")
+          .select("id, name, start_date, end_date, is_current")
+          .eq("school_id", schoolId)
+          .order("start_date", { ascending: false }),
+
+        supabase
+          .from("classes")
+          .select("id, name, display_order")
+          .eq("school_id", schoolId)
+          .order("display_order", { ascending: true })
+          .order("name", { ascending: true }),
+        supabase
+          .from("accounts")
+          .select("id, name, code, account_type")
+          .eq("school_id", schoolId)
+          .eq("is_active", true)
+          .order("name"),
+        supabase
+          .from("schools")
+          .select("name, logo_url, address, city, state, postal_code")
+          .eq("id", schoolId)
+          .single(),
+      ]);
+
+      if (yearsResult.error) {
+        throw yearsResult.error;
+      }
+
+      if (classesResult.error) {
+        throw classesResult.error;
+      }
+      if (accountsResult.error) throw accountsResult.error;
+      if (schoolResult.error) throw schoolResult.error;
+
+      const years = (yearsResult.data || []) as AcademicYear[];
+      const loadedClasses = (classesResult.data || []) as SchoolClass[];
+
+      setAcademicYears(years);
+      setClasses(loadedClasses);
+      setAccounts((accountsResult.data || []) as Account[]);
+      setSchool(schoolResult.data as School);
+
+      const currentYear = years.find((year) => year.is_current);
+      if (currentYear) {
+        setAcademicYearId(currentYear.id);
+      } else if (years.length > 0) {
+        setAcademicYearId(years[0].id);
+      }
+    } catch (loadError) {
+      console.error("LOAD ADD STUDENT DATA ERROR:", loadError);
+      setError(
+        loadError instanceof Error
+          ? loadError.message
+          : "Unable to load academic years and classes.",
+      );
+    } finally {
+      setAcademicYearsLoading(false);
+      setClassesLoading(false);
     }
-
-    if (!user) {
-      router.replace("/login");
-      return null;
-    }
-
-    const { data: membership, error: membershipError } = await supabase
-      .from("school_users")
-      .select("school_id, role, is_active")
-      .eq("user_id", user.id)
-      .eq("is_active", true)
-      .limit(1)
-      .maybeSingle();
-
-    if (membershipError) {
-      throw membershipError;
-    }
-
-    if (!membership?.school_id) {
-      throw new Error("Your account is not assigned to a school.");
-    }
-
-    return membership.school_id as string;
-  }, [router]);
+  }, []);
 
   useEffect(() => {
-    let cancelled = false;
-
-    async function loadFormData() {
-      try {
-        const supabase = createClient();
-        const schoolId = await getSchoolId(supabase);
-
-        if (!schoolId || cancelled) {
-          return;
-        }
-
-        const [yearsResult, classesResult, accountsResult] = await Promise.all([
-          supabase
-            .from("academic_years")
-            .select("id, name, start_date, end_date, is_current")
-            .eq("school_id", schoolId)
-            .order("start_date", { ascending: false }),
-
-          supabase
-            .from("classes")
-            .select("id, name, display_order")
-            .eq("school_id", schoolId)
-            .order("display_order", { ascending: true })
-            .order("name", { ascending: true }),
-
-          supabase
-            .from("accounts")
-            .select("id, name, code, account_type")
-            .eq("school_id", schoolId)
-            .eq("is_active", true)
-            .order("name", { ascending: true }),
-        ]);
-
-        if (yearsResult.error) throw yearsResult.error;
-        if (classesResult.error) throw classesResult.error;
-        if (accountsResult.error) throw accountsResult.error;
-        if (cancelled) return;
-
-        const years = (yearsResult.data || []) as AcademicYear[];
-        const loadedClasses = (classesResult.data || []) as SchoolClass[];
-        const loadedAccounts = (accountsResult.data || []) as PaymentAccount[];
-        const cashAccounts = loadedAccounts.filter(
-          (account) => account.account_type.toLowerCase() === "cash",
-        );
-        const loadedBankAccounts = loadedAccounts.filter(
-          (account) => account.account_type.toLowerCase() === "bank",
-        );
-
-        setAcademicYears(years);
-        setClasses(loadedClasses);
-        setCashAccountId(
-          (
-            cashAccounts.find((account) =>
-              account.name.toLowerCase().includes("main cash"),
-            ) || cashAccounts[0]
-          )?.id || "",
-        );
-        setBankAccounts(loadedBankAccounts);
-        setBankAccountId(
-          loadedBankAccounts.length === 1 ? loadedBankAccounts[0].id : "",
-        );
-
-        const currentYear = years.find((year) => year.is_current);
-        if (currentYear) {
-          setAcademicYearId(currentYear.id);
-        } else if (years.length > 0) {
-          setAcademicYearId(years[0].id);
-        }
-      } catch (loadError) {
-        console.error("LOAD ADD STUDENT DATA ERROR:", loadError);
-        if (!cancelled) {
-          setError(
-            loadError instanceof Error
-              ? loadError.message
-              : "Unable to load academic years and classes.",
-          );
-        }
-      } finally {
-        if (!cancelled) {
-          setAcademicYearsLoading(false);
-          setClassesLoading(false);
-        }
-      }
-    }
-
+    // The state updates occur after the asynchronous school-data request.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadFormData();
-    return () => {
-      cancelled = true;
-    };
-  }, [getSchoolId]);
+  }, [loadFormData]);
 
   async function handleClassChange(value: string) {
     setClassId(value);
@@ -278,197 +254,11 @@ export default function NewStudentPage() {
     }
   }
 
-  async function getSelectedPaymentAccount(
-    supabase: ReturnType<typeof createClient>,
-    schoolId: string,
-  ) {
-    const expectedType =
-      admissionPaymentMethod === "cash" ? "cash" : "bank";
-    const accountId =
-      admissionPaymentMethod === "cash" ? cashAccountId : bankAccountId;
-
-    if (!accountId) {
-      throw new Error(`Select an active ${expectedType} account.`);
-    }
-
-    const { data: account, error: accountError } = await supabase
-      .from("accounts")
-      .select("id, name, account_type")
-      .eq("id", accountId)
-      .eq("school_id", schoolId)
-      .eq("is_active", true)
-      .maybeSingle();
-
-    if (accountError) throw accountError;
-    if (
-      !account ||
-      String(account.account_type || "").toLowerCase() !== expectedType
-    ) {
-      throw new Error(`The selected ${expectedType} account is unavailable.`);
-    }
-
-    return account;
-  }
-
-  async function collectAdmissionPayment(
-    supabase: ReturnType<typeof createClient>,
-    schoolId: string,
-    userId: string,
-    school: SchoolReceiptDetails,
-    account: { id: string; name: string },
-    student: {
-      id: string;
-      admission_no: string | null;
-      first_name: string;
-      middle_name: string | null;
-      last_name: string | null;
-    },
-    onPaymentRecorded: () => void,
-  ) {
-    const amount = Math.round(Number(admissionFee) * 100) / 100;
-    const paymentDate =
-      admissionDate || new Date().toISOString().slice(0, 10);
-    const billNumber =
-      "ADM-" +
-      paymentDate.replace(/-/g, "") +
-      "-" +
-      crypto.randomUUID().slice(0, 8).toUpperCase();
-
-    const { data: bill, error: billError } = await supabase
-      .from("fee_bills")
-      .insert({
-        school_id: schoolId,
-        student_id: student.id,
-        academic_year_id: academicYearId,
-        bill_number: billNumber,
-        bill_date: paymentDate,
-        due_date: null,
-        status: "unpaid",
-        subtotal: amount,
-        discount: 0,
-        late_fee: 0,
-        total_amount: amount,
-        paid_amount: 0,
-        balance_amount: amount,
-        notes: "Admission Fee",
-        created_by: userId,
-      })
-      .select("id, bill_number")
-      .single();
-
-    if (billError) {
-      throw new Error(`Admission fee bill could not be created: ${billError.message}`);
-    }
-
-    const { data: billItem, error: billItemError } = await supabase
-      .from("fee_bill_items")
-      .insert({
-        school_id: schoolId,
-        bill_id: bill.id,
-        fee_structure_id: null,
-        fee_category_id: null,
-        description: "Admission Fee",
-        fee_type: "one_time",
-        amount,
-        discount: 0,
-        net_amount: amount,
-      })
-      .select("id")
-      .single();
-
-    if (billItemError) {
-      const { error: rollbackError } = await supabase
-        .from("fee_bills")
-        .delete()
-        .eq("id", bill.id)
-        .eq("school_id", schoolId);
-
-      throw new Error(
-        rollbackError
-          ? `Admission fee line could not be saved: ${billItemError.message}. The bill cleanup also failed: ${rollbackError.message}`
-          : `Admission fee line could not be saved; the incomplete bill was removed: ${billItemError.message}`,
-      );
-    }
-
-    const { data: payment, error: paymentError } = await supabase.rpc(
-      "record_fee_payment_collection",
-      {
-        p_student_id: student.id,
-        p_bill_id: bill.id,
-        p_amount: amount,
-        p_payment_mode: admissionPaymentMethod,
-        p_account_id: account.id,
-        p_receipt_number: admissionReceiptNumber.trim(),
-        p_payment_date: paymentDate,
-        p_reference_number:
-          admissionPaymentMethod === "bank_transfer" ? utrNumber.trim() : null,
-        p_remarks: "Admission Fee",
-        p_allocations: [
-          {
-            fee_bill_item_id: billItem.id,
-            amount,
-          },
-        ],
-      },
-    );
-
-    if (paymentError) {
-      throw new Error(`Admission fee payment failed: ${paymentError.message}`);
-    }
-    if (!payment?.success || !payment.payment_id) {
-      throw new Error("Admission fee payment was not confirmed by the accounting system.");
-    }
-
-    onPaymentRecorded();
-
-    const logoDataUrl = await loadReceiptLogoDataUrl(school.logo_url);
-    generateAdmissionReceiptPDF({
-      schoolName: school.name || "School",
-      schoolLogoDataUrl: logoDataUrl,
-      schoolAddress: [school.address, school.city, school.state, school.postal_code]
-        .filter(Boolean)
-        .join(", "),
-      schoolPhone: school.phone,
-      schoolEmail: school.email,
-      receiptNumber: admissionReceiptNumber.trim(),
-      receiptDate: paymentDate,
-      billNumber: bill.bill_number,
-      studentName: [student.first_name, student.middle_name, student.last_name]
-        .filter(Boolean)
-        .join(" "),
-      admissionNumber: student.admission_no || "",
-      className: classes.find((item) => item.id === classId)?.name || null,
-      section: sections.find((item) => item.id === sectionId)?.name || null,
-      fatherName: fatherName.trim() || null,
-      motherName: motherName.trim() || null,
-      mobileNumber: parentPhone.trim() || null,
-      dateOfBirth: dateOfBirth || null,
-      gender: gender || null,
-      studentAddress: [
-        address.trim(),
-        city.trim(),
-        state.trim(),
-        postalCode.trim(),
-      ]
-        .filter(Boolean)
-        .join(", "),
-      amount,
-      paymentMode: admissionPaymentMethod,
-      paymentAccountName: account.name,
-      referenceNumber:
-        admissionPaymentMethod === "bank_transfer" ? utrNumber.trim() : null,
-    });
-  }
-
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
     setError("");
-
-    if (recoveryStudentId) {
-      setError("This student was already created. Do not submit the form again; open the student's Fees page below.");
-      return;
-    }
+    if (loading || completed) return;
 
     if (!admissionNo.trim()) {
       setError("Admission number is required.");
@@ -495,42 +285,29 @@ export default function NewStudentPage() {
       return;
     }
 
-    const rawAdmissionFee = admissionFee.trim() ? Number(admissionFee) : 0;
-    if (rawAdmissionFee > 0 && !hasFees) {
-      setError("This module is not included in your plan");
+    const admissionFeeAmount = Number(admissionFee || 0);
+    if (!Number.isFinite(admissionFeeAmount) || admissionFeeAmount < 0 ||
+        Math.abs(admissionFeeAmount * 100 - Math.round(admissionFeeAmount * 100)) > 0.000001) {
+      setError("Admission fee must be non-negative with at most two decimal places.");
       return;
     }
-    if (!Number.isFinite(rawAdmissionFee) || rawAdmissionFee < 0) {
-      setError("Admission fee must be zero or a valid positive amount.");
+
+    const account = accounts.find((item) => item.id === accountId);
+    const expectedAccountType = paymentMode === "cash" ? "cash" : "bank";
+    if (admissionFeeAmount > 0 && (
+      !billNumber.trim() || !receiptNumber.trim() || !paymentDate ||
+      billNumber.trim().length > 100 || receiptNumber.trim().length > 100 ||
+      !account || account.account_type.toLowerCase() !== expectedAccountType
+    )) {
+      setError("Enter a bill number, receipt number, payment date and matching cash or bank account.");
       return;
     }
-    const admissionFeeAmount = Math.round(rawAdmissionFee * 100) / 100;
-    if (rawAdmissionFee > 0 && admissionFeeAmount <= 0) {
-      setError("Admission fee must be at least 0.01.");
-      return;
-    }
-    if (admissionFeeAmount > 0 && !admissionReceiptNumber.trim()) {
-      setError("Enter the manual receipt number for the admission fee.");
-      return;
-    }
-    if (admissionFeeAmount > 0 && admissionPaymentMethod === "bank_transfer") {
-      if (!bankAccountId) {
-        setError("Select the bank account that received the admission fee.");
-        return;
-      }
-      if (!utrNumber.trim()) {
-        setError("Enter the UTR number for the bank payment.");
-        return;
-      }
-    }
-    if (admissionFeeAmount > 0 && admissionPaymentMethod === "cash" && !cashAccountId) {
-      setError("No active cash account is configured for this school.");
+    if (!school) {
+      setError("School details could not be loaded.");
       return;
     }
 
     setLoading(true);
-    let createdStudentId: string | null = null;
-    let paymentRecorded = false;
 
     try {
       const supabase = createClient();
@@ -540,30 +317,6 @@ export default function NewStudentPage() {
         return;
       }
 
-      const {
-        data: { user },
-        error: userError,
-      } = await supabase.auth.getUser();
-      if (userError) throw userError;
-      if (!user) throw new Error("You must be signed in to create a student.");
-
-      const [account, school] =
-        admissionFeeAmount > 0
-          ? await Promise.all([
-              getSelectedPaymentAccount(supabase, schoolId),
-              (async () => {
-                const { data, error: schoolError } = await supabase
-                  .from("schools")
-                  .select("name, logo_url, address, city, state, postal_code, phone, email")
-                  .eq("id", schoolId)
-                  .maybeSingle();
-                if (schoolError) throw schoolError;
-                if (!data) throw new Error("School details could not be loaded for the admission receipt.");
-                return data as SchoolReceiptDetails;
-              })(),
-            ])
-          : [null, null];
-
       const student = {
         school_id: schoolId,
         academic_year_id: academicYearId,
@@ -572,9 +325,6 @@ export default function NewStudentPage() {
         first_name: firstName.trim(),
         middle_name: middleName.trim() || null,
         last_name: lastName.trim() || null,
-        father_name: fatherName.trim() || null,
-        mother_name: motherName.trim() || null,
-        parent_phone: parentPhone.trim() || null,
         date_of_birth: dateOfBirth || null,
         gender: gender || null,
         class_id: classId,
@@ -587,74 +337,152 @@ export default function NewStudentPage() {
         state: state.trim() || null,
         postal_code: postalCode.trim() || null,
         notes: notes.trim() || null,
+        father_name: fatherName.trim() || null,
+        mother_name: motherName.trim() || null,
+        parent_phone: parentPhone.trim() || null,
+        previous_school: previousSchool.trim() || null,
+        nationality: nationality.trim() || null,
+        emergency_contact: emergencyContact.trim() || null,
+        medical_information: medicalInformation.trim() || null,
       };
 
-      const { data: createdStudent, error: insertError } = await supabase
-        .from("students")
-        .insert(student)
-        .select("id, admission_no, first_name, middle_name, last_name")
-        .single();
-
-      if (insertError) {
-        throw insertError;
-      }
-
-      if (!createdStudent?.id) {
-        throw new Error("Student was created but no student ID was returned.");
-      }
-
-      createdStudentId = createdStudent.id;
-      setRecoveryStudentId(createdStudent.id);
-
-      if (admissionFeeAmount > 0) {
-        if (!account || !school) {
-          throw new Error("Admission payment details could not be resolved.");
-        }
-        await collectAdmissionPayment(
-          supabase,
-          schoolId,
-          user.id,
-          school,
-          account,
-          createdStudent,
-          () => {
-            paymentRecorded = true;
-            setAdmissionPaymentRecorded(true);
-          },
-        );
-      }
-
-      router.replace(
-        admissionFeeAmount > 0
-          ? `/dashboard/students/${createdStudent.id}/fees`
-          : "/dashboard/students",
-      );
-      router.refresh();
-    } catch (createError) {
-      const errorDetails =
-        createError && typeof createError === "object"
-          ? (createError as { message?: string; details?: string; hint?: string; code?: string })
-          : {};
-      console.error("CREATE STUDENT ERROR:", {
-        message: errorDetails.message,
-        details: errorDetails.details,
-        hint: errorDetails.hint,
-        code: errorDetails.code,
+      const { data, error: createError } = await supabase.rpc("create_student_admission", {
+        p_student: student,
+        p_admission_fee: admissionFeeAmount,
+        p_bill_number: admissionFeeAmount > 0 ? billNumber.trim() : null,
+        p_receipt_number: admissionFeeAmount > 0 ? receiptNumber.trim() : null,
+        p_payment_mode: admissionFeeAmount > 0 ? paymentMode : null,
+        p_account_id: admissionFeeAmount > 0 ? accountId : null,
+        p_payment_date: admissionFeeAmount > 0 ? paymentDate : null,
       });
-      const message =
+      if (createError) throw new Error(createError.message);
+      if (typeof data?.student_id !== "string") {
+        throw new Error("Admission was saved, but no student ID was returned. Check the student list before retrying.");
+      }
+
+      const schoolAddress = [school.address, school.city, school.state, school.postal_code]
+        .filter(Boolean).join(", ");
+      const studentName = [firstName, middleName, lastName].map((part) => part.trim()).filter(Boolean).join(" ");
+      const className = classes.find((item) => item.id === classId)?.name || "";
+      const sectionName = sections.find((item) => item.id === sectionId)?.name || "";
+      const yearName = academicYears.find((item) => item.id === academicYearId)?.name || "";
+      const paymentFields = admissionFeeAmount > 0 ? [
+        { label: "Admission fee", value: `INR ${admissionFeeAmount.toFixed(2)}` },
+        { label: "Bill number", value: billNumber.trim() },
+        { label: "Receipt number", value: receiptNumber.trim() },
+        { label: "Payment date", value: paymentDate },
+        { label: "Paid into", value: `${paymentMode === "cash" ? "Cash" : "Bank"} - ${account?.name || ""}` },
+      ] : [{ label: "Admission fee", value: "No fee collected" }];
+      const document: AdmissionPdfData = {
+        schoolName: school.name,
+        schoolAddress,
+        sections: [
+          { title: "Student information", fields: [
+            { label: "Admission number", value: admissionNo.trim() },
+            { label: "Roll number", value: rollNo.trim() },
+            { label: "Student name", value: studentName },
+            { label: "Date of birth", value: dateOfBirth },
+            { label: "Gender", value: gender },
+            { label: "Admission date", value: admissionDate },
+            { label: "Status", value: status },
+            { label: "Blood group", value: bloodGroup },
+            { label: "Nationality", value: nationality },
+            { label: "Previous school", value: previousSchool },
+          ] },
+          { title: "Academic placement", fields: [
+            { label: "Academic year", value: yearName },
+            { label: "Class", value: className },
+            { label: "Section", value: sectionName },
+          ] },
+          { title: "Family and contact", fields: [
+            { label: "Father's name", value: fatherName },
+            { label: "Mother's name", value: motherName },
+            { label: "Parent phone", value: parentPhone },
+            { label: "Emergency contact", value: emergencyContact },
+            { label: "Address", value: address },
+            { label: "City", value: city },
+            { label: "State", value: state },
+            { label: "Postal code", value: postalCode },
+          ] },
+          { title: "Additional information", fields: [
+            { label: "Medical information", value: medicalInformation },
+            { label: "Notes", value: notes },
+          ] },
+          { title: "Admission fee", fields: paymentFields },
+        ],
+      };
+      setCompleted({
+        studentId: data.student_id,
+        admissionNo: admissionNo.trim(),
+        school,
+        document,
+        receipt: admissionFeeAmount > 0 ? {
+          schoolName: school.name,
+          schoolAddress,
+          title: "ADMISSION FEE RECEIPT",
+          sections: [
+            { title: "Student", fields: [
+              { label: "Student name", value: studentName },
+              { label: "Admission number", value: admissionNo.trim() },
+              { label: "Class / section", value: [className, sectionName].filter(Boolean).join(" / ") },
+              { label: "Academic year", value: yearName },
+            ] },
+            { title: "Payment received", fields: paymentFields },
+          ],
+        } : null,
+      });
+    } catch (createError) {
+      console.error("CREATE STUDENT ERROR:", createError);
+      setError(
         createError instanceof Error
           ? createError.message
-          : errorDetails.message || "Unable to create student.";
-      setError(
-        createdStudentId
-          ? paymentRecorded
-            ? `Student and admission payment were saved, but the receipt PDF could not be downloaded: ${message}`
-            : `Student was created, but admission payment was not completed: ${message}`
-          : message,
+          : "Unable to create student.",
       );
     } finally {
       setLoading(false);
     }
+  }
+
+  async function downloadPdf(data: AdmissionPdfData, filename: string) {
+    if (!completed) return;
+    try {
+      setError("");
+      const logo = await loadReceiptLogoDataUrl(completed.school.logo_url);
+      if (completed.school.logo_url && !logo) {
+        throw new Error("The school logo could not be loaded. Please try again.");
+      }
+      createAdmissionPdf({ ...data, schoolLogoDataUrl: logo }).save(filename);
+    } catch (pdfError) {
+      console.error("ADMISSION PDF ERROR:", pdfError);
+      setError(pdfError instanceof Error ? pdfError.message : "Unable to download the PDF.");
+    }
+  }
+
+  if (completed) {
+    const safeNumber = completed.admissionNo.replace(/[^a-zA-Z0-9-_]/g, "-");
+    return (
+      <div className="mx-auto max-w-3xl p-6">
+        <div className="rounded-2xl border border-green-200 bg-white p-6 shadow-sm">
+          <h1 className="text-2xl font-bold text-slate-900">Student admitted</h1>
+          <p className="mt-2 text-sm text-slate-600">
+            The student{completed.receipt ? ", admission bill and payment have" : " has"} been saved.
+          </p>
+          {error && <p role="alert" className="mt-4 text-sm text-red-700">{error}</p>}
+          <div className="mt-6 flex flex-wrap gap-3">
+            <button type="button" className="rounded-xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white" onClick={() => void downloadPdf(completed.document, `Admission-${safeNumber}.pdf`)}>
+              Download admission form
+            </button>
+            {completed.receipt && (
+              <button type="button" className="rounded-xl bg-emerald-700 px-4 py-3 text-sm font-semibold text-white" onClick={() => void downloadPdf(completed.receipt!, `Admission-Receipt-${safeNumber}.pdf`)}>
+                Download fee receipt
+              </button>
+            )}
+            <Link href={`/dashboard/students/${completed.studentId}/fees`} className="rounded-xl border border-slate-300 px-4 py-3 text-sm font-semibold text-slate-700">View student fees</Link>
+            <Link href="/dashboard/students" className="rounded-xl border border-slate-300 px-4 py-3 text-sm font-semibold text-slate-700">Students</Link>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -680,16 +508,6 @@ export default function NewStudentPage() {
         {error && (
           <div className="mb-6 rounded-2xl border border-red-200 bg-red-50 p-4">
             <p className="text-sm font-semibold text-red-800">{error}</p>
-            {recoveryStudentId && (
-              <Link
-                href={`/dashboard/students/${recoveryStudentId}/fees`}
-                className="mt-3 inline-block text-sm font-bold text-red-800 underline"
-              >
-                {admissionPaymentRecorded
-                  ? "Open fees to download the receipt"
-                  : "Open this student's fees — do not submit again"}
-              </Link>
-            )}
           </div>
         )}
 
@@ -747,36 +565,6 @@ export default function NewStudentPage() {
                 />
               </Field>
 
-              <Field label="Father&apos;s Name">
-                <input
-                  value={fatherName}
-                  onChange={(event) => setFatherName(event.target.value)}
-                  placeholder="Optional"
-                  autoComplete="family-name"
-                  className={inputClass}
-                />
-              </Field>
-
-              <Field label="Mother&apos;s Name">
-                <input
-                  value={motherName}
-                  onChange={(event) => setMotherName(event.target.value)}
-                  placeholder="Optional"
-                  className={inputClass}
-                />
-              </Field>
-
-              <Field label="Parent / Guardian Mobile Number">
-                <input
-                  type="tel"
-                  value={parentPhone}
-                  onChange={(event) => setParentPhone(event.target.value)}
-                  placeholder="9876543210"
-                  autoComplete="tel"
-                  className={inputClass}
-                />
-              </Field>
-
               <Field label="Gender">
                 <select
                   value={gender}
@@ -810,6 +598,21 @@ export default function NewStudentPage() {
                 />
               </Field>
 
+              <Field label="Admission Fee">
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={admissionFee}
+                  onChange={(event) => setAdmissionFee(event.target.value)}
+                  placeholder="0.00"
+                  className={inputClass}
+                />
+                <p className="mt-1 text-xs text-slate-500">
+                  Leave blank or enter 0 if no admission fee is due.
+                </p>
+              </Field>
+
               <Field label="Status">
                 <select
                   value={status}
@@ -834,100 +637,52 @@ export default function NewStudentPage() {
                   className={inputClass}
                 />
               </Field>
+
+              <Field label="Nationality">
+                <input value={nationality} onChange={(event) => setNationality(event.target.value)} className={inputClass} />
+              </Field>
+
+              <Field label="Previous School">
+                <input value={previousSchool} onChange={(event) => setPreviousSchool(event.target.value)} className={inputClass} />
+              </Field>
             </div>
           </section>
 
-          {hasFees && <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-            <h2 className="text-lg font-bold text-slate-900">
-              Admission Fee Payment
-            </h2>
-            <p className="mt-1 text-sm text-slate-500">
-              Optional. A successful payment creates a fee bill and downloads a school-branded A4 receipt.
-            </p>
-
-            <div className="mt-5 grid gap-5 md:grid-cols-2">
-              <Field label="Admission Fee Paid Now">
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  value={admissionFee}
-                  onChange={(event) => setAdmissionFee(event.target.value)}
-                  placeholder="0.00"
-                  disabled={loading || Boolean(recoveryStudentId)}
-                  className={inputClass}
-                />
-              </Field>
-
-              <Field
-                label="Manual Receipt Number"
-                required={Number(admissionFee || 0) > 0}
-              >
-                <input
-                  value={admissionReceiptNumber}
-                  onChange={(event) => setAdmissionReceiptNumber(event.target.value)}
-                  required={Number(admissionFee || 0) > 0}
-                  disabled={loading || Number(admissionFee || 0) <= 0 || Boolean(recoveryStudentId)}
-                  placeholder="ADM-REC-001"
-                  className={inputClass}
-                />
-              </Field>
-
-              <Field label="Payment Method">
-                <select
-                  value={admissionPaymentMethod}
-                  onChange={(event) => {
-                    setAdmissionPaymentMethod(event.target.value);
-                    if (event.target.value === "cash") setUtrNumber("");
-                  }}
-                  disabled={loading || Number(admissionFee || 0) <= 0 || Boolean(recoveryStudentId)}
-                  className={inputClass}
-                >
-                  <option value="cash">Cash</option>
-                  <option value="bank_transfer">Bank</option>
-                </select>
-              </Field>
-
-              {admissionPaymentMethod === "bank_transfer" && (
-                <>
-                  <Field label="Bank Account" required>
-                    <select
-                      value={bankAccountId}
-                      onChange={(event) => setBankAccountId(event.target.value)}
-                      required={Number(admissionFee || 0) > 0}
-                      disabled={loading || Number(admissionFee || 0) <= 0 || Boolean(recoveryStudentId)}
-                      className={inputClass}
-                    >
-                      <option value="">Select the receiving bank account</option>
-                      {bankAccounts.map((account) => (
-                        <option key={account.id} value={account.id}>
-                          {account.name}
-                          {account.code ? ` (${account.code})` : ""}
-                        </option>
-                      ))}
-                    </select>
-                    {bankAccounts.length === 0 && (
-                      <p className="mt-1 text-xs text-amber-700">
-                        Add an active bank account in Accounting before recording a bank payment.
-                      </p>
-                    )}
-                  </Field>
-
-                  <Field label="UTR Number" required>
-                    <input
-                      type="text"
-                      value={utrNumber}
-                      onChange={(event) => setUtrNumber(event.target.value)}
-                      required={Number(admissionFee || 0) > 0}
-                      disabled={loading || Number(admissionFee || 0) <= 0 || Boolean(recoveryStudentId)}
-                      placeholder="Enter bank transfer UTR"
-                      className={inputClass}
-                    />
-                  </Field>
-                </>
-              )}
-            </div>
-          </section>}
+          {Number(admissionFee) > 0 && (
+            <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+              <h2 className="text-lg font-bold text-slate-900">Admission Fee Collection</h2>
+              <p className="mt-1 text-sm text-slate-500">The full admission fee will be collected when the student is saved.</p>
+              <div className="mt-5 grid gap-5 md:grid-cols-2">
+                <Field label="Manual Bill Number" required>
+                  <input value={billNumber} onChange={(event) => setBillNumber(event.target.value)} maxLength={100} required className={inputClass} />
+                </Field>
+                <Field label="Manual Receipt Number" required>
+                  <input value={receiptNumber} onChange={(event) => setReceiptNumber(event.target.value)} maxLength={100} required className={inputClass} />
+                </Field>
+                <Field label="Payment Date" required>
+                  <input type="date" value={paymentDate} onChange={(event) => setPaymentDate(event.target.value)} required className={inputClass} />
+                </Field>
+                <Field label="Payment Type" required>
+                  <select value={paymentMode} onChange={(event) => {
+                    setPaymentMode(event.target.value as "cash" | "bank_transfer");
+                    setAccountId("");
+                  }} className={inputClass}>
+                    <option value="cash">Cash</option>
+                    <option value="bank_transfer">Bank</option>
+                  </select>
+                </Field>
+                <Field label={paymentMode === "cash" ? "Cash Account" : "Bank Account"} required>
+                  <select value={accountId} onChange={(event) => setAccountId(event.target.value)} required className={inputClass}>
+                    <option value="">Select an account</option>
+                    {accounts.filter((account) => account.account_type.toLowerCase() === (paymentMode === "cash" ? "cash" : "bank")).map((account) => (
+                      <option key={account.id} value={account.id}>{account.name} ({account.code})</option>
+                    ))}
+                  </select>
+                  <p className="mt-1 text-xs text-slate-500">Accounts are taken from your school&apos;s chart of accounts.</p>
+                </Field>
+              </div>
+            </section>
+          )}
 
           <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
             <h2 className="text-lg font-bold text-slate-900">
@@ -1013,6 +768,29 @@ export default function NewStudentPage() {
           </section>
 
           <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+            <h2 className="text-lg font-bold text-slate-900">Family and Emergency Details</h2>
+            <div className="mt-5 grid gap-5 md:grid-cols-2">
+              <Field label="Father's Name">
+                <input value={fatherName} onChange={(event) => setFatherName(event.target.value)} className={inputClass} />
+              </Field>
+              <Field label="Mother's Name">
+                <input value={motherName} onChange={(event) => setMotherName(event.target.value)} className={inputClass} />
+              </Field>
+              <Field label="Parent / Guardian Phone">
+                <input type="tel" value={parentPhone} onChange={(event) => setParentPhone(event.target.value)} className={inputClass} />
+              </Field>
+              <Field label="Emergency Contact">
+                <input value={emergencyContact} onChange={(event) => setEmergencyContact(event.target.value)} placeholder="Name and phone" className={inputClass} />
+              </Field>
+              <div className="md:col-span-2">
+                <Field label="Medical Information">
+                  <textarea value={medicalInformation} onChange={(event) => setMedicalInformation(event.target.value)} rows={3} className={inputClass} />
+                </Field>
+              </div>
+            </div>
+          </section>
+
+          <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
             <h2 className="text-lg font-bold text-slate-900">Address</h2>
 
             <div className="mt-5 grid gap-5 md:grid-cols-2">
@@ -1081,14 +859,10 @@ export default function NewStudentPage() {
 
             <button
               type="submit"
-              disabled={loading || Boolean(recoveryStudentId)}
+              disabled={loading}
               className="rounded-xl bg-blue-600 px-6 py-3 text-sm font-semibold text-white shadow-sm hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-400"
             >
-              {loading
-                ? "Saving..."
-                : recoveryStudentId
-                  ? "Student Created"
-                  : "Save Student"}
+              {loading ? "Saving..." : "Save Student"}
             </button>
           </div>
         </form>

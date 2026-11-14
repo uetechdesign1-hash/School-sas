@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { getCurrentSchoolId } from "@/lib/supabase/current-school";
 import { inBatches } from "@/lib/supabase/in-batches";
+import { useAccountingAcademicYear, useAcademicYearRange } from "@/components/accounting/academic-year-provider";
 
 const supabase = createClient();
 
@@ -79,27 +80,18 @@ year: "numeric",
 });
 }
 
-function getToday() {
-return new Date().toISOString().split("T")[0];
-}
-
-function getMonthStart() {
-const d = new Date();
-
-d.setDate(1);
-
-return d.toISOString().split("T")[0];
-}
-
 export default function CashBankClient() {
 const [book, setBook] = useState<BookType>("cash");
 
 const [accountOptions, setAccountOptions] = useState<AccountOption[]>([]);
 const [selectedAccountId, setSelectedAccountId] = useState("");
 
-const [fromDate, setFromDate] = useState(getMonthStart());
+const [fromDate, setFromDate] = useState("");
 
-const [toDate, setToDate] = useState(getToday());
+const [toDate, setToDate] = useState("");
+const { loading: academicYearLoading, error: academicYearError } = useAccountingAcademicYear();
+const academicYear = useAcademicYearRange(setFromDate, setToDate);
+const requestVersion = useRef(0);
 
 const [search, setSearch] = useState("");
 
@@ -112,9 +104,32 @@ const [loading, setLoading] = useState(true);
 const [error, setError] = useState("");
 
 async function loadBook() {
+const request = ++requestVersion.current;
 try {
 setLoading(true);
 setError("");
+
+if (academicYearLoading) return;
+if (!academicYear) {
+  setError(academicYearError
+    ? `Unable to load academic years: ${academicYearError}`
+    : "No academic year is available for this school. Configure an academic year to view the books.");
+  setRows([]);
+  setSummary(null);
+  return;
+}
+if (!fromDate || !toDate || fromDate < academicYear.start_date || toDate > academicYear.end_date) {
+  setError("Select dates within the selected academic year.");
+  setRows([]);
+  setSummary(null);
+  return;
+}
+if (fromDate > toDate) {
+  setError("From Date cannot be later than To Date.");
+  setRows([]);
+  setSummary(null);
+  return;
+}
 
 const schoolId = await getCurrentSchoolId();
 
@@ -127,6 +142,7 @@ const schoolId = await getCurrentSchoolId();
       .order("name", { ascending: true });
 
     if (accountError) throw accountError;
+    if (request !== requestVersion.current) return;
 
     const loadedAccounts = (accountData || []) as AccountOption[];
     setAccountOptions(loadedAccounts);
@@ -137,20 +153,6 @@ const schoolId = await getCurrentSchoolId();
     ) {
       setSelectedAccountId("");
     }
-
-  if (!fromDate || !toDate) {
-    setError("Please select both From Date and To Date.");
-    setRows([]);
-    setSummary(null);
-    return;
-  }
-
-  if (fromDate > toDate) {
-    setError("From Date cannot be later than To Date.");
-    setRows([]);
-    setSummary(null);
-    return;
-  }
 
   const view = book === "cash" ? "cash_book" : "bank_book";
 
@@ -360,8 +362,6 @@ const schoolId = await getCurrentSchoolId();
       });
     }
 
-    setRows(loadedRows);
-
   const rawSummary = Array.isArray(summaryResult)
     ? summaryResult[0]
     : summaryResult;
@@ -421,6 +421,8 @@ const schoolId = await getCurrentSchoolId();
         (book === "cash" ? cashIn : bankIn) -
         (book === "cash" ? cashOut : bankOut);
 
+  if (request !== requestVersion.current) return;
+  setRows(loadedRows);
   setSummary({
     opening_balance: openingBalance,
     cash_in: cashIn,
@@ -430,6 +432,7 @@ const schoolId = await getCurrentSchoolId();
     closing_balance: closingBalance,
   });
 } catch (err: any) {
+  if (request !== requestVersion.current) return;
   console.error("Cash/Bank Book Error:", err);
 
   setError(
@@ -440,7 +443,7 @@ const schoolId = await getCurrentSchoolId();
   setRows([]);
   setSummary(null);
 } finally {
-  setLoading(false);
+  if (request === requestVersion.current) setLoading(false);
 }
 }
 
@@ -460,8 +463,9 @@ if (requestedBook === "cash" || requestedBook === "bank") {
 }, []);
 
 useEffect(() => {
-loadBook();
-}, [book, fromDate, toDate, selectedAccountId]);
+void loadBook();
+return () => { requestVersion.current += 1; };
+}, [book, fromDate, toDate, selectedAccountId, academicYear?.id, academicYear?.start_date, academicYear?.end_date, academicYearLoading, academicYearError]);
 
 const filteredRows = useMemo(() => {
 const q = search.trim().toLowerCase();
@@ -732,6 +736,9 @@ return ( <main className="min-h-screen bg-slate-50">
           <input
             type="date"
             value={fromDate}
+            min={academicYear?.start_date}
+            max={academicYear?.end_date}
+            disabled={!academicYear || academicYearLoading}
             onChange={(e) =>
               setFromDate(e.target.value)
             }
@@ -749,6 +756,9 @@ return ( <main className="min-h-screen bg-slate-50">
           <input
             type="date"
             value={toDate}
+            min={academicYear?.start_date}
+            max={academicYear?.end_date}
+            disabled={!academicYear || academicYearLoading}
             onChange={(e) =>
               setToDate(e.target.value)
             }

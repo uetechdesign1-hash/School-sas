@@ -1,7 +1,7 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import { FormEvent, Suspense, useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   Eye,
   EyeOff,
@@ -31,6 +31,7 @@ export default function LoginPage() {
 
   const [error, setError] = useState("");
   const [platformLogo, setPlatformLogo] = useState<string | null>(null);
+  const [reasonDismissed, setReasonDismissed] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -46,6 +47,7 @@ export default function LoginPage() {
     event.preventDefault();
 
     setError("");
+    setReasonDismissed(true);
     setLoading(true);
 
     try {
@@ -402,6 +404,11 @@ export default function LoginPage() {
 
               {/* ERROR */}
 
+              {!reasonDismissed && !error && (
+                <Suspense fallback={null}>
+                  <AccessMessage />
+                </Suspense>
+              )}
               {error && (
                 <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm leading-5 text-red-700">
                   {error}
@@ -417,6 +424,7 @@ export default function LoginPage() {
                   !email.trim() ||
                   !password
                 }
+
                 className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 px-4 py-3.5 text-sm font-bold text-white shadow-lg shadow-indigo-500/40 transition hover:from-blue-700 hover:via-indigo-700 hover:to-purple-700 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {loading ? (
@@ -465,5 +473,22 @@ export default function LoginPage() {
         </div>
       </div>
     </main>
+  );
+}
+
+function AccessMessage() {
+  const reason = useSearchParams().get("reason");
+  const message = reason === "no-school"
+    ? "Your account is not assigned to an active school. Contact your school administrator."
+    : reason === "access-check-failed"
+      ? "Unable to verify your school access. Please try again."
+      : "";
+
+  if (!message) return null;
+
+  return (
+    <div role="alert" className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+      {message}
+    </div>
   );
 }

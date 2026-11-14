@@ -1,9 +1,5 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
-import {
-  getAnonymousRedirectPath,
-  getAuthenticatedLoginRedirectPath,
-} from "@/lib/auth/proxy-access";
 
 export async function proxy(request: NextRequest) {
   let response = NextResponse.next({
@@ -45,23 +41,17 @@ export async function proxy(request: NextRequest) {
   /*
    * Protect school dashboard
    */
-  const anonymousRedirectPath = getAnonymousRedirectPath(
-    pathname,
-    Boolean(user),
-  );
-
-  if (anonymousRedirectPath) {
+  if (pathname.startsWith("/dashboard") && !user) {
     const loginUrl = request.nextUrl.clone();
 
-    loginUrl.pathname = anonymousRedirectPath;
+    loginUrl.pathname = "/login";
     loginUrl.search = "";
 
     return NextResponse.redirect(loginUrl);
   }
 
   /*
-   * If already logged in and opening login/signup,
-   * send user to the normal school dashboard.
+   * Only send signed-in users to the dashboard if they have a school.
    */
   if (
     (pathname === "/login" || pathname === "/signup") &&
@@ -73,13 +63,27 @@ export async function proxy(request: NextRequest) {
       .eq("user_id", user.id)
       .eq("is_active", true);
 
-    const redirectPath = getAuthenticatedLoginRedirectPath(
-      memberships?.map(({ role }) => role) || null,
-      Boolean(membershipError),
+    if (membershipError) {
+      console.error("MEMBERSHIP LOOKUP ERROR:", membershipError);
+      return new NextResponse("Unable to verify school access.", { status: 503 });
+    }
+
+    if (!memberships?.length) {
+      return response;
+    }
+
+    const hasStaffMembership = memberships.some(
+      ({ role }) =>
+        ["staff", "teacher", "employee"].includes(
+          String(role || "").trim().toLowerCase()
+        )
     );
+
     const dashboardUrl = request.nextUrl.clone();
 
-    dashboardUrl.pathname = redirectPath;
+    dashboardUrl.pathname = hasStaffMembership
+      ? "/dashboard/staff/home"
+      : "/dashboard";
     dashboardUrl.search = "";
 
     return NextResponse.redirect(dashboardUrl);
@@ -91,7 +95,6 @@ export async function proxy(request: NextRequest) {
 export const config = {
   matcher: [
     "/dashboard/:path*",
-    "/accounting/:path*",
     "/login",
     "/signup",
     "/onboarding/:path*",

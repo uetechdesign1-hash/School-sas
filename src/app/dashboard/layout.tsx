@@ -30,8 +30,6 @@ import {
 } from "lucide-react";
 
 import { createClient } from "@/lib/supabase/client";
-import { ModuleGuard, SchoolProvider, useSchoolContext } from "@/lib/school-context";
-import { moduleForRoute } from "@/lib/school-context/module-routes";
 
 type Props = {
   children: ReactNode;
@@ -102,16 +100,6 @@ const PRINCIPAL_MENU: MenuItem[] = [
     name: "Staff",
     href: "/dashboard/staff",
     icon: <Users size={18} />,
-  },
-  {
-    name: "Payroll",
-    href: "/dashboard/payroll",
-    icon: <WalletCards size={18} />,
-  },
-  {
-    name: "Transport",
-    href: "/dashboard/transport",
-    icon: <School size={18} />,
   },
   {
     name: "Reports",
@@ -204,11 +192,6 @@ const SCHOOL_ADMIN_MENU: MenuItem[] = [
     icon: <CalendarRange size={18} />,
   },
   {
-    name: "Transport",
-    href: "/dashboard/transport",
-    icon: <School size={18} />,
-  },
-  {
     name: "School Profile",
     href: "/dashboard/school-settings",
     icon: <School size={18} />,
@@ -250,7 +233,6 @@ function isSchoolAdminRouteAllowed(pathname: string) {
   return (
     pathname === "/dashboard" ||
     pathname === "/dashboard/students" ||
-    pathname === "/dashboard/transport" ||
     pathname === "/accounting/collect-fee" ||
     pathname === "/accounting/receipt" ||
     pathname === "/accounting/payment" ||
@@ -267,13 +249,8 @@ function isSchoolAdminRouteAllowed(pathname: string) {
 export default function DashboardLayout({
   children,
 }: Props) {
-  return <SchoolProvider><DashboardLayoutContent>{children}</DashboardLayoutContent></SchoolProvider>;
-}
-
-function DashboardLayoutContent({ children }: Props) {
   const router = useRouter();
   const pathname = usePathname();
-  const { modules } = useSchoolContext();
 
   const supabase = useMemo(
     () => createClient(),
@@ -329,19 +306,6 @@ function DashboardLayoutContent({ children }: Props) {
           return;
         }
 
-        const { data: profile, error: profileError } = await supabase
-          .from("user_profiles")
-          .select("platform_role")
-          .eq("id", user.id)
-          .maybeSingle();
-
-        if (profileError) {
-          console.error("PLATFORM ROLE ERROR:", profileError);
-        } else if (profile?.platform_role === "super_admin") {
-          router.replace("/super-admin");
-          return;
-        }
-
         /* -----------------------------------------------
            ACTIVE SCHOOL MEMBERSHIP
            ----------------------------------------------- */
@@ -378,11 +342,23 @@ function DashboardLayoutContent({ children }: Props) {
         }
 
         if (!memberships?.length) {
-          console.error(
-            "NO ACTIVE SCHOOL MEMBERSHIP"
-          );
+          const { data: profile, error: profileError } = await supabase
+            .from("user_profiles")
+            .select("platform_role, is_active")
+            .eq("id", user.id)
+            .maybeSingle();
 
-          router.replace("/login");
+          if (profileError) {
+            console.error("PROFILE LOOKUP ERROR:", profileError);
+            router.replace("/login?reason=access-check-failed");
+            return;
+          }
+
+          router.replace(
+            profile?.platform_role === "super_admin" && profile.is_active === true
+              ? "/super-admin"
+              : "/login?reason=no-school",
+          );
           return;
         }
 
@@ -725,18 +701,12 @@ function DashboardLayoutContent({ children }: Props) {
   const isStaff =
     role === "staff";
 
-  const menu = (
+  const menu =
     isStaff
       ? STAFF_MENU
       : role === "admin"
         ? SCHOOL_ADMIN_MENU
-        : PRINCIPAL_MENU
-  ).filter((item) => {
-    if (item.name === "Dashboard") return true;
-    const path = item.href.split("?")[0];
-    const required = path.startsWith("/accounting/") ? "fees" : moduleForRoute(path);
-    return !required || modules.includes(required);
-  });
+        : PRINCIPAL_MENU;
   /* =======================================================
      RENDER
      ======================================================= */
@@ -760,7 +730,7 @@ function DashboardLayoutContent({ children }: Props) {
               <img
                 src={schoolLogo}
                 alt={`${schoolName} logo`}
-                className="h-10 w-10 rounded-2xl border border-slate-200 bg-white p-1 object-contain"
+                className="h-10 w-10 rounded-2xl border border-slate-200 bg-white object-contain p-1"
               />
             ) : (
               <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-500 via-indigo-500 to-purple-500 text-lg font-bold text-white shadow-lg shadow-indigo-500/40">
@@ -964,7 +934,7 @@ function DashboardLayoutContent({ children }: Props) {
             ================================================= */}
 
         <main className="min-w-0 flex-1 pb-20 md:pb-0">
-          <ModuleGuard>{children}</ModuleGuard>
+          {children}
         </main>
 
       </div>
