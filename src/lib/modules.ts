@@ -14,8 +14,17 @@ export const SCHOOL_MODULES = [
 ] as const;
 
 export type SchoolModule = (typeof SCHOOL_MODULES)[number]["code"];
+export type ModuleCode = SchoolModule;
+
+export const MODULES: readonly { code: SchoolModule; label: string; description: string }[] = SCHOOL_MODULES;
 
 export const DEFAULT_ENABLED_MODULES: SchoolModule[] = ["fees", "payroll"];
+
+export function validateModules(value: unknown): SchoolModule[] {
+  const result = parseEnabledModules(value);
+  if (!result) throw new TypeError("Invalid modules");
+  return result;
+}
 
 const MODULE_CODES = new Set<string>(
   SCHOOL_MODULES.map((module) => module.code),

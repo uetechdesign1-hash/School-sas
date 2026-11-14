@@ -25,8 +25,6 @@ export function moduleForRoute(pathname: string): ModuleCode | null {
     /^\/dashboard\/staff\/(?:home|attendance|my-attendance|my-salary|my-payslips|reports|settings)(?:\/|$)/.test(pathname) ||
     /^\/dashboard\/staff\/[^/]+\/(?:attendance|salary|payslip)(?:\/|$)/.test(pathname)
   ) return "payroll";
-
-  if (isWithin(pathname, "/dashboard/transport")) return "transport";
   return null;
 }
 

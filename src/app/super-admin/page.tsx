@@ -82,13 +82,11 @@ const emptyForm: FormData = {
 const MODULE_COLORS: Record<ModuleCode, string> = {
   fees: "bg-blue-100 text-blue-700",
   payroll: "bg-emerald-100 text-emerald-700",
-  transport: "bg-amber-100 text-amber-700",
 };
 
 const MODULE_DESCRIPTIONS: Record<ModuleCode, string> = {
   fees: "Manage student fees and payments.",
   payroll: "Manage staff attendance and payroll.",
-  transport: "Track school buses live when available.",
 };
 
 export default function SuperAdminPage() {
@@ -2249,11 +2247,6 @@ function ModuleSelector({
           />
           <span>
             <span className="text-sm font-semibold text-slate-800">{module.label}</span>
-            {module.code === "transport" && (
-              <span className="ml-2 rounded-full bg-amber-100 px-2 py-1 text-xs font-semibold text-amber-700">
-                Coming soon
-              </span>
-            )}
             <span className="mt-1 block text-xs text-slate-500">
               {MODULE_DESCRIPTIONS[module.code]}
             </span>

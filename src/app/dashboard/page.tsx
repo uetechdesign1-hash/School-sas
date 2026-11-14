@@ -68,7 +68,6 @@ type QuickActionProps = {
 const MODULE_NAMES: Record<ModuleCode, string> = {
   fees: "Fees",
   payroll: "Payroll",
-  transport: "Transport",
 };
 
 /*
