@@ -1,9 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { FormEvent, useCallback, useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { loadReceiptLogoDataUrl } from "@/lib/fees/generateReceipt";
+import { createAdmissionPdf, type AdmissionPdfData } from "@/lib/students/admission-pdf";
 
 type Gender = "male" | "female" | "other";
 
@@ -34,9 +35,55 @@ type AcademicYear = {
   is_current: boolean;
 };
 
-export default function NewStudentPage() {
-  const router = useRouter();
+type Account = {
+  id: string;
+  name: string;
+  code: string;
+  account_type: string;
+};
 
+type School = {
+  name: string;
+  logo_url: string | null;
+  address: string | null;
+  city: string | null;
+  state: string | null;
+  postal_code: string | null;
+};
+
+type CompletedAdmission = {
+  studentId: string;
+  admissionNo: string;
+  school: School;
+  document: AdmissionPdfData;
+  receipt: AdmissionPdfData | null;
+};
+
+function localDate() {
+  const date = new Date();
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+async function getSchoolId(supabase: ReturnType<typeof createClient>) {
+  const { data: { user }, error: userError } = await supabase.auth.getUser();
+  if (userError) throw userError;
+  if (!user) {
+    window.location.href = "/login";
+    return null;
+  }
+  const { data: membership, error: membershipError } = await supabase
+    .from("school_users")
+    .select("school_id, role, is_active")
+    .eq("user_id", user.id)
+    .eq("is_active", true)
+    .limit(1)
+    .maybeSingle();
+  if (membershipError) throw membershipError;
+  if (!membership?.school_id) throw new Error("Your account is not assigned to a school.");
+  return membership.school_id as string;
+}
+
+export default function NewStudentPage() {
   const [admissionNo, setAdmissionNo] = useState("");
   const [rollNo, setRollNo] = useState("");
   const [firstName, setFirstName] = useState("");
@@ -46,8 +93,22 @@ export default function NewStudentPage() {
   const [gender, setGender] = useState<Gender | "">("");
   const [admissionDate, setAdmissionDate] = useState("");
   const [admissionFee, setAdmissionFee] = useState("");
+  const [billNumber, setBillNumber] = useState("");
+  const [receiptNumber, setReceiptNumber] = useState("");
+  const [paymentMode, setPaymentMode] = useState<"cash" | "bank_transfer">("cash");
+  const [accountId, setAccountId] = useState("");
+  const [paymentDate, setPaymentDate] = useState(localDate);
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [school, setSchool] = useState<School | null>(null);
   const [status, setStatus] = useState<StudentStatus>("active");
   const [bloodGroup, setBloodGroup] = useState("");
+  const [fatherName, setFatherName] = useState("");
+  const [motherName, setMotherName] = useState("");
+  const [parentPhone, setParentPhone] = useState("");
+  const [previousSchool, setPreviousSchool] = useState("");
+  const [nationality, setNationality] = useState("");
+  const [emergencyContact, setEmergencyContact] = useState("");
+  const [medicalInformation, setMedicalInformation] = useState("");
 
   const [academicYearId, setAcademicYearId] = useState("");
   const [academicYears, setAcademicYears] = useState<AcademicYear[]>([]);
@@ -69,53 +130,10 @@ export default function NewStudentPage() {
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [completed, setCompleted] = useState<CompletedAdmission | null>(null);
 
-  useEffect(() => {
-    void loadFormData();
-  }, []);
-
-  async function getSchoolId(
-    supabase: ReturnType<typeof createClient>,
-  ) {
-    const {
-      data: { user },
-      error: userError,
-    } = await supabase.auth.getUser();
-
-    if (userError) {
-      throw userError;
-    }
-
-    if (!user) {
-      window.location.href = "/login";
-      return null;
-    }
-
-    const { data: membership, error: membershipError } = await supabase
-      .from("school_users")
-      .select("school_id, role, is_active")
-      .eq("user_id", user.id)
-      .eq("is_active", true)
-      .limit(1)
-      .maybeSingle();
-
-    if (membershipError) {
-      throw membershipError;
-    }
-
-    if (!membership?.school_id) {
-      throw new Error("Your account is not assigned to a school.");
-    }
-
-    return membership.school_id as string;
-  }
-
-  async function loadFormData() {
+  const loadFormData = useCallback(async () => {
     try {
-      setError("");
-      setAcademicYearsLoading(true);
-      setClassesLoading(true);
-
       const supabase = createClient();
       const schoolId = await getSchoolId(supabase);
 
@@ -123,7 +141,7 @@ export default function NewStudentPage() {
         return;
       }
 
-      const [yearsResult, classesResult] = await Promise.all([
+      const [yearsResult, classesResult, accountsResult, schoolResult] = await Promise.all([
         supabase
           .from("academic_years")
           .select("id, name, start_date, end_date, is_current")
@@ -136,6 +154,17 @@ export default function NewStudentPage() {
           .eq("school_id", schoolId)
           .order("display_order", { ascending: true })
           .order("name", { ascending: true }),
+        supabase
+          .from("accounts")
+          .select("id, name, code, account_type")
+          .eq("school_id", schoolId)
+          .eq("is_active", true)
+          .order("name"),
+        supabase
+          .from("schools")
+          .select("name, logo_url, address, city, state, postal_code")
+          .eq("id", schoolId)
+          .single(),
       ]);
 
       if (yearsResult.error) {
@@ -145,12 +174,16 @@ export default function NewStudentPage() {
       if (classesResult.error) {
         throw classesResult.error;
       }
+      if (accountsResult.error) throw accountsResult.error;
+      if (schoolResult.error) throw schoolResult.error;
 
       const years = (yearsResult.data || []) as AcademicYear[];
       const loadedClasses = (classesResult.data || []) as SchoolClass[];
 
       setAcademicYears(years);
       setClasses(loadedClasses);
+      setAccounts((accountsResult.data || []) as Account[]);
+      setSchool(schoolResult.data as School);
 
       const currentYear = years.find((year) => year.is_current);
       if (currentYear) {
@@ -169,7 +202,13 @@ export default function NewStudentPage() {
       setAcademicYearsLoading(false);
       setClassesLoading(false);
     }
-  }
+  }, []);
+
+  useEffect(() => {
+    // The state updates occur after the asynchronous school-data request.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void loadFormData();
+  }, [loadFormData]);
 
   async function handleClassChange(value: string) {
     setClassId(value);
@@ -219,6 +258,7 @@ export default function NewStudentPage() {
     event.preventDefault();
 
     setError("");
+    if (loading || completed) return;
 
     if (!admissionNo.trim()) {
       setError("Admission number is required.");
@@ -242,6 +282,28 @@ export default function NewStudentPage() {
 
     if (!sectionId) {
       setError("Please select a section.");
+      return;
+    }
+
+    const admissionFeeAmount = Number(admissionFee || 0);
+    if (!Number.isFinite(admissionFeeAmount) || admissionFeeAmount < 0 ||
+        Math.abs(admissionFeeAmount * 100 - Math.round(admissionFeeAmount * 100)) > 0.000001) {
+      setError("Admission fee must be non-negative with at most two decimal places.");
+      return;
+    }
+
+    const account = accounts.find((item) => item.id === accountId);
+    const expectedAccountType = paymentMode === "cash" ? "cash" : "bank";
+    if (admissionFeeAmount > 0 && (
+      !billNumber.trim() || !receiptNumber.trim() || !paymentDate ||
+      billNumber.trim().length > 100 || receiptNumber.trim().length > 100 ||
+      !account || account.account_type.toLowerCase() !== expectedAccountType
+    )) {
+      setError("Enter a bill number, receipt number, payment date and matching cash or bank account.");
+      return;
+    }
+    if (!school) {
+      setError("School details could not be loaded.");
       return;
     }
 
@@ -275,55 +337,100 @@ export default function NewStudentPage() {
         state: state.trim() || null,
         postal_code: postalCode.trim() || null,
         notes: notes.trim() || null,
+        father_name: fatherName.trim() || null,
+        mother_name: motherName.trim() || null,
+        parent_phone: parentPhone.trim() || null,
+        previous_school: previousSchool.trim() || null,
+        nationality: nationality.trim() || null,
+        emergency_contact: emergencyContact.trim() || null,
+        medical_information: medicalInformation.trim() || null,
       };
 
-      const admissionFeeAmount = Number(admissionFee || 0);
-      if (!Number.isFinite(admissionFeeAmount) || admissionFeeAmount < 0) {
-        setError("Admission fee must be zero or a valid positive amount.");
-        return;
+      const { data, error: createError } = await supabase.rpc("create_student_admission", {
+        p_student: student,
+        p_admission_fee: admissionFeeAmount,
+        p_bill_number: admissionFeeAmount > 0 ? billNumber.trim() : null,
+        p_receipt_number: admissionFeeAmount > 0 ? receiptNumber.trim() : null,
+        p_payment_mode: admissionFeeAmount > 0 ? paymentMode : null,
+        p_account_id: admissionFeeAmount > 0 ? accountId : null,
+        p_payment_date: admissionFeeAmount > 0 ? paymentDate : null,
+      });
+      if (createError) throw new Error(createError.message);
+      if (typeof data?.student_id !== "string") {
+        throw new Error("Admission was saved, but no student ID was returned. Check the student list before retrying.");
       }
 
-      const { data: createdStudent, error: insertError } = await supabase
-        .from("students")
-        .insert(student)
-        .select("id, first_name, last_name")
-        .single();
-
-      if (insertError) {
-        throw insertError;
-      }
-
-      if (!createdStudent?.id) {
-        throw new Error("Student was created but no student ID was returned.");
-      }
-
-      if (admissionFeeAmount > 0) {
-        const { error: admissionBillError } = await supabase.rpc(
-          "create_student_fee_bill",
-          {
-            p_student_id: createdStudent.id,
-            p_description: "Admission Fee",
-            p_amount: admissionFeeAmount,
-            p_discount: 0,
-            p_bill_date: admissionDate || new Date().toISOString().slice(0, 10),
-            p_due_date: null,
-            p_fee_structure_id: null,
-          },
-        );
-
-        if (admissionBillError) {
-          throw new Error(
-            `Student was created, but the admission fee bill could not be created: ${admissionBillError.message}`,
-          );
-        }
-      }
-
-      router.replace(
-        admissionFeeAmount > 0
-          ? `/dashboard/students/${createdStudent.id}/fees`
-          : "/dashboard/students",
-      );
-      router.refresh();
+      const schoolAddress = [school.address, school.city, school.state, school.postal_code]
+        .filter(Boolean).join(", ");
+      const studentName = [firstName, middleName, lastName].map((part) => part.trim()).filter(Boolean).join(" ");
+      const className = classes.find((item) => item.id === classId)?.name || "";
+      const sectionName = sections.find((item) => item.id === sectionId)?.name || "";
+      const yearName = academicYears.find((item) => item.id === academicYearId)?.name || "";
+      const paymentFields = admissionFeeAmount > 0 ? [
+        { label: "Admission fee", value: `INR ${admissionFeeAmount.toFixed(2)}` },
+        { label: "Bill number", value: billNumber.trim() },
+        { label: "Receipt number", value: receiptNumber.trim() },
+        { label: "Payment date", value: paymentDate },
+        { label: "Paid into", value: `${paymentMode === "cash" ? "Cash" : "Bank"} - ${account?.name || ""}` },
+      ] : [{ label: "Admission fee", value: "No fee collected" }];
+      const document: AdmissionPdfData = {
+        schoolName: school.name,
+        schoolAddress,
+        sections: [
+          { title: "Student information", fields: [
+            { label: "Admission number", value: admissionNo.trim() },
+            { label: "Roll number", value: rollNo.trim() },
+            { label: "Student name", value: studentName },
+            { label: "Date of birth", value: dateOfBirth },
+            { label: "Gender", value: gender },
+            { label: "Admission date", value: admissionDate },
+            { label: "Status", value: status },
+            { label: "Blood group", value: bloodGroup },
+            { label: "Nationality", value: nationality },
+            { label: "Previous school", value: previousSchool },
+          ] },
+          { title: "Academic placement", fields: [
+            { label: "Academic year", value: yearName },
+            { label: "Class", value: className },
+            { label: "Section", value: sectionName },
+          ] },
+          { title: "Family and contact", fields: [
+            { label: "Father's name", value: fatherName },
+            { label: "Mother's name", value: motherName },
+            { label: "Parent phone", value: parentPhone },
+            { label: "Emergency contact", value: emergencyContact },
+            { label: "Address", value: address },
+            { label: "City", value: city },
+            { label: "State", value: state },
+            { label: "Postal code", value: postalCode },
+          ] },
+          { title: "Additional information", fields: [
+            { label: "Medical information", value: medicalInformation },
+            { label: "Notes", value: notes },
+          ] },
+          { title: "Admission fee", fields: paymentFields },
+        ],
+      };
+      setCompleted({
+        studentId: data.student_id,
+        admissionNo: admissionNo.trim(),
+        school,
+        document,
+        receipt: admissionFeeAmount > 0 ? {
+          schoolName: school.name,
+          schoolAddress,
+          title: "ADMISSION FEE RECEIPT",
+          sections: [
+            { title: "Student", fields: [
+              { label: "Student name", value: studentName },
+              { label: "Admission number", value: admissionNo.trim() },
+              { label: "Class / section", value: [className, sectionName].filter(Boolean).join(" / ") },
+              { label: "Academic year", value: yearName },
+            ] },
+            { title: "Payment received", fields: paymentFields },
+          ],
+        } : null,
+      });
     } catch (createError) {
       console.error("CREATE STUDENT ERROR:", createError);
       setError(
@@ -331,8 +438,51 @@ export default function NewStudentPage() {
           ? createError.message
           : "Unable to create student.",
       );
+    } finally {
       setLoading(false);
     }
+  }
+
+  async function downloadPdf(data: AdmissionPdfData, filename: string) {
+    if (!completed) return;
+    try {
+      setError("");
+      const logo = await loadReceiptLogoDataUrl(completed.school.logo_url);
+      if (completed.school.logo_url && !logo) {
+        throw new Error("The school logo could not be loaded. Please try again.");
+      }
+      createAdmissionPdf({ ...data, schoolLogoDataUrl: logo }).save(filename);
+    } catch (pdfError) {
+      console.error("ADMISSION PDF ERROR:", pdfError);
+      setError(pdfError instanceof Error ? pdfError.message : "Unable to download the PDF.");
+    }
+  }
+
+  if (completed) {
+    const safeNumber = completed.admissionNo.replace(/[^a-zA-Z0-9-_]/g, "-");
+    return (
+      <div className="mx-auto max-w-3xl p-6">
+        <div className="rounded-2xl border border-green-200 bg-white p-6 shadow-sm">
+          <h1 className="text-2xl font-bold text-slate-900">Student admitted</h1>
+          <p className="mt-2 text-sm text-slate-600">
+            The student{completed.receipt ? ", admission bill and payment have" : " has"} been saved.
+          </p>
+          {error && <p role="alert" className="mt-4 text-sm text-red-700">{error}</p>}
+          <div className="mt-6 flex flex-wrap gap-3">
+            <button type="button" className="rounded-xl bg-blue-600 px-4 py-3 text-sm font-semibold text-white" onClick={() => void downloadPdf(completed.document, `Admission-${safeNumber}.pdf`)}>
+              Download admission form
+            </button>
+            {completed.receipt && (
+              <button type="button" className="rounded-xl bg-emerald-700 px-4 py-3 text-sm font-semibold text-white" onClick={() => void downloadPdf(completed.receipt!, `Admission-Receipt-${safeNumber}.pdf`)}>
+                Download fee receipt
+              </button>
+            )}
+            <Link href={`/dashboard/students/${completed.studentId}/fees`} className="rounded-xl border border-slate-300 px-4 py-3 text-sm font-semibold text-slate-700">View student fees</Link>
+            <Link href="/dashboard/students" className="rounded-xl border border-slate-300 px-4 py-3 text-sm font-semibold text-slate-700">Students</Link>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -487,8 +637,52 @@ export default function NewStudentPage() {
                   className={inputClass}
                 />
               </Field>
+
+              <Field label="Nationality">
+                <input value={nationality} onChange={(event) => setNationality(event.target.value)} className={inputClass} />
+              </Field>
+
+              <Field label="Previous School">
+                <input value={previousSchool} onChange={(event) => setPreviousSchool(event.target.value)} className={inputClass} />
+              </Field>
             </div>
           </section>
+
+          {Number(admissionFee) > 0 && (
+            <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+              <h2 className="text-lg font-bold text-slate-900">Admission Fee Collection</h2>
+              <p className="mt-1 text-sm text-slate-500">The full admission fee will be collected when the student is saved.</p>
+              <div className="mt-5 grid gap-5 md:grid-cols-2">
+                <Field label="Manual Bill Number" required>
+                  <input value={billNumber} onChange={(event) => setBillNumber(event.target.value)} maxLength={100} required className={inputClass} />
+                </Field>
+                <Field label="Manual Receipt Number" required>
+                  <input value={receiptNumber} onChange={(event) => setReceiptNumber(event.target.value)} maxLength={100} required className={inputClass} />
+                </Field>
+                <Field label="Payment Date" required>
+                  <input type="date" value={paymentDate} onChange={(event) => setPaymentDate(event.target.value)} required className={inputClass} />
+                </Field>
+                <Field label="Payment Type" required>
+                  <select value={paymentMode} onChange={(event) => {
+                    setPaymentMode(event.target.value as "cash" | "bank_transfer");
+                    setAccountId("");
+                  }} className={inputClass}>
+                    <option value="cash">Cash</option>
+                    <option value="bank_transfer">Bank</option>
+                  </select>
+                </Field>
+                <Field label={paymentMode === "cash" ? "Cash Account" : "Bank Account"} required>
+                  <select value={accountId} onChange={(event) => setAccountId(event.target.value)} required className={inputClass}>
+                    <option value="">Select an account</option>
+                    {accounts.filter((account) => account.account_type.toLowerCase() === (paymentMode === "cash" ? "cash" : "bank")).map((account) => (
+                      <option key={account.id} value={account.id}>{account.name} ({account.code})</option>
+                    ))}
+                  </select>
+                  <p className="mt-1 text-xs text-slate-500">Accounts are taken from your school&apos;s chart of accounts.</p>
+                </Field>
+              </div>
+            </section>
+          )}
 
           <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
             <h2 className="text-lg font-bold text-slate-900">
@@ -570,6 +764,29 @@ export default function NewStudentPage() {
                   ))}
                 </select>
               </Field>
+            </div>
+          </section>
+
+          <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+            <h2 className="text-lg font-bold text-slate-900">Family and Emergency Details</h2>
+            <div className="mt-5 grid gap-5 md:grid-cols-2">
+              <Field label="Father's Name">
+                <input value={fatherName} onChange={(event) => setFatherName(event.target.value)} className={inputClass} />
+              </Field>
+              <Field label="Mother's Name">
+                <input value={motherName} onChange={(event) => setMotherName(event.target.value)} className={inputClass} />
+              </Field>
+              <Field label="Parent / Guardian Phone">
+                <input type="tel" value={parentPhone} onChange={(event) => setParentPhone(event.target.value)} className={inputClass} />
+              </Field>
+              <Field label="Emergency Contact">
+                <input value={emergencyContact} onChange={(event) => setEmergencyContact(event.target.value)} placeholder="Name and phone" className={inputClass} />
+              </Field>
+              <div className="md:col-span-2">
+                <Field label="Medical Information">
+                  <textarea value={medicalInformation} onChange={(event) => setMedicalInformation(event.target.value)} rows={3} className={inputClass} />
+                </Field>
+              </div>
             </div>
           </section>
 

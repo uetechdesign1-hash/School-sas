@@ -20,6 +20,18 @@ You can start editing the page by modifying `app/page.tsx`. The page auto-update
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
+## Student Admissions
+
+Apply `supabase/migrations/20261114054007_student_admission_collection.sql` before using the updated Add Student page. School owners and admins can enter optional family and admission details and download an A4 admission form after saving.
+
+When an admission fee is entered, the full amount is collected using the selected active school cash or bank account. A manual bill number, receipt number, and payment date are required. The student, fee bill, payment, and accounting journal are saved together; an error rolls back the admission. A zero fee creates a student without a bill or payment. An A4 fee receipt is available after a paid admission.
+
+Optional medical information is stored separately and is accessible only to active owners and admins of the student's school. Treat downloaded admission forms as confidential.
+
+## Manual Journals
+
+Apply `supabase/migrations/20261114055807_manual_journal_book_consistency.sql` before deploying the updated journal page. Linked manual journals appear once in the cash and bank books; legacy-only entries remain visible. Saving or deleting a journal updates its accounting records atomically. Journals included in a bank reconciliation cannot be changed until the reconciliation is corrected.
+
 ## Offline Staff Attendance
 
 To enable offline GPS check-in/out:

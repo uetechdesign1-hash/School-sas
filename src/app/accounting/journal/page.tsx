@@ -14,11 +14,7 @@ import {
   X,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
-import {
-  deleteCanonicalJournalForSource,
-  ensureSchoolAccountingSetup,
-  postCanonicalJournalEntry,
-} from "@/lib/accounting/canonical-accounting";
+import { ensureSchoolAccountingSetup } from "@/lib/accounting/canonical-accounting";
 import { filterSelectableAccounts } from "@/lib/accounting/account-visibility";
 import { AccountingExportActions } from "../accounting-export";
 
@@ -715,332 +711,32 @@ export default function JournalPage() {
       const transactionDescription =
         buildDescription();
 
-      /*
-       * =====================================================
-       * EDIT
-       * =====================================================
-       */
-
-      if (editingId) {
-        const {
-          data: existingTransaction,
-          error:
-            existingTransactionError,
-        } = await supabase
-          .from("transactions")
-          .select(
-            "id, school_id, transaction_type, reference_type"
-          )
-          .eq("id", editingId)
-          .eq("school_id", schoolId)
-          .eq("transaction_type", "journal")
-          .eq("reference_type", "journal")
-          .maybeSingle();
-
-        if (existingTransactionError) {
-          throw new Error(
-            existingTransactionError.message
-          );
-        }
-
-        if (!existingTransaction) {
-          throw new Error(
-            "Journal entry could not be found."
-          );
-        }
-
-        /*
-         * Update transaction header.
-         */
-
-        const {
-          error: updateError,
-        } = await supabase
-          .from("transactions")
-          .update({
-            transaction_date:
-              journalDate,
-            description:
-              transactionDescription,
-          })
-          .eq("id", editingId)
-          .eq("school_id", schoolId);
-
-        if (updateError) {
-          throw new Error(
-            updateError.message
-          );
-        }
-
-        /*
-         * Delete existing lines.
-         */
-
-        const {
-          error:
-            deleteLinesError,
-        } = await supabase
-          .from("transaction_entries")
-          .delete()
-          .eq("transaction_id", editingId)
-          .eq("school_id", schoolId);
-
-        if (deleteLinesError) {
-          throw new Error(
-            `Existing journal lines could not be replaced: ${deleteLinesError.message}`
-          );
-        }
-
-        /*
-         * Insert updated lines.
-         */
-
-        const entriesToInsert =
-          usableLines.map(
-            (line) => ({
-              school_id: schoolId,
-              transaction_id:
-                editingId,
-              account_id:
-                line.account_id,
-              debit:
-                Number(line.debit || 0),
-              credit:
-                Number(line.credit || 0),
-              description:
-                line.description.trim() ||
-                null,
-            })
-          );
-
-        const {
-          error:
-            insertLinesError,
-        } = await supabase
-          .from("transaction_entries")
-          .insert(
-            entriesToInsert
-          );
-
-        if (insertLinesError) {
-          throw new Error(
-            `Updated journal lines could not be created: ${insertLinesError.message}`
-          );
-        }
-
-        /*
-         * Reverse the previous canonical journal entry and post the updated
-         * one, so the Cash Book, Bank Book, Ledger and reports always show the
-         * journal as it stands now - exactly once.
-         */
-        await deleteCanonicalJournalForSource(supabase, {
-          schoolId,
-          sourceRecordId: editingId,
-          legacyTransactionId: editingId,
-        });
-
-        const setup = await ensureSchoolAccountingSetup(
-          supabase,
-          schoolId
-        );
-
-        await postCanonicalJournalEntry(supabase, {
-          schoolId,
-          fiscalYearId: setup.fiscalYearId,
-          entryDate: journalDate,
-          description:
-            transactionDescription,
-          entryType: "GENERAL",
-          sourceModule: "journal",
-          sourceTable: "journal_entries",
-          sourceRecordId: editingId,
-          referenceType: "journal",
-          referenceId: editingId,
-          createdBy:
-            (
-              await supabase.auth.getUser()
-            ).data.user?.id || null,
-          lines: usableLines.map((line) => ({
-            accountId: line.account_id,
-            debit: Number(line.debit || 0),
-            credit: Number(line.credit || 0),
-            description:
-              line.description.trim() ||
-              transactionDescription,
-          })),
-        });
-
-        setSuccess(
-          "Journal updated successfully."
-        );
-
-        resetForm();
-
-        await loadJournals(
-          schoolId
-        );
-
-        return;
-      }
-
-      /*
-       * =====================================================
-       * CREATE
-       * =====================================================
-       */
-
-      const {
-        data: transaction,
-        error:
-          transactionError,
-      } = await supabase
-        .from("transactions")
-        .insert({
-          school_id: schoolId,
-          transaction_date:
-            journalDate,
-          transaction_type:
-            "journal",
-          description:
-            transactionDescription,
-          reference_type:
-            "journal",
-          reference_id:
-            null,
-        })
-        .select(
-          `
-            id,
-            transaction_number,
-            transaction_date,
-            transaction_type,
-            description,
-            reference_type,
-            reference_id,
-            created_at
-          `
-        )
-        .single();
-
-      if (transactionError) {
-        throw new Error(
-          transactionError.message
-        );
-      }
-
-      if (!transaction) {
-        throw new Error(
-          "Journal transaction was not created."
-        );
-      }
-
-      const entriesToInsert =
-        usableLines.map(
-          (line) => ({
-            school_id: schoolId,
-            transaction_id:
-              transaction.id,
-            account_id:
-              line.account_id,
-            debit:
-              Number(line.debit || 0),
-            credit:
-              Number(line.credit || 0),
-            description:
-              line.description.trim() ||
-              null,
-          })
-        );
-
-      const {
-        error: insertError,
-      } = await supabase
-        .from("transaction_entries")
-        .insert(
-          entriesToInsert
-        );
-
-      if (insertError) {
-        /*
-         * Rollback manually if entry insertion fails.
-         */
-
-        await supabase
-          .from("transaction_entries")
-          .delete()
-          .eq(
-            "transaction_id",
-            transaction.id
-          )
-          .eq(
-            "school_id",
-            schoolId
-          );
-
-        await supabase
-          .from("transactions")
-          .delete()
-          .eq(
-            "id",
-            transaction.id
-          )
-          .eq(
-            "school_id",
-            schoolId
-          );
-
-        throw new Error(
-          `Journal lines could not be created: ${insertError.message}`
-        );
-      }
-
-      /*
-       * Post the ONE canonical journal entry for this journal transaction
-       * (linked through reference_id = transaction id). The Cash Book, Bank
-       * Book, Ledger, Trial Balance and the other reports read the canonical
-       * journal, so a manual journal that moves cash or bank now appears there
-       * exactly once.
-       */
       const setup = await ensureSchoolAccountingSetup(
         supabase,
         schoolId
       );
 
-      await postCanonicalJournalEntry(supabase, {
-        schoolId,
-        fiscalYearId: setup.fiscalYearId,
-        entryDate: journalDate,
-        description:
-          transactionDescription,
-        entryType: "GENERAL",
-        sourceModule: "journal",
-        sourceTable: "journal_entries",
-        sourceRecordId: transaction.id,
-        referenceType: "journal",
-        referenceId: transaction.id,
-        createdBy:
-          (
-            await supabase.auth.getUser()
-          ).data.user?.id || null,
-        lines: usableLines.map((line) => ({
+      const { data: transaction, error: saveError } = await supabase.rpc("save_manual_journal", {
+        p_school_id: schoolId,
+        p_transaction_id: editingId,
+        p_fiscal_year_id: setup.fiscalYearId,
+        p_date: journalDate,
+        p_description: transactionDescription,
+        p_lines: usableLines.map((line) => ({
           accountId: line.account_id,
           debit: Number(line.debit || 0),
           credit: Number(line.credit || 0),
-          description:
-            line.description.trim() ||
-            transactionDescription,
+          description: line.description.trim(),
         })),
       });
-
-      setSuccess(
-        `Journal saved successfully${
-          transaction.transaction_number
-            ? ` — ${transaction.transaction_number}`
-            : ""
-        }.`
-      );
+      if (saveError) throw new Error(saveError.message);
 
       resetForm();
+      setSuccess(
+        editingId
+          ? "Journal updated successfully."
+          : `Journal saved successfully${transaction?.transaction_number ? ` — ${transaction.transaction_number}` : ""}.`
+      );
 
       await loadJournals(
         schoolId
@@ -1182,99 +878,18 @@ export default function JournalPage() {
     setSuccess("");
 
     try {
-      const {
-        data: transaction,
-        error:
-          transactionError,
-      } = await supabase
-        .from("transactions")
-        .select(
-          "id, transaction_number"
-        )
-        .eq("id", deleteJournal.id)
-        .eq("school_id", schoolId)
-        .eq("transaction_type", "journal")
-        .eq("reference_type", "journal")
-        .maybeSingle();
-
-      if (transactionError) {
-        throw new Error(
-          transactionError.message
-        );
-      }
-
-      if (!transaction) {
-        throw new Error(
-          "Journal entry could not be found or does not belong to the current school."
-        );
-      }
-
-      /*
-       * Delete lines first.
-       */
-
-      const {
-        error:
-          deleteLinesError,
-      } = await supabase
-        .from("transaction_entries")
-        .delete()
-        .eq(
-          "transaction_id",
-          transaction.id
-        )
-        .eq(
-          "school_id",
-          schoolId
-        );
-
-      if (deleteLinesError) {
-        throw new Error(
-          deleteLinesError.message
-        );
-      }
-
-      /*
-       * Delete header.
-       */
-
-      const {
-        error:
-          deleteTransactionError,
-      } = await supabase
-        .from("transactions")
-        .delete()
-        .eq(
-          "id",
-          transaction.id
-        )
-        .eq(
-          "school_id",
-          schoolId
-        );
-
-      if (deleteTransactionError) {
-        throw new Error(
-          deleteTransactionError.message
-        );
-      }
-
-      /*
-       * Remove the canonical journal entry of this journal as well, so the
-       * Cash Book, Bank Book, Ledger and reports stop showing it.
-       */
-      await deleteCanonicalJournalForSource(supabase, {
-        schoolId,
-        sourceRecordId: transaction.id,
-        legacyTransactionId: transaction.id,
+      const { error: deleteError } = await supabase.rpc("delete_manual_journal", {
+        p_school_id: schoolId,
+        p_transaction_id: deleteJournal.id,
       });
+      if (deleteError) throw new Error(deleteError.message);
 
       setDeleteJournal(null);
 
       setSuccess(
         `Journal${
-          transaction.transaction_number
-            ? ` ${transaction.transaction_number}`
+          deleteJournal.transaction_number
+            ? ` ${deleteJournal.transaction_number}`
             : ""
         } deleted successfully.`
       );

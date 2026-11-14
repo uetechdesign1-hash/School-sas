@@ -13,6 +13,18 @@ export function getAcademicYearStorageKey(schoolId: string) {
   return `schoolflow-academic-year:${schoolId}`;
 }
 
+export function resolveAccountingAcademicYear(
+  years: AcademicYear[],
+  requestedId: string | null,
+  savedId: string | null,
+  preferCurrent: boolean,
+) {
+  const requested = years.find((year) => year.id === requestedId);
+  const saved = years.find((year) => year.id === savedId);
+  const current = years.find((year) => year.is_current);
+  return requested || (preferCurrent ? current || saved : saved || current) || years[0] || null;
+}
+
 export function getAcademicYearForDate(
   years: AcademicYear[],
   date: string,

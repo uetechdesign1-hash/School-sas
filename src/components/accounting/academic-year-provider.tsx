@@ -18,6 +18,7 @@ import {
   ACADEMIC_YEAR_QUERY_PARAM,
   type AcademicYear,
   getAcademicYearStorageKey,
+  resolveAccountingAcademicYear,
   withAcademicYearParam,
 } from "@/lib/accounting/academic-year";
 
@@ -25,6 +26,7 @@ type AcademicYearContextValue = {
   academicYear: AcademicYear | null;
   academicYears: AcademicYear[];
   loading: boolean;
+  error: string | null;
   selectAcademicYear: (id: string) => void;
 };
 
@@ -56,6 +58,7 @@ export function AccountingAcademicYearProvider({
   const [academicYear, setAcademicYear] = useState<AcademicYear | null>(null);
   const [schoolId, setSchoolId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const initialized = useRef(false);
   const previousRequestedId = useRef(requestedId);
 
@@ -65,6 +68,7 @@ export function AccountingAcademicYearProvider({
     async function loadAcademicYears() {
       try {
         setLoading(true);
+        setLoadError(null);
         const schoolId = await getCurrentSchoolId();
         const { data, error } = await createClient()
           .from("academic_years")
@@ -85,10 +89,9 @@ export function AccountingAcademicYearProvider({
         } catch {
           // Continue using the scoped URL/current-year fallback when storage is unavailable.
         }
-        const requested = years.find((year) => year.id === requestedId);
-        const saved = years.find((year) => year.id === savedId);
-        const currentYear = years.find((year) => year.is_current);
-        const next = requested || saved || currentYear || years[0] || null;
+        const next = resolveAccountingAcademicYear(
+          years, requestedId, savedId, pathname === "/accounting/cash-bank",
+        );
         initialized.current = true;
         setAcademicYear(next);
         if (next) {
@@ -103,6 +106,7 @@ export function AccountingAcademicYearProvider({
         if (!cancelled) {
           setAcademicYears([]);
           setAcademicYear(null);
+          setLoadError(error instanceof Error ? error.message : "Unable to load academic years.");
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -113,7 +117,7 @@ export function AccountingAcademicYearProvider({
     return () => {
       cancelled = true;
     };
-  }, [requestedId]);
+  }, [pathname, requestedId]);
 
   useEffect(() => {
     if (!initialized.current || !academicYear) return;
@@ -185,8 +189,8 @@ export function AccountingAcademicYearProvider({
   );
 
   const value = useMemo(
-    () => ({ academicYear, academicYears, loading, selectAcademicYear }),
-    [academicYear, academicYears, loading, selectAcademicYear],
+    () => ({ academicYear, academicYears, loading, error: loadError, selectAcademicYear }),
+    [academicYear, academicYears, loading, loadError, selectAcademicYear],
   );
 
   return (

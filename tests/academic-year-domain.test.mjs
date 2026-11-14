@@ -9,6 +9,7 @@ import {
   sumDatedAmounts,
   summarizeInventoryPeriod,
 } from "../src/lib/academic-year-domain.mjs";
+import { resolveAccountingAcademicYear } from "../src/lib/accounting/academic-year.ts";
 
 const currentYear = {
   id: "ay-2026",
@@ -26,6 +27,14 @@ const priorYear = {
   end_date: "2026-03-31",
   is_current: false,
 };
+
+test("cash and bank default to the current year while honoring an explicit historical selection", () => {
+  const years = [currentYear, priorYear];
+  assert.equal(resolveAccountingAcademicYear(years, null, priorYear.id, true), currentYear);
+  assert.equal(resolveAccountingAcademicYear(years, priorYear.id, currentYear.id, true), priorYear);
+  assert.equal(resolveAccountingAcademicYear(years, null, priorYear.id, false), priorYear);
+  assert.equal(resolveAccountingAcademicYear([], null, null, true), null);
+});
 
 test("selects the configured current year and rejects another school's year", () => {
   const foreignYear = { ...currentYear, id: "ay-foreign", school_id: "school-b" };
