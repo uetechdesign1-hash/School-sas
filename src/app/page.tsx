@@ -81,9 +81,48 @@ const stats = [
   { value: "100%", label: "School Focused" },
 ];
 
+const metricTones = [
+  "border-blue-100 bg-blue-50/80 text-blue-700",
+  "border-violet-100 bg-violet-50/80 text-violet-700",
+  "border-emerald-100 bg-emerald-50/80 text-emerald-700",
+  "border-amber-100 bg-amber-50/80 text-amber-700",
+];
+
+const featureTones = [
+  "bg-blue-100 text-blue-700 group-hover:bg-blue-600",
+  "bg-violet-100 text-violet-700 group-hover:bg-violet-600",
+  "bg-emerald-100 text-emerald-700 group-hover:bg-emerald-600",
+  "bg-amber-100 text-amber-700 group-hover:bg-amber-500",
+  "bg-rose-100 text-rose-700 group-hover:bg-rose-600",
+  "bg-cyan-100 text-cyan-700 group-hover:bg-cyan-600",
+  "bg-indigo-100 text-indigo-700 group-hover:bg-indigo-600",
+  "bg-fuchsia-100 text-fuchsia-700 group-hover:bg-fuchsia-600",
+];
+
+type ReportPreview = {
+  schoolName: string;
+  students: number;
+  staff: number;
+  classes: number;
+  attendance: number | null;
+  feeCollection: number;
+  expenses: number;
+  monthLabel: string;
+  monthly: { key: string; label: string; fees: number; expenses: number }[];
+};
+
+function formatCompactINR(value: number) {
+  return `₹${new Intl.NumberFormat("en-IN", {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(value)}`;
+}
+
 export default function HomePage() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [platformLogo, setPlatformLogo] = useState<string | null>(null);
+  const [reportPreview, setReportPreview] = useState<ReportPreview | null>(null);
+  const [reportPreviewReady, setReportPreviewReady] = useState(false);
   const supabase = useMemo(() => createClient(), []);
 
   const closeMobileMenu = () => setMobileMenuOpen(false);
@@ -110,8 +149,45 @@ export default function HomePage() {
     };
   }, [supabase]);
 
+  useEffect(() => {
+    let mounted = true;
+
+    async function refreshPreview() {
+      try {
+        const response = await fetch("/api/public-school-report", { cache: "no-store" });
+        if (!response.ok) throw new Error("Report preview unavailable");
+        const report = (await response.json()) as ReportPreview;
+        if (mounted) setReportPreview(report);
+      } catch {
+        if (mounted) setReportPreview(null);
+      } finally {
+        if (mounted) setReportPreviewReady(true);
+      }
+    }
+
+    void refreshPreview();
+    const refreshTimer = window.setInterval(() => void refreshPreview(), 30_000);
+
+    return () => {
+      mounted = false;
+      window.clearInterval(refreshTimer);
+    };
+  }, []);
+
+  const previewMetrics = [
+    { label: "Students", value: reportPreview?.students.toLocaleString("en-IN") || "—" },
+    { label: "Staff", value: reportPreview?.staff.toLocaleString("en-IN") || "—" },
+    { label: "Attendance", value: reportPreview?.attendance == null ? "—" : `${reportPreview.attendance}%` },
+    { label: "Fees · this month", value: reportPreview ? formatCompactINR(reportPreview.feeCollection) : "—" },
+  ];
+
+  const chartMax = Math.max(
+    1,
+    ...(reportPreview?.monthly.flatMap((item) => [item.fees, item.expenses]) || [1]),
+  );
+
   return (
-    <main className="min-h-screen bg-white text-slate-900">
+    <main className="scb-home min-h-screen bg-[#fbfcff] text-slate-900">
       {/* Background */}
       <div className="pointer-events-none fixed inset-0 -z-10 overflow-hidden">
         <div className="absolute left-[-180px] top-[-180px] h-[500px] w-[500px] rounded-full bg-blue-200/60 blur-3xl" />
@@ -124,7 +200,7 @@ export default function HomePage() {
 
       {/* Navbar */}
       <header className="sticky top-0 z-50 border-b border-slate-200/70 bg-white/90 backdrop-blur-xl">
-        <div className="mx-auto flex h-[88px] max-w-7xl items-center justify-between px-5 sm:px-6 lg:px-8">
+        <div className="mx-auto flex h-[68px] max-w-7xl items-center justify-between px-5 sm:px-6 lg:px-8">
           <Link
             href="/"
             className="flex items-center gap-3"
@@ -134,7 +210,7 @@ export default function HomePage() {
               <img
                 src={platformLogo}
                 alt="SCB platform logo"
-                className="h-[72px] w-[72px] rounded-xl border border-slate-200 bg-white object-contain"
+                className="h-12 w-12 rounded-xl border border-slate-200 bg-white object-contain"
               />
             ) : (
               <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 via-indigo-500 to-purple-500 text-white shadow-lg shadow-indigo-500/40">
@@ -200,7 +276,7 @@ export default function HomePage() {
 
             <Link
               href="/login"
-              className="group inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-indigo-500/40 transition hover:-translate-y-0.5 hover:from-blue-700 hover:via-indigo-700 hover:to-purple-700"
+              className="group inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 via-indigo-600 to-violet-600 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-indigo-500/30 transition hover:-translate-y-0.5"
             >
               Get Started
               <ArrowRight className="h-4 w-4 transition group-hover:translate-x-0.5" />
@@ -289,32 +365,32 @@ export default function HomePage() {
 
       {/* Hero */}
       <section className="relative overflow-hidden">
-        <div className="mx-auto max-w-7xl px-5 pb-20 pt-16 sm:px-6 sm:pt-20 lg:px-8 lg:pb-28 lg:pt-28">
-          <div className="grid items-center gap-14 lg:grid-cols-[1.05fr_0.95fr]">
+        <div className="mx-auto max-w-7xl px-5 pb-16 pt-12 sm:px-6 sm:pt-16 lg:px-8 lg:pb-20 lg:pt-20">
+          <div className="grid items-center gap-10 lg:grid-cols-[0.95fr_1.05fr] lg:gap-14">
             {/* Hero Text */}
             <div>
-              <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-white/70 bg-white/70 px-3.5 py-2 text-xs font-semibold text-indigo-700 shadow-sm backdrop-blur">
+              <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-indigo-100 bg-white px-3.5 py-2 text-xs font-semibold text-indigo-700 shadow-sm">
                 <Sparkles className="h-3.5 w-3.5 text-indigo-500" />
                 One Campus. One Platform. Complete Control.
               </div>
 
-              <h1 className="max-w-4xl text-5xl font-bold tracking-[-0.04em] text-slate-950 sm:text-6xl lg:text-7xl">
+              <h1 className="max-w-4xl text-4xl font-bold tracking-[-0.045em] text-slate-950 sm:text-5xl lg:text-[4.25rem] lg:leading-[1.02]">
                 Run your entire school
-                <span className="block bg-gradient-to-r from-blue-600 via-indigo-500 to-purple-500 bg-clip-text text-transparent">
+                <span className="block bg-gradient-to-r from-blue-600 via-indigo-500 to-violet-500 bg-clip-text text-transparent">
                   from one platform.
                 </span>
               </h1>
 
-              <p className="mt-7 max-w-2xl text-lg leading-8 text-slate-600 sm:text-xl">
+              <p className="mt-6 max-w-xl text-base leading-7 text-slate-600 sm:text-lg sm:leading-8">
                 SCB brings school administration, students, staff,
                 attendance, fees, payroll, expenses, accounting and reports
                 together in one simple platform.
               </p>
 
-              <div className="mt-9 flex flex-col gap-3 sm:flex-row">
+              <div className="mt-8 flex flex-col gap-3 sm:flex-row">
                 <Link
                   href="/login"
-                  className="group inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 px-6 py-3.5 text-sm font-semibold text-white shadow-xl shadow-indigo-500/40 transition hover:-translate-y-0.5 hover:from-blue-700 hover:via-indigo-700 hover:to-purple-700"
+                  className="group inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 via-indigo-600 to-violet-600 px-6 py-3.5 text-sm font-semibold text-white shadow-xl shadow-indigo-500/30 transition hover:-translate-y-0.5"
                 >
                   Login to SCB
                   <ArrowRight className="h-4 w-4 transition group-hover:translate-x-1" />
@@ -349,50 +425,51 @@ export default function HomePage() {
 
             {/* Dashboard Preview */}
             <div className="relative">
-              <div className="absolute -inset-5 rounded-[2rem] bg-slate-200/50 blur-2xl" />
+              <div className="absolute -inset-5 rounded-[2rem] bg-gradient-to-br from-blue-300/30 via-violet-300/25 to-cyan-200/40 blur-2xl" />
 
-              <div className="relative overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl shadow-slate-900/10">
-                <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
+              <div className="relative overflow-hidden rounded-3xl border border-slate-200/80 bg-white shadow-[0_24px_70px_-30px_rgba(39,61,104,0.42)]">
+                <div className="flex items-center justify-between border-b border-slate-100 bg-white px-5 py-3.5">
                   <div className="flex items-center gap-2">
-                    <div className="h-2.5 w-2.5 rounded-full bg-slate-300" />
-                    <div className="h-2.5 w-2.5 rounded-full bg-slate-300" />
-                    <div className="h-2.5 w-2.5 rounded-full bg-slate-300" />
+                    <div className="h-2.5 w-2.5 rounded-full bg-rose-300" />
+                    <div className="h-2.5 w-2.5 rounded-full bg-amber-300" />
+                    <div className="h-2.5 w-2.5 rounded-full bg-emerald-300" />
                   </div>
 
                   <div className="text-xs font-medium text-slate-400">
                     SCB Dashboard
                   </div>
 
-                  <div className="h-7 w-7 rounded-full bg-slate-100" />
+                  <div className="flex h-7 w-7 items-center justify-center rounded-full bg-violet-100 text-violet-700"><Building2 className="h-3.5 w-3.5" /></div>
                 </div>
 
-                <div className="p-5 sm:p-7">
-                  <div className="mb-6">
-                    <div className="text-xs font-medium text-slate-400">
-                      SCHOOL OVERVIEW
+                <div className="bg-gradient-to-br from-white via-white to-blue-50/50 p-5 sm:p-6">
+                  <div className="mb-4 flex items-end justify-between gap-3">
+                    <div>
+                    <div className="text-[10px] font-bold tracking-[0.14em] text-indigo-500">
+                      {reportPreview ? `SCHOOL OVERVIEW · ${reportPreview.schoolName}` : "SCHOOL OVERVIEW"}
                     </div>
 
-                    <div className="mt-1 text-2xl font-bold text-slate-950">
-                      Good morning‹
+                    <div className="mt-1 text-xl font-bold tracking-tight text-slate-950 sm:text-2xl">
+                      Live school snapshot
+                    </div>
+                    </div>
+                    <div className="mb-1 inline-flex shrink-0 items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-semibold text-emerald-700">
+                      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
+                      {reportPreviewReady ? (reportPreview ? "Live report" : "Report offline") : "Loading report"}
                     </div>
                   </div>
 
                   <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                    {[
-                      ["Students", "1,248"],
-                      ["Staff", "86"],
-                      ["Attendance", "94.8%"],
-                      ["Fees", "12.4L"],
-                    ].map(([label, value]) => (
+                    {previewMetrics.map(({ label, value }, index) => (
                       <div
                         key={label}
-                        className="rounded-2xl border border-slate-200 bg-slate-50 p-4"
+                        className={`rounded-2xl border p-3.5 transition duration-300 hover:-translate-y-0.5 hover:shadow-md sm:p-4 ${metricTones[index]}`}
                       >
-                        <div className="text-[11px] font-medium text-slate-500">
+                        <div className="text-[10px] font-semibold leading-4 opacity-75 sm:text-[11px]">
                           {label}
                         </div>
 
-                        <div className="mt-2 text-lg font-bold text-slate-950">
+                        <div className="mt-1.5 text-lg font-extrabold tracking-tight sm:text-xl">
                           {value}
                         </div>
                       </div>
@@ -400,66 +477,70 @@ export default function HomePage() {
                   </div>
 
                   <div className="mt-4 grid gap-4 sm:grid-cols-[1.2fr_0.8fr]">
-                    <div className="rounded-2xl border border-slate-200 p-5">
+                    <div className="rounded-2xl border border-blue-100 bg-white p-4 shadow-sm sm:p-5">
                       <div className="flex items-center justify-between">
                         <div>
-                          <div className="text-sm font-semibold text-slate-900">
-                            Attendance Overview
+                          <div className="text-sm font-bold text-slate-900">
+                            Finance overview
                           </div>
 
                           <div className="mt-1 text-xs text-slate-400">
-                            This month
+                            Fees and expenses · last 6 months
                           </div>
                         </div>
 
-                        <ClipboardCheck className="h-5 w-5 text-slate-400" />
+                        <BarChart3 className="h-5 w-5 text-indigo-500" />
                       </div>
 
-                      <div className="mt-7 flex items-end gap-2">
-                        {[
-                          55, 72, 61, 84, 78, 91, 68, 87, 76, 94, 82, 89,
-                        ].map((height, index) => (
-                          <div
-                            key={index}
-                            className="flex-1 rounded-t-md bg-slate-900/10"
-                            style={{ height: `${height}px` }}
-                          />
+                      <div className="mt-4 flex h-[112px] items-end justify-between gap-2 border-b border-slate-100 px-1">
+                        {(reportPreview?.monthly || []).map((item) => (
+                          <div key={item.key} className="flex h-full flex-1 flex-col items-center justify-end gap-1.5">
+                            <div className="flex h-[88px] w-full items-end justify-center gap-1">
+                              <div className="w-[40%] rounded-t-md bg-gradient-to-t from-blue-600 to-indigo-400 transition-all duration-700" style={{ height: `${Math.max(4, (item.fees / chartMax) * 88)}px` }} title={`${item.label} fees: ${formatCompactINR(item.fees)}`} />
+                              <div className="w-[40%] rounded-t-md bg-gradient-to-t from-fuchsia-500 to-violet-300 transition-all duration-700" style={{ height: `${Math.max(4, (item.expenses / chartMax) * 88)}px` }} title={`${item.label} expenses: ${formatCompactINR(item.expenses)}`} />
+                            </div>
+                            <span className="text-[9px] font-medium text-slate-400">{item.label}</span>
+                          </div>
                         ))}
+                        {!reportPreviewReady && <div className="h-20 w-full animate-pulse rounded-xl bg-gradient-to-r from-blue-50 via-violet-50 to-blue-50" />}
+                        {reportPreviewReady && !reportPreview && <p className="mb-8 w-full text-center text-xs text-slate-400">Live report preview is temporarily unavailable.</p>}
                       </div>
+                      <div className="mt-3 flex items-center gap-4 text-[10px] font-medium text-slate-500"><span className="inline-flex items-center gap-1.5"><i className="h-2 w-2 rounded-full bg-blue-600" /> Fees</span><span className="inline-flex items-center gap-1.5"><i className="h-2 w-2 rounded-full bg-fuchsia-500" /> Expenses</span><span className="ml-auto text-slate-400">{reportPreview?.monthLabel || ""}</span></div>
                     </div>
 
-                    <div className="rounded-2xl border border-slate-200 p-5">
+                    <div className="rounded-2xl border border-violet-100 bg-gradient-to-br from-violet-50 via-white to-indigo-50 p-4 shadow-sm sm:p-5">
                       <div className="flex items-center justify-between">
                         <div>
-                          <div className="text-sm font-semibold text-slate-900">
-                            Finance
+                          <div className="text-sm font-bold text-slate-900">
+                            School at a glance
                           </div>
 
                           <div className="mt-1 text-xs text-slate-400">
-                            Monthly summary
+                            {reportPreview?.monthLabel || "Current month"} summary
                           </div>
                         </div>
 
-                        <IndianRupee className="h-5 w-5 text-slate-400" />
+                        <GraduationCap className="h-5 w-5 text-violet-600" />
                       </div>
 
                       <div className="mt-7">
-                        <div className="text-2xl font-bold text-slate-950">
-                          18.6L
+                        <div className="text-2xl font-extrabold tracking-tight text-violet-800">
+                          {reportPreview ? formatCompactINR(reportPreview.feeCollection) : "—"}
                         </div>
 
-                        <div className="mt-2 text-xs text-emerald-600">
-                          +12.4% this month
+                        <div className="mt-1 text-xs font-medium text-slate-500">
+                          Fee collection this month
                         </div>
                       </div>
 
-                      <div className="mt-5 h-2 overflow-hidden rounded-full bg-slate-100">
-                        <div className="h-full w-[76%] rounded-full bg-slate-900" />
+                      <div className="mt-5 grid grid-cols-2 gap-2">
+                        <div className="rounded-xl bg-white/90 p-2.5"><div className="text-[10px] text-slate-500">Expenses</div><div className="mt-1 text-sm font-bold text-rose-700">{reportPreview ? formatCompactINR(reportPreview.expenses) : "—"}</div></div>
+                        <div className="rounded-xl bg-white/90 p-2.5"><div className="text-[10px] text-slate-500">Classes</div><div className="mt-1 text-sm font-bold text-blue-700">{reportPreview ? reportPreview.classes.toLocaleString("en-IN") : "—"}</div></div>
                       </div>
                     </div>
                   </div>
 
-                  <div className="mt-4 flex items-center justify-between rounded-2xl bg-slate-950 px-5 py-4 text-white">
+                  <div className="mt-4 flex items-center justify-between rounded-2xl bg-gradient-to-r from-slate-950 via-indigo-950 to-slate-900 px-5 py-3.5 text-white shadow-lg shadow-indigo-950/10">
                     <div>
                       <div className="text-sm font-semibold">
                         Everything connected
@@ -470,7 +551,7 @@ export default function HomePage() {
                       </div>
                     </div>
 
-                    <ShieldCheck className="h-6 w-6 text-slate-300" />
+                    <ShieldCheck className="h-6 w-6 text-emerald-300" />
                   </div>
                 </div>
               </div>
@@ -515,15 +596,15 @@ export default function HomePage() {
           </div>
 
           <div className="mt-14 grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
-            {features.map((feature) => {
+            {features.map((feature, index) => {
               const Icon = feature.icon;
 
               return (
                 <div
                   key={feature.title}
-                  className="group rounded-2xl border border-slate-200 bg-white p-6 transition duration-300 hover:-translate-y-1 hover:border-slate-300 hover:shadow-xl hover:shadow-slate-900/5"
+                  className="group rounded-2xl border border-slate-200 bg-white p-6 shadow-sm transition duration-300 hover:-translate-y-1 hover:border-indigo-200 hover:shadow-xl hover:shadow-indigo-900/10"
                 >
-                  <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-gradient-to-br from-blue-100 via-indigo-100 to-purple-100 text-indigo-600 transition group-hover:from-blue-500 group-hover:via-indigo-500 group-hover:to-purple-500 group-hover:text-white">
+                  <div className={`flex h-11 w-11 items-center justify-center rounded-xl ${featureTones[index]} transition duration-300 group-hover:text-white group-hover:shadow-lg`}>
                     <Icon className="h-5 w-5" />
                   </div>
 

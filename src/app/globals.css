@@ -1,17 +1,20 @@
 @import "tailwindcss";
 
 :root {
-  --background: #eef2fb;
-  --foreground: #0f172a;
-
-  /* iOS system palette */
-  --ios-blue: #0a84ff;
-  --ios-green: #30d158;
-  --ios-indigo: #5856d6;
-  --ios-purple: #af52de;
-  --ios-pink: #ff2d55;
-  --ios-orange: #ff9f0a;
-  --ios-red: #ff3b30;
+  color-scheme: light;
+  --background: #f4f6f8;
+  --surface: #ffffff;
+  --foreground: #172b3a;
+  --muted: #687887;
+  --line: #e3e9ed;
+  --brand: #147d75;
+  --brand-dark: #10665f;
+  --brand-soft: #e8f5f2;
+  --accent-amber: #c88124;
+  --accent-green: #39836a;
+  --accent-coral: #c86c58;
+  --accent-indigo: #596b9a;
+  --shadow-card: 0 2px 8px rgb(23 43 58 / 4%), 0 12px 28px rgb(23 43 58 / 3%);
 }
 
 * {
@@ -24,11 +27,13 @@ html {
 }
 
 body {
+  min-height: 100vh;
   margin: 0;
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: Inter, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 button,
@@ -44,239 +49,322 @@ button {
 
 a,
 button {
-  -webkit-tap-highlight-color: rgba(99, 102, 241, 0.25);
+  -webkit-tap-highlight-color: rgb(20 125 117 / 14%);
 }
 
 ::selection {
-  background: #c7d2fe;
-  color: #1e1b4b;
+  background: #cce9e3;
+  color: #123d3a;
 }
 
-/* ------------------------------------------------------------------
-   iOS GLOSS THEME
-   Colorful wallpaper + system font for every page EXCEPT the Report
-   page (/dashboard/reports). The Report page root carries the unique
-   class "bg-[#EAEEF6]", so these rules switch themselves off the moment
-   that page is mounted — the report keeps its exact current rendering
-   without its file being edited.
-   ------------------------------------------------------------------ */
-
-body:not(:has([class*="EAEEF6"])) {
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
-    "SF Pro Display", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  background-color: #eef2fb;
-  background-image:
-    radial-gradient(1100px 700px at 8% -12%, rgba(10, 132, 255, 0.22), transparent 62%),
-    radial-gradient(1000px 650px at 108% -4%, rgba(191, 90, 242, 0.2), transparent 58%),
-    radial-gradient(900px 800px at 50% 115%, rgba(48, 209, 88, 0.16), transparent 60%),
-    radial-gradient(700px 550px at 92% 65%, rgba(255, 159, 10, 0.14), transparent 55%),
-    radial-gradient(650px 500px at 4% 78%, rgba(100, 210, 255, 0.18), transparent 55%),
-    linear-gradient(180deg, #eef4ff 0%, #f4efff 45%, #ecfaf3 100%);
-  background-attachment: fixed;
+/* Shared workspace shell */
+.dashboard-chrome {
+  border-color: var(--line) !important;
+  background-color: rgb(255 255 255 / 96%) !important;
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
 }
 
-/* ------------------------------------------------------------------
-   Utility overrides live inside the utilities layer so every Tailwind
-   state variant (hover:, focus:, disabled:, group-hover:) keeps a higher
-   specificity and continues to win. The :where() wrapper adds zero
-   specificity, so these overrides beat plain utilities by source order.
-   ------------------------------------------------------------------ */
-
-@layer utilities {
-  /* ==================== page canvases ====================
-     Let the colorful wallpaper show through full-page backgrounds. */
-  :where(body:not(:has([class*="EAEEF6"]))) .min-h-screen.bg-slate-50,
-  :where(body:not(:has([class*="EAEEF6"]))) .min-h-screen.bg-slate-100 {
-    background-color: transparent;
-  }
-
-  /* ==================== frosted white surfaces ====================
-     Every white card / panel / list row becomes glossy frosted glass. */
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-white {
-    background-color: rgba(255, 255, 255, 0.86);
-    background-image: linear-gradient(
-      155deg,
-      rgba(255, 255, 255, 0.6),
-      rgba(255, 255, 255, 0.08) 55%,
-      rgba(255, 255, 255, 0.28)
-    );
-  }
-
-
-  /* ==================== glossy solid buttons / fills ====================
-     A translucent white sheen (background-image) sits above the solid
-     background-color, so hover:/disabled: color changes still show. */
-
-  /* blues / indigos / violets / purples / sky / cyan */
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-blue-600,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-blue-700,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-indigo-600,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-violet-600,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-purple-600,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-sky-600,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-cyan-600 {
-    background-image: linear-gradient(
-      180deg,
-      rgba(255, 255, 255, 0.32),
-      rgba(255, 255, 255, 0.06) 48%,
-      rgba(0, 0, 0, 0.1)
-    );
-    box-shadow:
-      0 8px 20px -8px rgba(79, 70, 229, 0.55),
-      inset 0 1px 0 rgba(255, 255, 255, 0.45);
-  }
-
-  /* dark primaries (login / landing CTAs) */
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-slate-900,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-slate-950 {
-    background-image: linear-gradient(
-      180deg,
-      rgba(255, 255, 255, 0.26),
-      rgba(255, 255, 255, 0.04) 50%,
-      rgba(0, 0, 0, 0.12)
-    );
-    box-shadow:
-      0 10px 24px -10px rgba(79, 70, 229, 0.45),
-      inset 0 1px 0 rgba(255, 255, 255, 0.3);
-  }
-
-
-  /* greens / teals */
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-emerald-600,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-emerald-700,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-green-600,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-teal-600 {
-    background-image: linear-gradient(
-      180deg,
-      rgba(255, 255, 255, 0.32),
-      rgba(255, 255, 255, 0.06) 48%,
-      rgba(0, 0, 0, 0.1)
-    );
-    box-shadow:
-      0 8px 20px -8px rgba(16, 185, 129, 0.5),
-      inset 0 1px 0 rgba(255, 255, 255, 0.45);
-  }
-
-  /* reds / roses / pinks */
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-red-600,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-red-700,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-rose-600,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-pink-600 {
-    background-image: linear-gradient(
-      180deg,
-      rgba(255, 255, 255, 0.32),
-      rgba(255, 255, 255, 0.06) 48%,
-      rgba(0, 0, 0, 0.1)
-    );
-    box-shadow:
-      0 8px 20px -8px rgba(255, 59, 48, 0.45),
-      inset 0 1px 0 rgba(255, 255, 255, 0.45);
-  }
-
-  /* ambers / oranges / yellows */
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-amber-500,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-amber-600,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-orange-600,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-yellow-500 {
-    background-image: linear-gradient(
-      180deg,
-      rgba(255, 255, 255, 0.35),
-      rgba(255, 255, 255, 0.06) 48%,
-      rgba(0, 0, 0, 0.1)
-    );
-    box-shadow:
-      0 8px 20px -8px rgba(255, 159, 10, 0.5),
-      inset 0 1px 0 rgba(255, 255, 255, 0.5);
-  }
-
-
-  /* ==================== pastel candy tints ====================
-     Soft diagonal sheen over every light tinted chip / badge / tile. */
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-blue-50,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-blue-100,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-indigo-50,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-indigo-100,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-violet-50,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-purple-50,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-emerald-50,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-emerald-100,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-green-50,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-green-100,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-red-50,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-red-100,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-rose-50,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-amber-50,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-amber-100,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-yellow-50,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-orange-50,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-sky-50,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-teal-50,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-pink-50,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-violet-100,
-  :where(body:not(:has([class*="EAEEF6"]))) .bg-purple-100 {
-    background-image: linear-gradient(
-      135deg,
-      rgba(255, 255, 255, 0.75),
-      rgba(255, 255, 255, 0.05) 70%
-    );
-  }
-
-
-  /* ==================== table headers ==================== */
-  :where(body:not(:has([class*="EAEEF6"]))) thead {
-    background-image: linear-gradient(
-      180deg,
-      rgba(248, 250, 252, 0.95),
-      rgba(238, 242, 255, 0.9)
-    );
-  }
-
-  /* ==================== colorful focus (a11y) ==================== */
-  :where(body:not(:has([class*="EAEEF6"]))) a:focus-visible,
-  :where(body:not(:has([class*="EAEEF6"]))) button:focus-visible,
-  :where(body:not(:has([class*="EAEEF6"]))) [tabindex]:focus-visible {
-    outline: 2px solid rgba(10, 132, 255, 0.8);
-    outline-offset: 2px;
-  }
-
-  /* ==================== iOS checkboxes / radios ==================== */
-  input[type="checkbox"],
-  input[type="radio"] {
-    accent-color: var(--ios-blue);
-  }
+.dashboard-chrome a,
+.dashboard-chrome button {
+  transition: color 160ms ease, background-color 160ms ease, border-color 160ms ease,
+    box-shadow 160ms ease, transform 160ms ease;
 }
 
-
-/* ==================== iOS-style scrollbars ====================
-   Scoped to non-report pages the same way as the theme above. */
-
-html:not(:has([class*="EAEEF6"]))::-webkit-scrollbar,
-html:not(:has([class*="EAEEF6"])) *::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+.dashboard-chrome [class*="bg-gradient-to"] {
+  background-image: none !important;
 }
 
-html:not(:has([class*="EAEEF6"]))::-webkit-scrollbar-track,
-html:not(:has([class*="EAEEF6"])) *::-webkit-scrollbar-track {
+.dashboard-chrome [class*="bg-gradient-to"][class*="text-white"] {
+  background-color: var(--brand) !important;
+}
+
+.dashboard-chrome nav a:not([class*="text-white"]):hover {
+  background-color: #f0f6f5;
+  color: var(--brand-dark);
+}
+
+.dashboard-chrome nav a[class*="text-white"] {
+  background: var(--brand) !important;
+  box-shadow: 0 3px 8px rgb(20 125 117 / 18%) !important;
+}
+
+/* Give common content surfaces a consistent, quiet finish. */
+main .rounded-xl.border,
+main .rounded-2xl.border,
+main .rounded-3xl.border {
+  border-color: var(--line);
+}
+
+main .bg-white {
+  background-color: var(--surface);
+}
+
+/* Principal and school admin home: add breathing room and a school palette. */
+main > .min-h-full {
+  background-color: #eef2f8;
+  background-image: linear-gradient(180deg, #eef2f8 0%, #f5f7fb 45%, #eef3f7 100%);
+}
+
+main > .min-h-full section.overflow-hidden.rounded-3xl.bg-blue-600 {
+  background-color: #172554 !important;
+  background-image: linear-gradient(118deg, #111c3a 0%, #1d3472 56%, #4338a8 100%) !important;
+  box-shadow: 0 18px 38px rgb(26 41 87 / 22%);
+}
+
+main > .min-h-full section.overflow-hidden[class*="bg-gradient-to-br"] {
+  background-color: #172554 !important;
+  background-image: linear-gradient(118deg, #111c3a 0%, #1d3472 56%, #4338a8 100%) !important;
+  box-shadow: 0 18px 38px rgb(26 41 87 / 22%) !important;
+}
+
+main > .min-h-full .grid > a.group {
+  border-color: var(--line);
+  min-height: 104px;
+  padding: 1.2rem;
+  box-shadow: 0 5px 18px rgb(24 39 75 / 6%);
+  transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
+}
+
+main > .min-h-full .grid > a.group:hover {
+  transform: translateY(-3px);
+  border-color: #b8d9d3;
+  box-shadow: 0 12px 26px rgb(23 43 58 / 9%);
+}
+
+main > .min-h-full .grid > a.group:nth-child(5n + 1) > span:first-child,
+main > .min-h-full .grid > a.group:nth-child(5n + 1) > div:first-child > div:first-child {
+  background: #e2eaff !important;
+  color: #2454c6 !important;
+}
+
+main > .min-h-full .grid > a.group:nth-child(5n + 2) > span:first-child,
+main > .min-h-full .grid > a.group:nth-child(5n + 2) > div:first-child > div:first-child {
+  background: #ece8ff !important;
+  color: #653ac8 !important;
+}
+
+main > .min-h-full .grid > a.group:nth-child(5n + 3) > span:first-child,
+main > .min-h-full .grid > a.group:nth-child(5n + 3) > div:first-child > div:first-child {
+  background: #ddf4ed !important;
+  color: #087c68 !important;
+}
+
+main > .min-h-full .grid > a.group:nth-child(5n + 4) > span:first-child,
+main > .min-h-full .grid > a.group:nth-child(5n + 4) > div:first-child > div:first-child {
+  background: #fff0d7 !important;
+  color: #a65b08 !important;
+}
+
+main > .min-h-full .grid > a.group:nth-child(5n) > span:first-child,
+main > .min-h-full .grid > a.group:nth-child(5n) > div:first-child > div:first-child {
+  background: #ffe5e8 !important;
+  color: #b52648 !important;
+}
+
+main > .min-h-full .grid > a.group:hover > div:first-child > div:first-child,
+main > .min-h-full .grid > a.group:hover > span:first-child {
+  background: #172554 !important;
+  color: #fff !important;
+  box-shadow: 0 8px 18px rgb(23 37 84 / 20%);
+}
+
+main > .min-h-full section.rounded-3xl.border.bg-white {
+  border-color: #dce4ef;
+  box-shadow: 0 10px 30px rgb(24 39 75 / 6%);
+}
+
+main > .min-h-full section.rounded-3xl.border.bg-white .grid > a.group {
+  min-height: 84px;
+  padding: 0.75rem;
+  border-color: #e1e7f0;
+  background-color: #f7f9fc;
+}
+
+main > .min-h-full section.rounded-3xl.border.bg-white .grid > a.group:hover {
+  border-color: #a8b9e8;
+  background-color: #eef2ff;
+}
+
+main > .min-h-full section.rounded-3xl.border.bg-white .grid > a.group > div > div:first-child {
+  width: 2.5rem;
+  height: 2.5rem;
+  flex: 0 0 2.5rem;
+  border: 1px solid #e3e9f3;
+  background-color: #e5edff !important;
+  color: #2454c6 !important;
+}
+
+main > .min-h-full section.rounded-3xl.border.bg-white .grid > a.group:nth-child(4n + 2) > div > div:first-child {
+  background-color: #eee9ff !important;
+  color: #653ac8 !important;
+}
+
+main > .min-h-full section.rounded-3xl.border.bg-white .grid > a.group:nth-child(4n + 3) > div > div:first-child {
+  background-color: #ddf4ed !important;
+  color: #087c68 !important;
+}
+
+main > .min-h-full section.rounded-3xl.border.bg-white .grid > a.group:nth-child(4n) > div > div:first-child {
+  background-color: #fff0d7 !important;
+  color: #a65b08 !important;
+}
+
+main > .min-h-full section.rounded-3xl.border.bg-white .grid > a.group:hover > div > div:first-child {
+  background-color: #223b82 !important;
+  color: #fff !important;
+}
+
+main > .min-h-full > div > section.mt-8.grid > div.rounded-2xl.border.bg-white {
+  border-color: #dce4ef;
+  box-shadow: 0 10px 30px rgb(24 39 75 / 6%);
+}
+
+main > .min-h-full > div > section.mt-8.grid > div.rounded-2xl.border.bg-white:nth-child(1) > div:first-child > div:first-child {
+  background-color: #e4edff !important;
+  color: #2454c6 !important;
+}
+
+main > .min-h-full > div > section.mt-8.grid > div.rounded-2xl.border.bg-white:nth-child(2) > div:first-child > div:first-child {
+  background-color: #eee9ff !important;
+  color: #653ac8 !important;
+}
+
+/* Staff portal cards get their own softer accents while keeping actions clear. */
+main > main.min-h-screen {
+  background-color: #f2f6f6;
+}
+
+main > main.min-h-screen > div > .mt-6.overflow-hidden.rounded-2xl.border {
+  border-color: #d7e7e3;
+  box-shadow: var(--shadow-card);
+}
+
+main > main.min-h-screen > div > .mt-6.grid > a {
+  border-color: var(--line);
+  box-shadow: var(--shadow-card);
+  transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
+}
+
+main > main.min-h-screen > div > .mt-6.grid > a:hover {
+  transform: translateY(-3px);
+  border-color: #b8d9d3;
+  box-shadow: 0 12px 26px rgb(23 43 58 / 9%);
+}
+
+main > main.min-h-screen > div > .mt-6.grid > a:nth-child(4n + 1) svg {
+  color: #147d75;
+}
+
+main > main.min-h-screen > div > .mt-6.grid > a:nth-child(4n + 2) svg {
+  color: #ad6b19;
+}
+
+main > main.min-h-screen > div > .mt-6.grid > a:nth-child(4n + 3) svg {
+  color: #596b9a;
+}
+
+main > main.min-h-screen > div > .mt-6.grid > a:nth-child(4n) svg {
+  color: #b96350;
+}
+
+main table thead {
+  background-color: #f6f8f9;
+}
+
+main table th {
+  color: #596b79;
+  font-weight: 600;
+}
+
+input,
+select,
+textarea {
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: #65a9a1 !important;
+  box-shadow: 0 0 0 3px rgb(20 125 117 / 11%);
+  outline: none;
+}
+
+button,
+a {
+  transition: color 150ms ease, background-color 150ms ease, border-color 150ms ease,
+    box-shadow 150ms ease, transform 150ms ease;
+}
+
+button:focus-visible,
+a:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid #398f86;
+  outline-offset: 2px;
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--brand);
+}
+
+html::-webkit-scrollbar,
+*::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+html::-webkit-scrollbar-track,
+*::-webkit-scrollbar-track {
   background: transparent;
 }
 
-html:not(:has([class*="EAEEF6"]))::-webkit-scrollbar-thumb,
-html:not(:has([class*="EAEEF6"])) *::-webkit-scrollbar-thumb {
-  background: rgba(100, 116, 139, 0.35);
-  background-clip: padding-box;
+html::-webkit-scrollbar-thumb,
+*::-webkit-scrollbar-thumb {
   border: 2px solid transparent;
   border-radius: 999px;
-}
-
-html:not(:has([class*="EAEEF6"]))::-webkit-scrollbar-thumb:hover,
-html:not(:has([class*="EAEEF6"])) *::-webkit-scrollbar-thumb:hover {
-  background: rgba(99, 102, 241, 0.55);
+  background: #cbd5da;
   background-clip: padding-box;
-  border: 2px solid transparent;
 }
 
-/* ==================== print (PDF exports stay clean) ==================== */
+html::-webkit-scrollbar-thumb:hover,
+*::-webkit-scrollbar-thumb:hover {
+  background: #9aadb3;
+  background-clip: padding-box;
+}
+
+@keyframes workspace-enter {
+  from {
+    opacity: 0;
+    transform: translateY(7px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  main > * {
+    animation: workspace-enter 320ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}
 
 @media print {
   .dashboard-chrome,
@@ -284,24 +372,10 @@ html:not(:has([class*="EAEEF6"])) *::-webkit-scrollbar-thumb:hover {
     display: none !important;
   }
 
-  body {
-    background: #ffffff !important;
-    background-image: none !important;
-  }
-
-  .bg-white {
-    background-color: #ffffff !important;
-    background-image: none !important;
-  }
-
+  body,
   .min-h-screen.bg-slate-50,
   .min-h-screen.bg-slate-100 {
-    background: #ffffff !important;
-  }
-
-  thead {
-    background: #f8fafc !important;
-    background-image: none !important;
+    background: #fff !important;
   }
 
   *,
@@ -309,11 +383,5 @@ html:not(:has([class*="EAEEF6"])) *::-webkit-scrollbar-thumb:hover {
   *::after {
     -webkit-backdrop-filter: none !important;
     backdrop-filter: none !important;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  html {
-    scroll-behavior: auto;
   }
 }
