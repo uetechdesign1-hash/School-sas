@@ -36,6 +36,15 @@ type Subscription = {
 };
 
 type Ownership = { original_acquisition_rep_id: string | null; current_rep_id: string | null; acquired_at: string };
+type RenewalResult = {
+  subscription_id: string;
+  mou_id: string;
+  mou_number: string;
+  version: number;
+  total_amount: number | string;
+  starts_on: string;
+  expires_on: string;
+};
 
 async function load(schoolId: string, isAdmin: boolean) {
   const supabase = createClient();
@@ -76,6 +85,7 @@ export function SchoolBusinessPanel({ schoolId, isAdmin }: { schoolId: string; i
   const [payOpen, setPayOpen] = useState(false);
   const [payInvoice, setPayInvoice] = useState<string | undefined>();
   const [finalOpen, setFinalOpen] = useState(false);
+  const [renewOpen, setRenewOpen] = useState(false);
   const [finalCount, setFinalCount] = useState("");
   const [finalNote, setFinalNote] = useState("");
   const [loginOpen, setLoginOpen] = useState(false);
@@ -100,6 +110,22 @@ export function SchoolBusinessPanel({ schoolId, isAdmin }: { schoolId: string; i
 
   async function doAction(task: () => Promise<unknown>, message: string) {
     await action.run(task, message);
+    await reload();
+  }
+
+  async function renewAgreement() {
+    const result = await action.run(
+      () => callRpc<RenewalResult>(supabase, "renew_school_subscription", {
+        p_school_id: schoolId,
+        p_place: place || null,
+      }),
+      "One-year renewal and new MOU created.",
+    );
+    if (!result) return;
+    action.setSuccess(
+      `Renewed through ${formatDate(result.expires_on)}. Initial MOU ${result.mou_number} (v${result.version}) is ready to download.`,
+    );
+    setRenewOpen(false);
     await reload();
   }
 
@@ -184,6 +210,17 @@ export function SchoolBusinessPanel({ schoolId, isAdmin }: { schoolId: string; i
             <button type="button" className={buttonClass("primary", true)} disabled={action.busy || !sub} onClick={() => doAction(() => callRpc(supabase, "generate_initial_mou", { p_school_id: schoolId, p_place: place || null }), "A new Initial MOU version was generated.")}>
               {hasInitial ? "New Initial MOU version" : "Generate Initial MOU"}
             </button>
+            {sub?.contract_term_months === 12 ? (
+              <button
+                type="button"
+                className={buttonClass("primary", true)}
+                disabled={action.busy || Boolean(pendingConfirmation)}
+                onClick={() => setRenewOpen(true)}
+                title={pendingConfirmation ? "Resolve the pending billing-count approval before renewing." : undefined}
+              >
+                Extend 1 year &amp; create MOU
+              </button>
+            ) : null}
             <button type="button" className={buttonClass("secondary", true)} disabled={!hasInitial || Boolean(pendingConfirmation)} onClick={() => setFinalOpen(true)}>Confirm billing count</button>
           </div>
         }
@@ -214,6 +251,26 @@ export function SchoolBusinessPanel({ schoolId, isAdmin }: { schoolId: string; i
           ]}
         />
       </Card>
+
+      <Modal
+        open={renewOpen}
+        onClose={() => setRenewOpen(false)}
+        title="Extend this school for one year?"
+        footer={
+          <>
+            <button type="button" className={buttonClass("secondary")} onClick={() => setRenewOpen(false)}>Cancel</button>
+            <button type="button" className={buttonClass()} disabled={action.busy} onClick={() => void renewAgreement()}>
+              {action.busy ? "Creating renewal..." : "Extend 1 year & create MOU"}
+            </button>
+          </>
+        }
+      >
+        <div className="space-y-3 text-sm leading-6 text-slate-600">
+          <p>This creates a new 12-month agreement using the current plan, student count, price and payment terms. The new term starts the day after the current expiry, or today if the agreement has already expired.</p>
+          <p>The current agreement, invoices and MOU stay in the history. A new Initial MOU is generated for the renewed term; confirm the billing count afterward if the school needs a Final MOU.</p>
+          <p className="rounded-xl bg-blue-50 px-3 py-2 text-xs text-blue-800">This action also extends the school&apos;s access through the new contract end date.</p>
+        </div>
+      </Modal>
 
       <Card
         title="Invoices"
