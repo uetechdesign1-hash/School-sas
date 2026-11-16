@@ -4767,7 +4767,7 @@ filteredReturns.map((ret) => {
               {billPurchaseType === "inventory"
                 ? "Choose Inventory / Resale for products to sell or issue from stock. Enter a size, pack, colour, or any other variant when needed."
                 : billPurchaseType === "service"
-                  ? "Choose Service for repairs, work, transport, consulting, or other services. No stock is created."
+                  ? "Choose Service for repairs, consulting, or other services. No stock is created."
                   : "Choose Expense / Consumption for supplies used by the school. No stock is created."}
             </div>
           </div>

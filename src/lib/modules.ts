@@ -18,11 +18,9 @@ export type ModuleCode = SchoolModule;
 
 export const MODULES: readonly { code: SchoolModule; label: string; description: string }[] = SCHOOL_MODULES;
 
-export const DEFAULT_ENABLED_MODULES: SchoolModule[] = ["fees", "payroll"];
-
 export function validateModules(value: unknown): SchoolModule[] {
   const result = parseEnabledModules(value);
-  if (!result) throw new TypeError("Invalid modules");
+  if (!result || result.length === 0) throw new TypeError("Invalid modules");
   return result;
 }
 
@@ -33,7 +31,6 @@ const MODULE_CODES = new Set<string>(
 export function parseEnabledModules(value: unknown): SchoolModule[] | null {
   if (
     !Array.isArray(value) ||
-    value.length === 0 ||
     value.some(
       (module) => typeof module !== "string" || !MODULE_CODES.has(module),
     ) ||

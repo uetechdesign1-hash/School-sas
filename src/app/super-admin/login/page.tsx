@@ -89,22 +89,49 @@ export default function SuperAdminLoginPage() {
         await supabase.auth.signOut();
         throw new Error(
           profileError.message ||
-            "Unable to verify your administrator account."
+            "Unable to verify your platform account."
         );
       }
 
-      if (
-        !profile ||
-        profile.platform_role !== "super_admin" ||
-        profile.is_active !== true
-      ) {
+      if (!profile || profile.is_active !== true) {
         await supabase.auth.signOut();
         throw new Error(
-          "This account does not have active Super Administrator access."
+          "This account does not have active platform access."
         );
       }
 
-      router.replace("/super-admin");
+      if (profile.platform_role === "super_admin") {
+        router.replace("/super-admin");
+        return;
+      }
+
+      if (profile.platform_role === "sales_rep") {
+        const { data: representative, error: representativeError } = await supabase
+          .from("sales_representatives")
+          .select("status")
+          .eq("user_id", data.user.id)
+          .maybeSingle();
+
+        if (representativeError) {
+          await supabase.auth.signOut();
+          throw new Error("Unable to verify your Sales Team account.");
+        }
+
+        if (representative?.status !== "active") {
+          await supabase.auth.signOut();
+          throw new Error(
+            "Your Sales Team account is not active. Contact a Super Admin."
+          );
+        }
+
+        router.replace("/sales");
+        return;
+      }
+
+      await supabase.auth.signOut();
+      throw new Error(
+        "This account does not have active Super Admin or Sales Team access."
+      );
     } catch (err: any) {
       setError(
         err?.message ||
@@ -145,11 +172,10 @@ export default function SuperAdminLoginPage() {
               SCB
             </p>
             <h1 className="mt-2 text-2xl font-bold text-slate-900">
-              Super Admin Login
+              Platform Team Login
             </h1>
             <p className="mt-2 text-sm leading-6 text-slate-500">
-              Sign in to manage schools, subscriptions and platform
-              administration.
+              Sign in as a Super Admin or Sales Team member.
             </p>
           </div>
 
@@ -209,13 +235,13 @@ export default function SuperAdminLoginPage() {
                   Signing in...
                 </>
               ) : (
-                "Sign in as Super Admin"
+                "Sign in"
               )}
             </button>
           </form>
 
           <p className="mt-7 text-center text-xs leading-5 text-slate-400">
-            Authorized SCB platform administrators only.
+            Authorized SCB Super Admins and Sales Team members only.
           </p>
         </div>
       </div>

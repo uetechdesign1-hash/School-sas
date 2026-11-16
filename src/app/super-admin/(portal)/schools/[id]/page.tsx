@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
+import { SchoolBusinessPanel } from "@/components/business/school-business-panel";
 import {
   ArrowLeft,
   Building2,
@@ -331,11 +332,11 @@ export default function SuperAdminSchoolPage() {
 
         <div className="flex flex-wrap items-center justify-between gap-4">
           <Link
-            href="/super-admin"
+            href="/super-admin/schools"
             className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-100"
           >
             <ArrowLeft className="h-4 w-4" />
-            Back to Super Admin
+            Back to Schools
           </Link>
 
           <button
@@ -716,6 +717,13 @@ export default function SuperAdminSchoolPage() {
             </div>
           </div>
         )}
+
+        {/* BUSINESS: agreement, MOUs, invoices, collections, ownership */}
+
+        <section className="mt-10">
+          <h2 className="mb-4 text-xl font-bold text-slate-900">Business & agreement</h2>
+          <SchoolBusinessPanel schoolId={schoolId} isAdmin />
+        </section>
       </div>
     </main>
   );

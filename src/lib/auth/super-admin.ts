@@ -10,7 +10,7 @@ export class SuperAdminAuthError extends Error {
   }
 }
 
-export async function requireSuperAdmin(request: Request) {
+async function getPlatformUser(request: Request) {
   const token = request.headers.get("authorization")?.match(/^Bearer\s+(\S+)$/i)?.[1];
   if (!token) {
     throw new SuperAdminAuthError("Authorization token is required.", 401);
@@ -38,19 +38,50 @@ export async function requireSuperAdmin(request: Request) {
     .maybeSingle();
 
   if (profileError) {
-    throw new Error(`Unable to verify Super Admin access: ${profileError.message}`);
-  }
-  if (!profile || profile.platform_role !== "super_admin" || profile.is_active !== true) {
-    throw new SuperAdminAuthError("Super Admin access required.", 403);
+    throw new Error(`Unable to verify platform access: ${profileError.message}`);
   }
 
+  const authenticated = createClient(url, publishableKey, {
+    auth: { autoRefreshToken: false, persistSession: false },
+    global: { headers: { Authorization: `Bearer ${token}` } },
+  });
+  return { authenticated, user, profile, url };
+}
+
+function withAdminClient<T extends { url: string }>(result: T) {
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!serviceRoleKey) {
     throw new Error("Supabase server configuration is missing.");
   }
-
-  const admin = createClient(url, serviceRoleKey, {
+  const admin = createClient(result.url, serviceRoleKey, {
     auth: { autoRefreshToken: false, persistSession: false },
   });
-  return { admin, user };
+  return { ...result, admin };
+}
+
+export async function requireSuperAdmin(request: Request) {
+  const result = await getPlatformUser(request);
+  if (
+    !result.profile ||
+    result.profile.platform_role !== "super_admin" ||
+    result.profile.is_active !== true
+  ) {
+    throw new SuperAdminAuthError("Super Admin access required.", 403);
+  }
+  return withAdminClient(result);
+}
+
+export async function requireSchoolCreator(request: Request) {
+  const result = await getPlatformUser(request);
+  if (
+    !result.profile ||
+    !["super_admin", "sales_rep"].includes(result.profile.platform_role) ||
+    result.profile.is_active !== true
+  ) {
+    throw new SuperAdminAuthError(
+      "School creation access is restricted to active Super Admins and authorized Sales Representatives.",
+      403,
+    );
+  }
+  return withAdminClient(result);
 }

@@ -5,6 +5,7 @@ import {
   hasRequiredModule,
   parseEnabledModules,
   requiredModulesForPath,
+  validateModules,
 } from "../src/lib/modules.ts";
 
 const PLAN1 = ["fees"];
@@ -150,4 +151,11 @@ test("module route checks allow any valid module combination and fail closed", (
   assert.equal(hasRequiredModule(null, ["fees"]), false);
   assert.equal(canAccessSchoolPath(null, "/dashboard/students"), false);
   assert.equal(canAccessSchoolPath(undefined, "/dashboard/staff"), false);
+});
+
+test("empty entitlements are valid at runtime but invalid for plan selection", () => {
+  assert.deepEqual(parseEnabledModules([]), []);
+  assert.throws(() => validateModules([]), /Invalid modules/);
+  assert.equal(hasRequiredModule([], ["fees"]), false);
+  assert.equal(canAccessSchoolPath([], "/dashboard/students/new"), false);
 });

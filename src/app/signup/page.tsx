@@ -44,7 +44,7 @@ export default function SignupPage() {
     setLoading(false);
 
     setMessage(
-      "Account created. Check your email if email confirmation is enabled."
+      "Account created. Verify your email, then discuss the subscription plan, pricing, student strength and payment terms with our school team."
     );
 
     setTimeout(() => {
@@ -84,7 +84,8 @@ export default function SignupPage() {
             </h1>
 
             <p className="mt-2 text-sm text-slate-500">
-              Start setting up your school.
+              School accounts are provisioned by authorized staff after plans,
+              pricing, student strength and payment terms are agreed.
             </p>
           </div>
 

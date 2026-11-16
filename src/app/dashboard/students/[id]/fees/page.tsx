@@ -4793,7 +4793,7 @@ export default function FeesPage() {
                       Fee Categories & Payment Amounts
                     </label>
                     <p className="mt-1 text-xs text-slate-500">
-                      Add one or more categories. A student can pay Annual, Uniform, Transport, etc. on the same day in one collection.
+                      Add one or more categories. A student can pay annual, uniform, and other fees on the same day in one collection.
                     </p>
                   </div>
                   <div className="rounded-lg bg-white px-3 py-2 text-right shadow-sm">

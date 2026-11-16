@@ -1,11 +1,25 @@
 import assert from "node:assert/strict";
+import { registerHooks } from "node:module";
 import test from "node:test";
-import {
+
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (specifier.startsWith("@/")) {
+      return {
+        url: new URL(`../src/${specifier.slice(2)}.ts`, import.meta.url).href,
+        shortCircuit: true,
+      };
+    }
+    return nextResolve(specifier, context);
+  },
+});
+
+const {
   isAuthorizedImportRole,
   AUTHORIZED_IMPORT_ROLES,
   UnauthenticatedError,
   UnauthorizedError,
-} from "../src/lib/students/import-auth.ts";
+} = await import("../src/lib/students/import-auth.ts");
 
 test("isAuthorizedImportRole returns true for owner", () => {
   assert.equal(isAuthorizedImportRole("owner"), true);

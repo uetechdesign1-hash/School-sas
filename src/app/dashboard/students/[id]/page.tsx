@@ -911,7 +911,7 @@ export default function StudentDetailsPage() {
       const billMap = new Map(bills.map(bill => [bill.id, bill]));
 
       // Category names so Particulars always shows the Fee Category used
-      // (e.g. "Tuition Fee", "Transport Fee"). Falls back to item description.
+      // (e.g. "Tuition Fee", "Exam Fee"). Falls back to item description.
       const categoryById = new Map<string, string>();
       try {
         const catResult = await supabase

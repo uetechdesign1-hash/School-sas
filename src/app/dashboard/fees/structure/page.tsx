@@ -1577,7 +1577,7 @@ export default function FeeStructurePage() {
                         Create Fee Category
                       </h3>
                       <p className="mt-1 text-xs text-slate-500">
-                        Examples: Tuition Fee, Transport Fee, Exam Fee,
+                        Examples: Tuition Fee, Exam Fee,
                         Admission Fee.
                       </p>
                     </div>
@@ -1975,7 +1975,7 @@ export default function FeeStructurePage() {
                   No fee categories created yet.
                 </p>
                 <p className="mt-1 text-xs text-slate-500">
-                  Create categories such as Tuition Fee, Transport Fee,
+                  Create categories such as Tuition Fee,
                   Exam Fee, or Admission Fee.
                 </p>
               </div>

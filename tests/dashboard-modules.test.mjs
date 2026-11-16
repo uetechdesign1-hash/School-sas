@@ -58,8 +58,8 @@ function renderDashboard(modules, role = "owner") {
   return renderToStaticMarkup(React.createElement(DashboardPage));
 }
 
-test("transport and payroll dashboards hide financial UI and retain core cards", () => {
-  for (const modules of [["transport"], ["payroll"]]) {
+test("payroll-only dashboards hide financial UI and retain core cards", () => {
+  for (const modules of [["payroll"]]) {
     for (const role of ["owner", "admin"]) {
       const html = renderDashboard(modules, role);
       assert.match(html, />Students</);
@@ -68,12 +68,20 @@ test("transport and payroll dashboards hide financial UI and retain core cards",
       assert.doesNotMatch(html, />Fee Collection<|>Fees collected<|>Expenses<|>Accounting Control Center</);
       assert.doesNotMatch(html, /href="\/dashboard\/expenses"|href="\/accounting\/collect-fee"/);
       assert.doesNotMatch(html, /Plan|starter/i);
-      assert.match(html, modules[0] === "transport" ? /Module: Transport/ : /Module: Payroll/);
+      assert.match(html, /Module: Payroll/);
       if (role === "owner") {
         assert.equal(html.includes('href="/dashboard/payroll"'), modules.includes("payroll"));
       }
     }
   }
+});
+
+test("dashboard quick actions are unavailable with empty entitlements", () => {
+  const html = renderDashboard([]);
+  assert.doesNotMatch(
+    html,
+    /href="\/dashboard\/students"|href="\/dashboard\/staff"|href="\/dashboard\/fees"|href="\/dashboard\/payroll"/,
+  );
 });
 
 test("fee-enabled dashboards retain financial cards and actions", () => {

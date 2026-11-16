@@ -1,5 +1,6 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsHeaders } from "npm:@supabase/supabase-js@2/cors";
+import { parseSchoolModules } from "../_shared/school-modules.ts";
 
 const SUPABASE_URL =
   Deno.env.get("SUPABASE_URL")!;
@@ -38,6 +39,32 @@ function response(
 
 function clean(value: unknown) {
   return String(value ?? "").trim();
+}
+
+async function deleteSchoolIfUnchanged(schoolId: string) {
+  const { data: auditRows, error: auditError } = await admin
+    .from("audit_logs")
+    .select("id")
+    .eq("school_id", schoolId)
+    .limit(1);
+
+  if (auditError) {
+    throw new Error(
+      `School was retained because its audit history could not be verified: ${auditError.message}`,
+    );
+  }
+  if (auditRows?.length) {
+    throw new Error("School was retained to preserve audit records.");
+  }
+
+  const { error: deleteError } = await admin
+    .from("schools")
+    .delete()
+    .eq("id", schoolId);
+
+  if (deleteError) {
+    throw new Error(`Unable to roll back school creation: ${deleteError.message}`);
+  }
 }
 
 function validPassword(
@@ -141,14 +168,13 @@ Deno.serve(async (req) => {
     }
 
     if (
-      profile.platform_role !==
-        "super_admin" ||
+      !["super_admin", "sales_rep"].includes(profile.platform_role) ||
       profile.is_active !== true
     ) {
       return response(
         {
           error:
-            "Only Super Admin can create schools.",
+            "Only an active Super Admin or authorized Sales Representative can create schools.",
         },
         403
       );
@@ -162,6 +188,21 @@ Deno.serve(async (req) => {
     const body =
       await req.json();
 
+    const enabledModules = parseSchoolModules(
+      body.enabled_modules !== undefined
+        ? body.enabled_modules
+        : body.enabledModules,
+    );
+
+    if (!enabledModules) {
+      return response(
+        {
+          error:
+            "Select at least one valid subscription plan.",
+        },
+        400
+      );
+    }
 
     const schoolName =
       clean(body.schoolName);
@@ -183,13 +224,21 @@ Deno.serve(async (req) => {
       clean(body.planCode)
         .toLowerCase();
 
+    const rawAmount = body.amount ?? body.subscription_amount;
     const amount =
-      Number(body.amount || 0);
+      rawAmount === undefined || rawAmount === null || clean(rawAmount) === ""
+        ? Number.NaN
+        : Number(rawAmount);
 
     const studentLimit =
-      Number(
-        body.studentLimit || 300
-      );
+      Number(body.studentLimit ?? body.student_limit);
+
+    const paymentTerms =
+      clean(body.paymentTerms ?? body.payment_terms);
+
+    const discussionConfirmed =
+      body.salesDiscussionConfirmed === true ||
+      body.sales_discussion_confirmed === true;
 
     const startsOn =
       clean(body.startsOn);
@@ -284,6 +333,30 @@ Deno.serve(async (req) => {
       );
     }
 
+    if (!Number.isFinite(amount) || amount < 0) {
+      return response(
+        { error: "An explicitly agreed subscription price is required." },
+        400
+      );
+    }
+
+    if (!paymentTerms) {
+      return response(
+        { error: "Agreed payment terms are required." },
+        400
+      );
+    }
+
+    if (!discussionConfirmed) {
+      return response(
+        {
+          error:
+            "Confirm that plans, pricing, student strength and payment terms were discussed and agreed with the school.",
+        },
+        400
+      );
+    }
+
     if (!startsOn || !expiresOn) {
       return response(
         {
@@ -343,6 +416,27 @@ Deno.serve(async (req) => {
     const internalAuthEmail =
       `${schoolCode.toLowerCase()}@login.schoolerp.local`;
 
+    const publishableKey =
+      Deno.env.get("SUPABASE_ANON_KEY") ??
+      Deno.env.get("SUPABASE_PUBLISHABLE_KEY");
+    if (!publishableKey) {
+      throw new Error("Supabase publishable key is missing.");
+    }
+
+    const authenticated = createClient(
+      SUPABASE_URL,
+      publishableKey,
+      {
+        global: {
+          headers: { Authorization: `Bearer ${token}` },
+        },
+        auth: {
+          autoRefreshToken: false,
+          persistSession: false,
+        },
+      }
+    );
+
 
     // --------------------------------------------------------
     // 7. CREATE SCHOOL
@@ -352,7 +446,7 @@ Deno.serve(async (req) => {
       data: school,
       error: schoolError,
     } =
-      await admin
+      await authenticated
         .from("schools")
         .insert({
           name: schoolName,
@@ -365,6 +459,12 @@ Deno.serve(async (req) => {
             null,
           student_limit:
             studentLimit,
+          subscription_amount:
+            amount,
+          subscription_payment_terms:
+            paymentTerms,
+          sales_discussion_confirmed:
+            discussionConfirmed,
           plan_code:
             planCode ||
             "starter",
@@ -376,6 +476,8 @@ Deno.serve(async (req) => {
             "active",
           created_by:
             user.id,
+          enabled_modules:
+            enabledModules,
         })
         .select("id,name,school_code")
         .single();
@@ -421,14 +523,7 @@ Deno.serve(async (req) => {
       !authResult.user
     ) {
 
-      // Roll back school
-      await admin
-        .from("schools")
-        .delete()
-        .eq(
-          "id",
-          school.id
-        );
+      await deleteSchoolIfUnchanged(school.id);
 
       throw (
         authError ??
@@ -471,13 +566,7 @@ Deno.serve(async (req) => {
         ownerId
       );
 
-      await admin
-        .from("schools")
-        .delete()
-        .eq(
-          "id",
-          school.id
-        );
+      await deleteSchoolIfUnchanged(school.id);
 
       throw profileInsertError;
     }
@@ -520,13 +609,7 @@ Deno.serve(async (req) => {
         ownerId
       );
 
-      await admin
-        .from("schools")
-        .delete()
-        .eq(
-          "id",
-          school.id
-        );
+      await deleteSchoolIfUnchanged(school.id);
 
       throw membershipError;
     }
@@ -566,6 +649,9 @@ Deno.serve(async (req) => {
           student_limit:
             studentLimit,
 
+          payment_terms:
+            paymentTerms,
+
           created_by:
             user.id,
         });
@@ -583,27 +669,13 @@ Deno.serve(async (req) => {
 
       return response(
         {
-          success: true,
-
-          warning:
-            "School and owner were created, but subscription creation failed.",
-
-          schoolId:
-            school.id,
-
-          schoolCode:
-            schoolCode,
-
-          ownerName:
-            ownerName,
-
-          loginId:
-            schoolCode,
-
-          temporaryPassword:
-            password,
+          success: false,
+          error:
+            "School and owner were created, but the agreed subscription could not be saved. Records were retained for review.",
+          schoolId: school.id,
+          ownerId,
         },
-        201
+        500
       );
     }
 

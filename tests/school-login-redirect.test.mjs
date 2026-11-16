@@ -11,6 +11,12 @@ registerHooks({
     if (specifier === "@supabase/ssr" && context.parentURL?.endsWith("/src/proxy.ts")) {
       return { url: mock, shortCircuit: true };
     }
+    if (
+      specifier === "./lib/auth/proxy-access" &&
+      context.parentURL?.endsWith("/src/proxy.ts")
+    ) {
+      return nextResolve("./lib/auth/proxy-access.ts", context);
+    }
     if (specifier === "next/server") return nextResolve("next/server.js", context);
     return nextResolve(specifier, context);
   },

@@ -388,7 +388,6 @@ export default function StaffPage() {
               effective_from,
               basic_salary,
               house_allowance,
-              transport_allowance,
               medical_allowance,
               other_allowance
             `
@@ -412,7 +411,6 @@ export default function StaffPage() {
             salary.staff_id,
             Number(salary.basic_salary || 0) +
               Number(salary.house_allowance || 0) +
-              Number(salary.transport_allowance || 0) +
               Number(salary.medical_allowance || 0) +
               Number(salary.other_allowance || 0)
           );

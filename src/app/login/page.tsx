@@ -91,6 +91,31 @@ export default function LoginPage() {
         );
       }
 
+      const {
+        data: platformProfile,
+        error: platformProfileError,
+      } = await supabase
+        .from("user_profiles")
+        .select("platform_role,is_active")
+        .eq("id", data.user.id)
+        .maybeSingle();
+
+      if (platformProfileError) {
+        throw new Error("Unable to verify your platform access.");
+      }
+
+      if (platformProfile?.platform_role === "sales_rep") {
+        if (platformProfile.is_active !== true) {
+          await supabase.auth.signOut();
+          throw new Error(
+            "Your Sales Team account is inactive. Contact a Super Admin."
+          );
+        }
+
+        router.replace("/sales");
+        return;
+      }
+
       // ==================================================
       // GET SCHOOL ACCOUNT
       // ==================================================
@@ -412,6 +437,17 @@ export default function LoginPage() {
               {error && (
                 <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm leading-5 text-red-700">
                   {error}
+                  {error === "Your account is not assigned to an active school." && (
+                    <p className="mt-2">
+                      This login is for school staff and principals.{" "}
+                      <Link
+                        href="/super-admin/login"
+                        className="font-semibold underline"
+                      >
+                        Sales Team members, use the platform login.
+                      </Link>
+                    </p>
+                  )}
                 </div>
               )}
 
@@ -443,11 +479,30 @@ export default function LoginPage() {
             </form>
 
             <Link
-              href="/forgot-password"
-              className="mt-4 block text-center text-sm font-semibold text-blue-600 hover:text-blue-700"
+              href="/super-admin/login"
+              className="mt-4 block text-center text-sm font-semibold text-emerald-700 hover:text-emerald-800"
             >
-              Forgot password?
+              Sales Team or Super Admin? Use platform login
             </Link>
+
+            <button
+              type="button"
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                router.push("/forgot-password");
+              }}
+              className="mt-6 flex w-full items-center justify-center gap-2 rounded-xl bg-blue-50 px-4 py-3 text-sm font-medium text-blue-700 transition hover:bg-blue-100 active:bg-blue-200"
+            >
+              <Mail className="h-4 w-4" />
+              Forgot password?
+            </button>
+
+            <p className="mt-2 text-xs text-slate-500">
+              For staff accounts and school principal accounts. A reset link will be emailed to the address used when the account was created.
+            </p>
+
+            {/* STAFF INFO */}
 
             {/* STAFF INFO */}
 

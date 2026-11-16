@@ -1,4 +1,4 @@
-import { validateModules, type ModuleCode } from "@/lib/modules";
+import { parseEnabledModules, type ModuleCode } from "@/lib/modules";
 import { UnauthorizedError, type SchoolRoleAuth } from "@/lib/auth/server";
 
 export async function requireSchoolModule(
@@ -13,7 +13,9 @@ export async function requireSchoolModule(
 
   if (error) throw new Error(`Unable to verify school modules: ${error.message}`);
   if (!school) throw new UnauthorizedError("Your school could not be found.");
-  if (!validateModules(school.enabled_modules).includes(module)) {
+  const modules = parseEnabledModules(school.enabled_modules);
+  if (!modules) throw new Error("Unable to verify school module configuration.");
+  if (!modules.includes(module)) {
     throw new UnauthorizedError("This module is not included in your plan");
   }
 }

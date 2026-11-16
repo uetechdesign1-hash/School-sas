@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 import { getLoginRecycleConflict } from "@/lib/auth/login-recycle";
-import { requireSuperAdmin, SuperAdminAuthError } from "@/lib/auth/super-admin";
+import {
+  requireSchoolCreator,
+  SuperAdminAuthError,
+} from "@/lib/auth/super-admin";
 import { validateModules } from "@/lib/modules";
 
 export const dynamic = "force-dynamic";
@@ -33,8 +36,7 @@ export async function POST(request: Request) {
   const created: { schoolId?: string; ownerId?: string } = {};
 
   try {
-    const { admin, user } = await requireSuperAdmin(request);
-
+    const { admin, authenticated, user } = await requireSchoolCreator(request);
     const body: Record<string, unknown> = await request
       .json()
       .catch(() => ({}));
@@ -60,10 +62,15 @@ export async function POST(request: Request) {
     const postalCode = read("postalCode", "postal_code");
 
     const planCode = "starter";
-    const studentLimit = Number(read("studentLimit", "student_limit") || 300);
+    const studentLimit = Number(read("studentLimit", "student_limit"));
     const startsOn = read("startsOn", "starts_on");
     const expiresOn = read("expiresOn", "expires_on");
-    const amount = Number(read("amount") || 0);
+    const amountText = read("amount", "subscription_amount");
+    const amount = amountText === "" ? Number.NaN : Number(amountText);
+    const paymentTerms = read("paymentTerms", "payment_terms");
+    const discussionConfirmed =
+      body.salesDiscussionConfirmed === true ||
+      body.sales_discussion_confirmed === true;
 
     const ownerName = read("ownerName", "owner_name");
     const ownerPhone = read("ownerPhone", "owner_phone");
@@ -133,7 +140,32 @@ export async function POST(request: Request) {
 
     if (!Number.isInteger(studentLimit) || studentLimit < 1) {
       return json(
-        { success: false, error: "Student limit is invalid." },
+        { success: false, error: "A student strength of at least 1 is required." },
+        400,
+      );
+    }
+
+    if (!Number.isFinite(amount) || amount < 0) {
+      return json(
+        { success: false, error: "Enter the agreed subscription price." },
+        400,
+      );
+    }
+
+    if (!paymentTerms) {
+      return json(
+        { success: false, error: "Agreed payment terms are required." },
+        400,
+      );
+    }
+
+    if (!discussionConfirmed) {
+      return json(
+        {
+          success: false,
+          error:
+            "Confirm that plans, pricing, student strength and payment terms were discussed and agreed with the school.",
+        },
         400,
       );
     }
@@ -162,6 +194,23 @@ export async function POST(request: Request) {
       }
 
       if (created.schoolId) {
+        const { data: auditRows, error: auditError } = await admin
+          .from("audit_logs")
+          .select("id")
+          .eq("school_id", created.schoolId)
+          .limit(1);
+
+        if (auditError) {
+          throw new Error(
+            `School ${created.schoolId} was retained because its audit history could not be verified: ${auditError.message}`,
+          );
+        }
+        if (auditRows?.length) {
+          throw new Error(
+            `School ${created.schoolId} was retained to preserve its audit records.`,
+          );
+        }
+
         await admin
           .from("school_users")
           .delete()
@@ -172,7 +221,15 @@ export async function POST(request: Request) {
           .delete()
           .eq("school_id", created.schoolId);
 
-        await admin.from("schools").delete().eq("id", created.schoolId);
+        const { error: schoolDeleteError } = await admin
+          .from("schools")
+          .delete()
+          .eq("id", created.schoolId);
+        if (schoolDeleteError) {
+          throw new Error(
+            `Unable to roll back school creation: ${schoolDeleteError.message}`,
+          );
+        }
         created.schoolId = undefined;
       }
     };
@@ -300,7 +357,7 @@ export async function POST(request: Request) {
     // CREATE SCHOOL
     // --------------------------------------------------
 
-    const { data: school, error: schoolError } = await admin
+    const { data: school, error: schoolError } = await authenticated
       .from("schools")
       .insert({
         name: schoolName,
@@ -315,6 +372,9 @@ export async function POST(request: Request) {
         plan_code: planCode,
         enabled_modules: modules,
         student_limit: studentLimit,
+        subscription_amount: amount,
+        subscription_payment_terms: paymentTerms,
+        sales_discussion_confirmed: discussionConfirmed,
         starts_on: startsOn,
         expires_on: expiresOn,
         status: "active",
@@ -447,8 +507,6 @@ export async function POST(request: Request) {
     // SUBSCRIPTION (kept recoverable, school already exists)
     // --------------------------------------------------
 
-    let warning = "";
-
     const { error: subscriptionError } = await admin
       .from("school_subscriptions")
       .insert({
@@ -459,14 +517,22 @@ export async function POST(request: Request) {
         started_on: startsOn,
         expires_on: expiresOn,
         student_limit: studentLimit,
+        payment_terms: paymentTerms,
         created_by: user.id,
       });
 
     if (subscriptionError) {
       console.error("SUBSCRIPTION CREATION FAILED:", subscriptionError);
-
-      warning =
-        "School and owner were created, but the subscription could not be saved.";
+      return json(
+        {
+          success: false,
+          error:
+            "The school and owner were created, but the agreed subscription could not be saved. Records were retained for Super Admin review.",
+          schoolId: created.schoolId,
+          ownerId: created.ownerId,
+        },
+        500,
+      );
     }
 
     // --------------------------------------------------
@@ -483,10 +549,7 @@ export async function POST(request: Request) {
         loginId: loginEmail,
         temporaryPassword: password,
         expiresOn,
-        message: warning
-          ? `School and owner created successfully. ${warning}`
-          : "School and owner created successfully.",
-        ...(warning ? { warning } : {}),
+        message: "School and owner created successfully.",
       },
       201,
     );
@@ -503,6 +566,8 @@ export async function POST(request: Request) {
           error instanceof Error
             ? error.message
             : "Unable to create school.",
+        ...(created.schoolId ? { schoolId: created.schoolId } : {}),
+        ...(created.ownerId ? { ownerId: created.ownerId } : {}),
       },
       500,
     );

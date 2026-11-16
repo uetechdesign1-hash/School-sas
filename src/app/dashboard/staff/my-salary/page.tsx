@@ -19,7 +19,6 @@ type SalaryStructure = {
   effective_from: string;
   basic_salary: number | null;
   house_allowance: number | null;
-  transport_allowance: number | null;
   medical_allowance: number | null;
   other_allowance: number | null;
   pf_deduction: number | null;
@@ -114,7 +113,7 @@ export default function MySalaryPage() {
         const { data: salaryRow, error: salaryError } = await supabase
           .from("staff_salary_structures")
           .select(
-            "id, effective_from, basic_salary, house_allowance, transport_allowance, medical_allowance, other_allowance, pf_deduction, tax_deduction, other_deduction, notes",
+            "id, effective_from, basic_salary, house_allowance, medical_allowance, other_allowance, pf_deduction, tax_deduction, other_deduction, notes",
           )
           .eq("staff_id", staffRow.id)
           .order("effective_from", { ascending: false })
@@ -163,7 +162,6 @@ export default function MySalaryPage() {
 
   const allowances =
     amount(salary?.house_allowance) +
-    amount(salary?.transport_allowance) +
     amount(salary?.medical_allowance) +
     amount(salary?.other_allowance);
   const deductions =
@@ -222,7 +220,6 @@ export default function MySalaryPage() {
                   </h3>
                   <SalaryRow label="Basic salary" value={salary.basic_salary} />
                   <SalaryRow label="House allowance" value={salary.house_allowance} />
-                  <SalaryRow label="Transport allowance" value={salary.transport_allowance} />
                   <SalaryRow label="Medical allowance" value={salary.medical_allowance} />
                   <SalaryRow label="Other allowance" value={salary.other_allowance} />
                   <SalaryRow label="Gross salary" value={gross} />

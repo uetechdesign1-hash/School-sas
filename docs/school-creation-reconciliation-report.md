@@ -35,9 +35,9 @@ or disable it without caller inventory and approval.
 ## Module and account safety
 
 - Both local Edge candidates accept `enabled_modules` or `enabledModules`,
-  allow all seven non-empty combinations, reject invalid/duplicate codes, and
-  explicitly insert the selected modules. Omitted values retain fees/payroll
-  for compatibility; they are not treated as an explicit transport choice.
+  allow only the Fees, Payroll, or combined plans, reject invalid/duplicate
+  codes, and explicitly insert the selected modules. Empty plans remain valid
+  only for existing schools awaiting reassignment.
 - School writes use the active Super Admin's bearer token and public client key
   so database authorization and audit triggers can observe the actor. The
   Edge environment must provide `SUPABASE_ANON_KEY`; verify the configured
@@ -103,14 +103,94 @@ policies and grants are metadata evidence only, not a live authorization test.
 
 ## Validation and limitations
 
-- `node --test tests/school-creation-edge.test.mjs tests/transport-foundation-security.test.mjs`:
-  **24 passed**, using mocks; no live writes.
-- `npx tsc --noEmit`: passed for the application; Supabase Edge files are
-  excluded by the repository's TypeScript configuration.
-- The final combined school-creation, transport and module test run passed
-  **38 tests**. `npm run build` passed.
-- Focused ESLint on the changed Edge code and creation API: passed.
-- Deno and a local PostgreSQL server were unavailable. Edge deployment/runtime,
-  SQL execution, mail delivery, live RLS and the proposed migration have not
-  been verified. Re-run the checks against a disposable environment before
-  approval or deployment.
+- The focused school, module, dashboard, and accounting test run passed
+  **49 tests**. Proxy auth and login-redirect tests passed **7/7** after adding
+  the accounting matcher and wiring the tested redirect helpers into
+  `src/proxy.ts`. The full `node --test` suite had **94 passes and 1 failure**:
+  `tests/academic-year-history.test.mjs` imports `SchoolScopeError` and other
+  exports that do not exist in `src/lib/students/enrollment-history.ts`.
+- `npx tsc --noEmit` and `npm run build` passed for the application;
+  Supabase Edge files are excluded by the repository's TypeScript
+  configuration.
+- Focused ESLint over touched application files reported **18 errors and 63
+  warnings**. All 18 errors were on lines unchanged from `HEAD`; none were
+  introduced on changed lines. No autofix was run.
+- The target is PostgreSQL 17.6, but no local Docker/`psql` runtime is
+  available, and the Supabase project plan does not support development
+  branches. Edge deployment/runtime, SQL execution, mail delivery, live RLS,
+  and the proposed migration remain unverified. No backup or deployment was
+  performed.
+
+## Approved school-creation policy — current Phase 1 addendum
+
+This addendum supersedes the earlier path dispositions above. The approved
+business rule is that only an active Super Admin or Sales Representative may
+create a school, and the creator must record the selected plans, agreed price,
+student strength, payment terms, and confirmation that these were discussed
+with the school.
+
+### Read-only live database findings
+
+- `public.create_school_with_owner(p_school_name text, p_school_code text,
+  p_email text DEFAULT NULL, p_phone text DEFAULT NULL) RETURNS uuid` is the
+  deployed signature. It is `SECURITY DEFINER`, inserts a school without
+  module or agreement fields (therefore relying on database defaults), then
+  creates a row in `school_memberships` and `school_settings`. It does not
+  accept `p_city` or a plan selection.
+- Its deployed ACL grants execution only to `postgres`; `anon`,
+  `authenticated`, and `service_role` do not have `EXECUTE`. The onboarding
+  page nevertheless called it with an extra `p_city` argument, so that
+  client call did not match the deployed signature.
+- `public.schools.enabled_modules` had a `{fees,payroll}` default, while
+  `student_limit` and `plan_code` also had defaults. RLS was enabled, but the
+  deployed `create-school` Edge Function used a service-role insert and
+  omitted `enabled_modules`; service-role writes bypass RLS.
+- The deployed `platform_role` enum contained only `user` and `super_admin`.
+  Existing `user_profiles` RLS limited role changes to Super Admins.
+- The deployed Edge Function inventory contained `create-school` v2 and
+  `quick-task`. `create-school` created schools with service-role privileges.
+  `quick-task` does not insert into `schools`; it creates an Auth user and
+  owner membership for a supplied existing school ID, without an
+  application-level role check. It remains a separate owner-link security
+  concern, not a school-creation path.
+
+### Phase 1 code and migration changes
+
+- Public onboarding no longer invokes `create_school_with_owner`. Anonymous
+  users are sent to login; signed-in, unassigned users see the authorized
+  registration process; active platform creators are routed to their
+  respective workspaces. Public signup still creates Auth accounts and does
+  not create schools.
+- The Super Admin API, local Edge creation candidates, and the Sales
+  Representative workspace require an active creator, explicit non-empty
+  plan selection, student strength, price, payment terms, and a discussion
+  confirmation. School table inserts use the caller JWT, not service-role
+  credentials.
+- The migration adds the `sales_rep` platform role; removes the `schools`
+  defaults for `enabled_modules`, `student_limit`, and `plan_code`; and records
+  agreement terms and server-generated creator/time metadata. The agreement
+  is written to `audit_logs`.
+- A database trigger rejects service-role or unauthenticated school inserts,
+  unknown/empty plans, omitted student strength or price, missing terms, and
+  missing confirmation. The entitlement constraint still accepts `[]` for
+  existing legacy schools, while the insert trigger rejects `[]` for new
+  schools. Existing school rows and owner accounts are not rewritten.
+- The exact legacy RPC signature is guarded as a migration precondition and
+  client execution is revoked. The function is retained rather than dropped.
+  Its no-plan body cannot create a school after the defaults are removed and
+  the insert trigger is installed.
+- The deployed `create-school` v2 function has not been replaced. Once the
+  migration is applied, its service-role school insert will be rejected; the
+  checked-in replacement uses the authenticated creator JWT and the required
+  agreement fields. Deploy that replacement only as an approved cutover.
+
+### Assignment and validation status
+
+`sales_rep` is a new privileged platform role; existing profile RLS means a
+Super Admin must assign it. This phase adds no separate role-management UI.
+The migration and Edge Function changes are local only: no live migration,
+function deployment, or school/Auth data write was performed. Until the
+migration and replacement Edge Function are deployed, the currently deployed
+service-role `create-school` remains capable of relying on the live defaults.
+Do not treat the live project as enforcing the new policy until the approved
+cutover is completed and verified.

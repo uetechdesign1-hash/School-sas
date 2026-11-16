@@ -1,5 +1,5 @@
 export function parseSchoolModules(value: unknown): string[] | null {
-  const allowed = ["fees", "payroll", "transport"];
+  const allowed = ["fees", "payroll"];
   if (
     !Array.isArray(value) ||
     value.length === 0 ||

@@ -30,7 +30,7 @@ import {
 } from "lucide-react";
 
 import { createClient } from "@/lib/supabase/client";
-import { SchoolProvider } from "@/lib/school-context";
+import { ModuleGuard, SchoolProvider } from "@/lib/school-context";
 
 type Props = {
   children: ReactNode;
@@ -116,6 +116,11 @@ const PRINCIPAL_MENU: MenuItem[] = [
     name: "School Profile",
     href: "/dashboard/school-settings",
     icon: <School size={18} />,
+  },
+  {
+    name: "My Profile",
+    href: "/dashboard/profile",
+    icon: <UserRound size={18} />,
   },
 ];
 
@@ -356,9 +361,11 @@ export default function DashboardLayout({
           }
 
           router.replace(
-            profile?.platform_role === "super_admin" && profile.is_active === true
+            profile?.is_active === true && profile.platform_role === "super_admin"
               ? "/super-admin"
-              : "/login?reason=no-school",
+              : profile?.is_active === true && profile.platform_role === "sales_rep"
+                ? "/sales"
+                : "/login?reason=no-school",
           );
           return;
         }
@@ -935,7 +942,9 @@ export default function DashboardLayout({
             ================================================= */}
 
         <main className="min-w-0 flex-1 pb-20 md:pb-0">
-          <SchoolProvider>{children}</SchoolProvider>
+          <SchoolProvider>
+            <ModuleGuard>{children}</ModuleGuard>
+          </SchoolProvider>
         </main>
 
       </div>

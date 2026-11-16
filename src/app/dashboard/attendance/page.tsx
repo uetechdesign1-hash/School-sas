@@ -946,7 +946,6 @@ export default function AdminAttendancePage() {
         const raw = row as Record<string, unknown>;
         const gross = firstNumber(raw, ["basic_salary", "basic", "base_salary"])
           + firstNumber(raw, ["house_allowance", "housing_allowance", "hra"])
-          + firstNumber(raw, ["transport_allowance", "transport", "ta"])
           + firstNumber(raw, ["medical_allowance", "medical", "ma"])
           + firstNumber(raw, ["other_allowance", "other_allowances", "other"]);
         const componentDeductions = firstNumber(raw, ["pf_deduction", "pf", "provident_fund"])

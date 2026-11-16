@@ -1,12 +1,22 @@
 export function getAnonymousRedirectPath(
   pathname: string,
   isAuthenticated: boolean,
-): "/login" | null {
-  if (
-    !isAuthenticated &&
-    (pathname.startsWith("/dashboard") || pathname.startsWith("/accounting"))
-  ) {
+): "/login" | "/super-admin/login" | null {
+  if (isAuthenticated) return null;
+
+  if (pathname.startsWith("/dashboard") || pathname.startsWith("/accounting")) {
     return "/login";
+  }
+
+  if (pathname === "/sales" || pathname.startsWith("/sales/")) {
+    return "/super-admin/login";
+  }
+
+  if (
+    (pathname === "/super-admin" || pathname.startsWith("/super-admin/")) &&
+    pathname !== "/super-admin/login"
+  ) {
+    return "/super-admin/login";
   }
 
   return null;

@@ -12,6 +12,7 @@ import {
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
+import { changeAccountEmail } from "@/lib/auth/change-account-email";
 import { MODULES, type ModuleCode } from "@/lib/modules";
 import { ImagePlus, Loader2, Trash2, Upload } from "lucide-react";
 
@@ -50,6 +51,9 @@ type FormData = {
   postalCode: string;
   modules: ModuleCode[];
   studentLimit: string;
+  amount: string;
+  paymentTerms: string;
+  salesDiscussionConfirmed: boolean;
   startsOn: string;
   expiresOn: string;
 
@@ -68,8 +72,11 @@ const emptyForm: FormData = {
   city: "",
   state: "",
   postalCode: "",
-  modules: ["fees", "payroll"],
-  studentLimit: "300",
+  modules: [],
+  studentLimit: "",
+  amount: "",
+  paymentTerms: "",
+  salesDiscussionConfirmed: false,
   startsOn: new Date().toISOString().slice(0, 10),
   expiresOn: "",
 
@@ -95,7 +102,6 @@ export default function SuperAdminPage() {
 
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
-  const [signingOut, setSigningOut] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [userEmail, setUserEmail] = useState("");
@@ -122,6 +128,10 @@ export default function SuperAdminPage() {
 
   const [savingSchool, setSavingSchool] =
     useState(false);
+  const [newOwnerEmail, setNewOwnerEmail] = useState("");
+  const [requestingOwnerEmail, setRequestingOwnerEmail] = useState(false);
+  const [ownerEmailError, setOwnerEmailError] = useState("");
+  const [ownerEmailMessage, setOwnerEmailMessage] = useState("");
 
   const [editForm, setEditForm] = useState({
     schoolName: "",
@@ -407,25 +417,6 @@ export default function SuperAdminPage() {
   }
 
   // --------------------------------------------------
-  // OPEN CREATE SCHOOL
-  // --------------------------------------------------
-
-  function openCreateSchool() {
-    setErrorMessage("");
-    setSuccessMessage("");
-
-    setForm({
-      ...emptyForm,
-      startsOn:
-        new Date()
-          .toISOString()
-          .slice(0, 10),
-    });
-
-    setShowCreateModal(true);
-  }
-
-  // --------------------------------------------------
   // CLOSE CREATE SCHOOL
   // --------------------------------------------------
 
@@ -441,7 +432,10 @@ export default function SuperAdminPage() {
   // --------------------------------------------------
 
   function updateField(
-    field: Exclude<keyof FormData, "modules">,
+    field: Exclude<
+      keyof FormData,
+      "modules" | "salesDiscussionConfirmed"
+    >,
     value: string
   ) {
     setForm((current) => ({
@@ -504,6 +498,32 @@ export default function SuperAdminPage() {
       return;
     }
 
+    if (!Number.isInteger(Number(form.studentLimit)) || Number(form.studentLimit) < 1) {
+      setErrorMessage("Enter the agreed student strength.");
+      return;
+    }
+
+    if (
+      !form.amount.trim() ||
+      !Number.isFinite(Number(form.amount)) ||
+      Number(form.amount) < 0
+    ) {
+      setErrorMessage("Enter the agreed subscription price.");
+      return;
+    }
+
+    if (!form.paymentTerms.trim()) {
+      setErrorMessage("Enter the agreed payment terms.");
+      return;
+    }
+
+    if (!form.salesDiscussionConfirmed) {
+      setErrorMessage(
+        "Confirm that plans, pricing, student strength and payment terms were discussed and agreed with the school.",
+      );
+      return;
+    }
+
     setCreating(true);
 
     try {
@@ -553,10 +573,11 @@ export default function SuperAdminPage() {
 
               modules: form.modules,
 
-              student_limit:
-                Number(
-                  form.studentLimit || 300
-                ),
+              student_limit: Number(form.studentLimit),
+
+              amount: Number(form.amount),
+              payment_terms: form.paymentTerms.trim(),
+              salesDiscussionConfirmed: form.salesDiscussionConfirmed,
 
               starts_on:
                 form.startsOn || null,
@@ -622,6 +643,9 @@ export default function SuperAdminPage() {
   async function openEditSchool(school: School) {
     setErrorMessage("");
     setSuccessMessage("");
+    setNewOwnerEmail("");
+    setOwnerEmailError("");
+    setOwnerEmailMessage("");
     setEditLoading(true);
 
     setEditForm({
@@ -695,9 +719,53 @@ export default function SuperAdminPage() {
   }
 
   function closeEditSchool() {
-    if (savingSchool) return;
+    if (savingSchool || requestingOwnerEmail) return;
     setEditingSchool(null);
     setErrorMessage("");
+  }
+
+  async function requestOwnerEmailChange() {
+    if (!editingSchool) return;
+
+    setOwnerEmailError("");
+    setOwnerEmailMessage("");
+
+    const email = newOwnerEmail.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      setOwnerEmailError("Enter a valid email address.");
+      return;
+    }
+
+    setRequestingOwnerEmail(true);
+    try {
+      const {
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession();
+      if (sessionError) throw sessionError;
+      if (!session) throw new Error("Please sign in again.");
+
+      const result = await changeAccountEmail(session.access_token, {
+        target_type: "principal",
+        school_id: editingSchool.id,
+        email,
+      });
+
+      setNewOwnerEmail("");
+      setEditForm((current) => ({ ...current, ownerEmail: email }));
+      setOwnerEmailMessage(
+        result.warning || "Principal login email updated immediately. No confirmation email is sent.",
+      );
+    } catch (requestError) {
+      console.error("REQUEST PRINCIPAL EMAIL CHANGE ERROR:", requestError);
+      setOwnerEmailError(
+        requestError instanceof Error
+          ? requestError.message
+          : "Unable to request the principal email change.",
+      );
+    } finally {
+      setRequestingOwnerEmail(false);
+    }
   }
 
   async function handleUpdateSchool(
@@ -953,30 +1021,6 @@ export default function SuperAdminPage() {
   }
 
   // --------------------------------------------------
-  // SIGN OUT
-  // --------------------------------------------------
-
-  async function handleSignOut() {
-    if (signingOut) return;
-
-    setSigningOut(true);
-
-    try {
-      await supabase.auth.signOut();
-    } catch (error) {
-      console.error(
-        "SIGN OUT ERROR:",
-        error
-      );
-    } finally {
-      router.replace(
-        "/super-admin/login"
-      );
-      router.refresh();
-    }
-  }
-
-  // --------------------------------------------------
   // STATS
   // --------------------------------------------------
 
@@ -1029,13 +1073,13 @@ export default function SuperAdminPage() {
 
   if (loading) {
     return (
-      <main className="min-h-screen bg-slate-100 flex items-center justify-center">
+      <div className="flex items-center justify-center py-20">
         <div className="rounded-2xl bg-white px-8 py-6 shadow">
           <p className="text-sm text-slate-600">
             Loading Super Admin...
           </p>
         </div>
-      </main>
+      </div>
     );
   }
 
@@ -1044,35 +1088,8 @@ export default function SuperAdminPage() {
   // --------------------------------------------------
 
   return (
-    <main className="min-h-screen bg-slate-100">
-      {/* HEADER */}
-
-      <header className="border-b border-slate-200 bg-white">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-5">
-          <div>
-            <h1 className="text-2xl font-bold text-slate-900">
-              Super Admin
-            </h1>
-
-            <p className="text-sm text-blue-600">
-              School SaaS Administration
-            </p>
-          </div>
-
-          <button
-            type="button"
-            onClick={handleSignOut}
-            disabled={signingOut}
-            className="rounded-xl border border-slate-300 bg-white px-5 py-2.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {signingOut
-              ? "Signing Out..."
-              : "Sign Out"}
-          </button>
-        </div>
-      </header>
-
-      <div className="mx-auto max-w-6xl px-6 py-8">
+    <div>
+      <div className="mx-auto max-w-6xl py-2">
         {/* WELCOME */}
 
         <section className="rounded-3xl bg-blue-600 p-7 text-white shadow-lg">
@@ -1125,15 +1142,12 @@ export default function SuperAdminPage() {
               Create and manage customer schools.
             </p>
 
-            {/* THIS BUTTON NOW OPENS THE MODAL */}
-
-            <button
-              type="button"
-              onClick={openCreateSchool}
-              className="mt-6 rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-200 transition hover:bg-blue-700 active:scale-[0.99]"
+            <Link
+              href="/super-admin/schools/new"
+              className="mt-6 inline-block rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-200 transition hover:bg-blue-700 active:scale-[0.99]"
             >
               + Create School
-            </button>
+            </Link>
           </div>
 
           {/* ADMIN ACCOUNT */}
@@ -1782,9 +1796,39 @@ export default function SuperAdminPage() {
                             {editForm.ownerEmail || "No owner email found"}
                           </p>
                           <p className="mt-1 text-xs text-slate-500">
-                            Email changes are not included in school-data
-                            editing. Use a dedicated login-management flow.
+                            Changes take effect immediately without confirmation.
                           </p>
+                          <label className="mt-4 block">
+                            <span className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-slate-500">
+                              New login email
+                            </span>
+                            <input
+                              type="email"
+                              autoComplete="email"
+                              value={newOwnerEmail}
+                              onChange={(event) => setNewOwnerEmail(event.target.value)}
+                              disabled={requestingOwnerEmail}
+                              className="h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100 disabled:bg-slate-100"
+                            />
+                          </label>
+                          {ownerEmailError && (
+                            <p role="alert" className="mt-2 text-sm text-red-700">
+                              {ownerEmailError}
+                            </p>
+                          )}
+                          {ownerEmailMessage && (
+                            <p role="status" className="mt-2 text-sm text-emerald-700">
+                              {ownerEmailMessage}
+                            </p>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => void requestOwnerEmailChange()}
+                            disabled={requestingOwnerEmail || !newOwnerEmail.trim()}
+                            className="mt-3 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {requestingOwnerEmail ? "Updating..." : "Update Principal Email"}
+                          </button>
                         </div>
                       </div>
                     </div>
@@ -1794,7 +1838,7 @@ export default function SuperAdminPage() {
                     <button
                       type="button"
                       onClick={closeEditSchool}
-                      disabled={savingSchool}
+                      disabled={savingSchool || requestingOwnerEmail}
                       className="rounded-xl border border-slate-300 px-5 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
                     >
                       Cancel
@@ -1802,7 +1846,7 @@ export default function SuperAdminPage() {
 
                     <button
                       type="submit"
-                      disabled={savingSchool}
+                      disabled={savingSchool || requestingOwnerEmail}
                       className="rounded-xl bg-blue-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-200 hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-400"
                     >
                       {savingSchool ? "Saving Changes..." : "Save Changes"}
@@ -2082,7 +2126,7 @@ export default function SuperAdminPage() {
                 />
                 <div className="mt-4 grid gap-4 sm:grid-cols-2">
                   <Input
-                    label="Student Limit"
+                    label="Agreed Student Strength *"
                     type="number"
                     value={form.studentLimit}
                     onChange={(value) =>
@@ -2092,6 +2136,15 @@ export default function SuperAdminPage() {
                       )
                     }
                     placeholder="300"
+                    disabled={creating}
+                  />
+
+                  <Input
+                    label="Agreed Subscription Price (INR) *"
+                    type="number"
+                    value={form.amount}
+                    onChange={(value) => updateField("amount", value)}
+                    placeholder="0.00"
                     disabled={creating}
                   />
 
@@ -2120,7 +2173,44 @@ export default function SuperAdminPage() {
                     }
                     disabled={creating}
                   />
+
+                  <label className="text-sm font-semibold text-slate-700 sm:col-span-2">
+                    Agreed Payment Terms *
+                    <textarea
+                      required
+                      rows={3}
+                      value={form.paymentTerms}
+                      onChange={(event) =>
+                        updateField("paymentTerms", event.target.value)
+                      }
+                      placeholder="Example: ₹1,20,000 total in 3 equal instalments of ₹40,000, due on the 5th of June, July, and August 2026."
+                      disabled={creating}
+                      className="mt-2 w-full rounded-xl border border-slate-300 px-4 py-3 font-normal outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100 disabled:bg-slate-50"
+                    />
+                    <span className="mt-2 block text-xs font-normal text-slate-500">
+                      Include the agreed total, instalment amount, and fixed due date (for example, the 5th of each month).
+                    </span>
+                  </label>
                 </div>
+                <label className="mt-5 flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+                  <input
+                    required
+                    type="checkbox"
+                    checked={form.salesDiscussionConfirmed}
+                    onChange={(event) =>
+                      setForm((current) => ({
+                        ...current,
+                        salesDiscussionConfirmed: event.target.checked,
+                      }))
+                    }
+                    disabled={creating}
+                    className="mt-1"
+                  />
+                  <span>
+                    I confirm that I discussed and agreed the selected plans,
+                    pricing, student strength and payment terms with the school.
+                  </span>
+                </label>
               </div>
 
               {/* OWNER */}
@@ -2217,7 +2307,7 @@ export default function SuperAdminPage() {
           </div>
         </div>
       )}
-    </main>
+    </div>
   );
 }
 

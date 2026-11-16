@@ -3,8 +3,8 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { usePathname } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
-import { validateModules, type ModuleCode } from "@/lib/modules";
-import { moduleForRoute } from "./module-routes";
+import { parseEnabledModules, type ModuleCode } from "@/lib/modules";
+import { isAvailableWithoutModules, moduleForRoute } from "./module-routes";
 
 type SchoolContextValue = {
   schoolId: string | null;
@@ -51,7 +51,8 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
           .maybeSingle();
         if (schoolError) throw new Error(schoolError.message);
         if (!school) throw new Error("Unable to load your school.");
-        const modules = validateModules(school.enabled_modules);
+        const modules = parseEnabledModules(school.enabled_modules);
+        if (!modules) throw new Error("School plan configuration could not be verified.");
         if (!cancelled) setState({ schoolId: schoolIds[0], modules, loading: false, error: null });
       } catch (error) {
         console.error("SCHOOL MODULES ERROR:", error);
@@ -96,9 +97,16 @@ export function ModuleGate({
 }) {
   const required = moduleForRoute(pathname);
 
-  if (!required) return children;
   if (loading) return <p className="p-6 text-sm text-slate-500">Checking module access...</p>;
   if (error) return <p role="alert" className="p-6 text-sm text-red-700">{error}</p>;
+  if (modules.length === 0 && !isAvailableWithoutModules(pathname)) {
+    return (
+      <p role="alert" className="p-6">
+        No subscription plan is currently assigned to this school.
+      </p>
+    );
+  }
+  if (!required) return children;
   if (!modules.includes(required)) {
     return <p role="alert" className="p-6">This module is not included in your plan</p>;
   }

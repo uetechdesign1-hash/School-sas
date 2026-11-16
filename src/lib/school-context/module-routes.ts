@@ -28,10 +28,19 @@ export function moduleForRoute(pathname: string): ModuleCode | null {
   return null;
 }
 
+export function isAvailableWithoutModules(pathname: string): boolean {
+  return [
+    "/dashboard/profile",
+    "/dashboard/school-settings",
+    "/dashboard/staff/profile",
+  ].includes(pathname);
+}
+
 export function isModuleRouteAllowed(
   pathname: string,
   enabledModules: readonly string[],
 ): boolean {
-  const module = moduleForRoute(pathname);
-  return module === null || enabledModules.includes(module);
+  if (enabledModules.length === 0) return isAvailableWithoutModules(pathname);
+  const requiredModule = moduleForRoute(pathname);
+  return requiredModule === null || enabledModules.includes(requiredModule);
 }

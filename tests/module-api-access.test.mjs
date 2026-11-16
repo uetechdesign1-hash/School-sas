@@ -15,6 +15,12 @@ registerHooks({
     if (specifier === "@/lib/modules") {
       return { url: modulesUrl, shortCircuit: true };
     }
+    if (specifier.startsWith("@/")) {
+      return {
+        url: new URL(`../src/${specifier.slice(2)}.ts`, import.meta.url).href,
+        shortCircuit: true,
+      };
+    }
     if (specifier === "next/server") {
       return nextResolve("next/server.js", context);
     }
@@ -24,6 +30,9 @@ registerHooks({
 
 const { POST: syncAttendance } = await import(
   "../src/app/api/staff/attendance/offline-sync/route.ts"
+);
+const { getStudentImportAuth, UnauthorizedError } = await import(
+  "../src/lib/students/import-auth.ts"
 );
 
 function makeRequest() {
@@ -54,7 +63,13 @@ function query(data) {
     eq() {
       return builder;
     },
+    order() {
+      return builder;
+    },
     maybeSingle: async () => ({ data, error: null }),
+    then(resolve, reject) {
+      return Promise.resolve({ data, error: null }).then(resolve, reject);
+    },
   };
   return builder;
 }
@@ -72,6 +87,12 @@ function installClients(enabledModules) {
           data: { user: { id: "staff-user" } },
           error: null,
         }),
+      },
+      from(table) {
+        if (table === "school_users") {
+          return query([{ school_id: "school-a", role: "staff", created_at: "2026-01-01" }]);
+        }
+        throw new Error(`Unexpected authentication table: ${table}`);
       },
     },
     {
@@ -104,10 +125,58 @@ test("offline attendance API denies schools without payroll entitlement", async 
   assert.equal(rpcCalls.length, 0);
 });
 
+test("offline attendance API rejects empty entitlements before the RPC", async () => {
+  const rpcCalls = installClients([]);
+  const response = await syncAttendance(makeRequest());
+  const result = await response.json();
+
+  assert.equal(response.status, 403);
+  assert.match(result.error, /not included/);
+  assert.equal(rpcCalls.length, 0);
+});
+
 test("offline attendance API continues for payroll-entitled schools", async () => {
   const rpcCalls = installClients(["payroll"]);
   const response = await syncAttendance(makeRequest());
 
   assert.equal(response.status, 200);
   assert.equal(rpcCalls.length, 1);
+});
+
+test("student import authorization denies a school with empty entitlements", async () => {
+  process.env.NEXT_PUBLIC_SUPABASE_URL = "https://school.test";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role";
+  const makeQuery = (result) => {
+    const builder = {
+      select() { return builder; },
+      eq() { return builder; },
+      order() { return builder; },
+      maybeSingle: async () => result,
+      then(resolve, reject) {
+        return Promise.resolve(result).then(resolve, reject);
+      },
+    };
+    return builder;
+  };
+  globalThis.testClients = [{
+    auth: {
+      getUser: async () => ({ data: { user: { id: "school-owner" } }, error: null }),
+    },
+    from(table) {
+      if (table === "school_users") {
+        return makeQuery({ data: [{ school_id: "school-a", role: "owner" }], error: null });
+      }
+      if (table === "schools") {
+        return makeQuery({ data: { enabled_modules: [] }, error: null });
+      }
+      throw new Error(`Unexpected table: ${table}`);
+    },
+  }];
+
+  await assert.rejects(
+    getStudentImportAuth(new Request("https://school.test/api", {
+      headers: { authorization: "Bearer user-token" },
+    })),
+    (error) => error instanceof UnauthorizedError && /No subscription plan/.test(error.message),
+  );
 });

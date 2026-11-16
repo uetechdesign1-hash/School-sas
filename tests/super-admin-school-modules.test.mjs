@@ -40,7 +40,7 @@ async function withSupabase(profile, callback, options = {}) {
       return Response.json({ id: "user-1" });
     }
     if (url.pathname === "/rest/v1/user_profiles" && method === "GET") {
-      return Response.json(profile);
+      return Response.json(url.searchParams.has("login_id") ? [] : profile);
     }
     if (url.pathname === "/rest/v1/schools" && method === "GET") {
       return Response.json(options.deleting
@@ -48,7 +48,7 @@ async function withSupabase(profile, callback, options = {}) {
         : []);
     }
     if (url.pathname === "/auth/v1/admin/users" && method === "GET") {
-      return Response.json({ users: [] });
+      return Response.json({ users: options.authUsers || [] });
     }
     if (url.pathname === "/auth/v1/admin/users" && method === "POST") {
       return Response.json({ id: "owner-1", email: "owner@example.test" });
@@ -59,6 +59,9 @@ async function withSupabase(profile, callback, options = {}) {
     if (url.pathname === "/rest/v1/schools" && method === "PATCH") {
       return new Response(null, { status: 204 });
     }
+    if (url.pathname === "/rest/v1/rpc/cleanup_school_business_records" && method === "POST") {
+      return new Response(null, { status: 204 });
+    }
     if (method === "DELETE" && options.deleting && url.pathname.startsWith("/rest/v1/")) {
       const table = url.pathname.split("/").pop();
       const error = options.tableErrors?.[table];
@@ -67,13 +70,16 @@ async function withSupabase(profile, callback, options = {}) {
     }
     if (url.pathname === "/rest/v1/school_users") {
       return method === "GET"
-        ? Response.json(options.deleting ? [{ user_id: "11111111-1111-4111-8111-111111111111" }] : [])
+        ? Response.json(options.deleting && !url.searchParams.has("user_id") ? [{ user_id: "11111111-1111-4111-8111-111111111111" }] : [])
         : new Response(null, { status: 201 });
     }
     if (url.pathname === "/rest/v1/staff" && method === "GET" && options.deleting) {
       return Response.json([]);
     }
     if (url.pathname === "/auth/v1/admin/users/11111111-1111-4111-8111-111111111111" && method === "DELETE" && options.deleting) {
+      return Response.json({});
+    }
+    if (url.pathname === "/auth/v1/admin/users/22222222-2222-4222-8222-222222222222" && method === "DELETE" && options.deleting) {
       return Response.json({});
     }
     if (["/rest/v1/user_profiles", "/rest/v1/profiles", "/rest/v1/school_subscriptions"].includes(url.pathname)) {
@@ -108,21 +114,31 @@ const update = { action: "update", schoolId: "school-1", school: {
   name: "Example", code: "EXAMPLE", student_limit: 300,
 } };
 
-test("both endpoints reject non-super-admin and inactive super-admin callers before privileged access", async () => {
+test("school creation rejects non-creators and inactive creators before privileged access", async () => {
   for (const profile of [
     { platform_role: "user", is_active: true },
     { platform_role: "super_admin", is_active: false },
   ]) {
-    for (const handler of [createSchool, manageSchool]) {
-      await withSupabase(profile, async (requests) => {
-        const response = await handler(request({ ...update, modules: ["fees"] }));
-        assert.equal(response.status, 403);
-        assert.match((await response.json()).error, /Super Admin access required/);
-        assert.equal(requests.length, 2);
-        assert.ok(requests.every(({ headers }) => headers.get("apikey") === "publishable-test-key"));
-      });
-    }
+    await withSupabase(profile, async (requests) => {
+      const response = await createSchool(request({ ...update, modules: ["fees"] }));
+      assert.equal(response.status, 403);
+      assert.match((await response.json()).error, /School creation access/);
+      assert.equal(requests.length, 2);
+      assert.ok(requests.every(({ headers }) => headers.get("apikey") === "publishable-test-key"));
+    });
   }
+
+  await withSupabase({ platform_role: "sales_rep", is_active: false }, async (requests) => {
+    const response = await createSchool(request({ ...update, modules: ["fees"] }));
+    assert.equal(response.status, 403);
+    assert.equal(requests.length, 2);
+  });
+
+  await withSupabase({ platform_role: "sales_rep", is_active: true }, async (requests) => {
+    const response = await manageSchool(request({ ...update, modules: ["fees"] }));
+    assert.equal(response.status, 403);
+    assert.match((await response.json()).error, /Super Admin access required/);
+  });
 });
 
 test("both endpoints reject invalid module selections before modifying a school", async () => {
@@ -138,19 +154,20 @@ test("both endpoints reject invalid module selections before modifying a school"
   }
 });
 
-test("update saves validated modules and a fixed legacy plan", async () => {
+test("update saves the available plans and a fixed legacy plan", async () => {
   await withSupabase(admin, async (requests) => {
     const response = await manageSchool(request({
       ...update,
-      modules: ["transport", "fees"],
+      modules: ["fees", "payroll"],
       school: { ...update.school, plan_code: "untrusted" },
     }));
     assert.equal(response.status, 200);
     const write = requests.find(({ url, method }) => url.pathname === "/rest/v1/schools" && method === "PATCH");
     const body = JSON.parse(write.body);
-    assert.deepEqual(body.enabled_modules, ["transport", "fees"]);
+    assert.deepEqual(body.enabled_modules, ["fees", "payroll"]);
     assert.equal(body.plan_code, "starter");
-    assert.equal(write.headers.get("apikey"), "service-role-test-key");
+    assert.equal(write.headers.get("apikey"), "publishable-test-key");
+    assert.equal(write.headers.get("authorization"), "Bearer valid-token");
   });
 });
 
@@ -164,16 +181,91 @@ test("create saves validated modules and ignores an untrusted legacy plan", asyn
       password: "example-password",
       startsOn: "2026-01-01",
       expiresOn: "2027-01-01",
-      modules: ["payroll", "transport"],
+      studentLimit: 300,
+      amount: 12500,
+      paymentTerms: "Annual, due within 30 days of invoice.",
+      salesDiscussionConfirmed: true,
+      modules: ["payroll", "fees"],
       planCode: "untrusted",
     }));
     assert.equal(response.status, 201, JSON.stringify(await response.clone().json()));
     const write = requests.find(({ url, method }) => url.pathname === "/rest/v1/schools" && method === "POST");
     const body = JSON.parse(write.body);
-    assert.deepEqual(body.enabled_modules, ["payroll", "transport"]);
+    assert.deepEqual(body.enabled_modules, ["fees", "payroll"]);
     assert.equal(body.plan_code, "starter");
-    assert.equal(write.headers.get("apikey"), "service-role-test-key");
+    assert.equal(body.subscription_amount, 12500);
+    assert.equal(body.subscription_payment_terms, "Annual, due within 30 days of invoice.");
+    assert.equal(body.sales_discussion_confirmed, true);
+    assert.equal(body.created_by, "user-1");
+    assert.equal(write.headers.get("apikey"), "publishable-test-key");
+    assert.equal(write.headers.get("authorization"), "Bearer valid-token");
   });
+
+  await withSupabase({ platform_role: "sales_rep", is_active: true }, async (requests) => {
+    const response = await createSchool(request({
+      schoolName: "Example",
+      schoolCode: "EXAMPLE",
+      ownerName: "Owner",
+      ownerEmail: "owner@example.test",
+      password: "example-password",
+      startsOn: "2026-01-01",
+      expiresOn: "2027-01-01",
+      studentLimit: 300,
+      amount: 12500,
+      paymentTerms: "Annual, due within 30 days of invoice.",
+      salesDiscussionConfirmed: true,
+      modules: ["fees"],
+    }));
+    assert.equal(response.status, 201);
+    const write = requests.find(({ url, method }) => url.pathname === "/rest/v1/schools" && method === "POST");
+    assert.equal(write.headers.get("authorization"), "Bearer valid-token");
+  });
+
+  test("Super Admin can assign a plan to a school with no current entitlements", async () => {
+    await withSupabase(admin, async (requests) => {
+      const response = await manageSchool(request({
+        ...update,
+        modules: ["fees"],
+      }));
+      assert.equal(response.status, 200);
+      const write = requests.find(({ url, method }) => url.pathname === "/rest/v1/schools" && method === "PATCH");
+      assert.deepEqual(JSON.parse(write.body).enabled_modules, ["fees"]);
+    });
+  });
+});
+
+test("school creation requires an explicit commercial agreement before any school write", async () => {
+  const valid = {
+    schoolName: "Example",
+    schoolCode: "EXAMPLE",
+    ownerName: "Owner",
+    ownerEmail: "owner@example.test",
+    password: "example-password",
+    startsOn: "2026-01-01",
+    expiresOn: "2027-01-01",
+    studentLimit: 300,
+    amount: 12500,
+    paymentTerms: "Annual, due within 30 days of invoice.",
+    salesDiscussionConfirmed: true,
+    modules: ["fees"],
+  };
+  for (const invalid of [
+    { studentLimit: undefined },
+    { amount: undefined },
+    { paymentTerms: "" },
+    { salesDiscussionConfirmed: false },
+  ]) {
+    await withSupabase(admin, async (requests) => {
+      const response = await createSchool(request({ ...valid, ...invalid }));
+      assert.equal(response.status, 400);
+      assert.equal(
+        requests.some(({ url, method }) =>
+          url.pathname === "/rest/v1/schools" && method === "POST",
+        ),
+        false,
+      );
+    });
+  }
 });
 
 test("school deletion removes audit logs and skips only missing tables", async () => {
@@ -189,9 +281,25 @@ test("school deletion removes audit logs and skips only missing tables", async (
   }, {
     deleting: true,
     tableErrors: {
-      transport_routes: { code: "42P01", message: 'relation "public.transport_routes" does not exist' },
       library_books: { code: "PGRST205", message: "Could not find the table 'public.library_books' in the schema cache" },
     },
+  });
+});
+
+test("school deletion also removes an owner login that has no school_users row", async () => {
+  await withSupabase(admin, async (requests) => {
+    const response = await manageSchool(request({ action: "delete", schoolId: "school-1" }));
+    assert.equal(response.status, 200);
+    assert.ok(requests.some(({ method, url }) =>
+      method === "DELETE" && url.pathname === "/auth/v1/admin/users/22222222-2222-4222-8222-222222222222",
+    ));
+  }, {
+    deleting: true,
+    authUsers: [{
+      id: "22222222-2222-4222-8222-222222222222",
+      app_metadata: { account_type: "school_owner" },
+      user_metadata: { school_code: "example" },
+    }],
   });
 });
 

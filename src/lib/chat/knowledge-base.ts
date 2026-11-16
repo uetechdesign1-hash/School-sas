@@ -404,12 +404,12 @@ const GUIDES: ChatGuide[] = [
     pageLabel: "Fee Structure",
     href: "/dashboard/fees/structure",
     keywords: [
-      "fee structure", "fees", "tuition fee", "transport fee", "exam fee",
+      "fee structure", "fees", "tuition fee", "exam fee",
       "admission fee", "fee category", "fee frequency", "monthly fee",
       "annual fee", "structure name", "fee items",
     ],
     summary:
-      "This page defines what your school charges. You create Fee Categories (Tuition Fee, Transport Fee, Exam Fee...) and then build Structures (the amounts & frequencies) per academic year and class.",
+      "This page defines what your school charges. You create fee categories and then build structures (the amounts and frequencies) per academic year and class.",
     steps: [
       "Create Fee Categories first — click to add a category like 'Tuition Fee' with a short description (e.g. 'Monthly tuition charge').",
       "Create a Fee Structure: give it a Name (e.g. 'Class 6 Annual Fees 2026-27').",
@@ -560,7 +560,7 @@ const GUIDES: ChatGuide[] = [
       "This page tracks every amount your school spends. You add an expense with a category, amount and paid-from account, and it automatically updates your Cash/Bank book.",
     steps: [
       "Click Add Expense (or the plus button).",
-      "Choose the Expense Category (Salaries, Electricity, Transport, etc.) or add a new one.",
+      "Choose the Expense Category (Salaries, Electricity, and similar costs) or add a new one.",
       "Pick the Expense Date and enter the Amount.",
       "Select the Paid From account — a Cash account for cash payments or a Bank account for cheque/UPI/bank transfers.",
       "Optionally add the Vendor/Supplier name, Invoice number and a Description.",
@@ -644,7 +644,7 @@ const GUIDES: ChatGuide[] = [
     href: "/dashboard/staff/[id]/salary",
     keywords: [
       "salary", "salary structure", "basic salary", "house allowance",
-      "transport allowance", "other allowance", "deductions", "gross",
+      "other allowance", "deductions", "gross",
       "net salary", "monthly salary",
     ],
     summary:
@@ -652,7 +652,7 @@ const GUIDES: ChatGuide[] = [
     steps: [
       "Open the staff member and go to their Salary page.",
       "Enter the Basic Salary.",
-      "Add allowances: House Allowance, Transport Allowance, Other Allowance (leave blank if not applicable).",
+      "Add allowances such as House Allowance and Other Allowance (leave blank if not applicable).",
       "Enter any Fixed Deductions (e.g. loan recovery, insurance).",
       "The Gross Monthly and Calculated Net update automatically — review them.",
       "Save. Payroll will now use this structure when you run the month.",

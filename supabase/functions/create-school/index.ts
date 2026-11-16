@@ -22,7 +22,9 @@ Deno.serve(async (request: Request) => {
   try {
     const url = Deno.env.get("SUPABASE_URL");
     const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-    const publishableKey = Deno.env.get("SUPABASE_ANON_KEY");
+    const publishableKey =
+      Deno.env.get("SUPABASE_ANON_KEY") ??
+      Deno.env.get("SUPABASE_PUBLISHABLE_KEY");
     if (!url || !serviceKey || !publishableKey) {
       throw new Error("Supabase server configuration is missing.");
     }
@@ -43,8 +45,8 @@ Deno.serve(async (request: Request) => {
       .eq("id", user.id)
       .maybeSingle();
     if (profileError) throw new Error(`Unable to verify Super Admin: ${profileError.message}`);
-    if (profile?.platform_role !== "super_admin" || profile.is_active !== true) {
-      return json({ success: false, error: "Only an active Super Admin can create schools." }, 403);
+    if (!["super_admin", "sales_rep"].includes(profile?.platform_role) || profile.is_active !== true) {
+      return json({ success: false, error: "Only an active Super Admin or authorized Sales Representative can create schools." }, 403);
     }
 
     const body = await request.json();
@@ -57,13 +59,21 @@ Deno.serve(async (request: Request) => {
     const ownerPhone = clean(body.owner_phone);
     const password = String(body.owner_password ?? "");
     const planCode = clean(body.plan_code) || "starter";
-    const studentLimit = Number(body.student_limit || 300);
+    const studentLimit = Number(body.student_limit);
+    const startsOn = clean(body.starts_on);
+    const expiresOn = clean(body.expires_on);
+    const rawAmount = body.amount ?? body.subscription_amount;
+    const amount = rawAmount === undefined || rawAmount === null || clean(rawAmount) === ""
+      ? Number.NaN
+      : Number(rawAmount);
+    const paymentTerms = clean(body.payment_terms);
+    const discussionConfirmed = body.sales_discussion_confirmed === true;
     const modules = parseSchoolModules(
       body.enabled_modules !== undefined
         ? body.enabled_modules
         : body.enabledModules !== undefined
           ? body.enabledModules
-          : ["fees", "payroll"],
+          : null,
     );
 
     if (!schoolName || !/^[A-Z0-9_-]{3,30}$/.test(schoolCode)) {
@@ -74,6 +84,12 @@ Deno.serve(async (request: Request) => {
     }
     if (!Number.isInteger(studentLimit) || studentLimit < 1 || !modules) {
       return json({ success: false, error: "A valid student limit and at least one valid module are required." }, 400);
+    }
+    if (!Number.isFinite(amount) || amount < 0) {
+      return json({ success: false, error: "An explicitly agreed subscription price is required." }, 400);
+    }
+    if (!paymentTerms || !discussionConfirmed || !startsOn || !expiresOn) {
+      return json({ success: false, error: "Agreed payment terms, subscription dates and confirmation of the discussion are required." }, 400);
     }
 
     const { data: existingSchools, error: lookupError } = await admin
@@ -114,7 +130,11 @@ Deno.serve(async (request: Request) => {
         status: "trial",
         plan_code: planCode,
         student_limit: studentLimit,
-        starts_on: new Date().toISOString().slice(0, 10),
+        subscription_amount: amount,
+        subscription_payment_terms: paymentTerms,
+        sales_discussion_confirmed: discussionConfirmed,
+        starts_on: startsOn,
+        expires_on: expiresOn,
         created_by: user.id,
         enabled_modules: modules,
       })
@@ -149,6 +169,23 @@ Deno.serve(async (request: Request) => {
       is_active: true,
     });
     if (membershipError) throw new Error(`Unable to assign school owner: ${membershipError.message}`);
+
+    const { error: subscriptionError } = await admin
+      .from("school_subscriptions")
+      .insert({
+        school_id: schoolId,
+        plan_code: planCode,
+        status: "active",
+        amount,
+        started_on: startsOn,
+        expires_on: expiresOn,
+        student_limit: studentLimit,
+        payment_terms: paymentTerms,
+        created_by: user.id,
+      });
+    if (subscriptionError) {
+      throw new Error(`Unable to save the agreed subscription: ${subscriptionError.message}`);
+    }
 
     return json({
       success: true,

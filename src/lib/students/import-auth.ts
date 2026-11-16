@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { parseEnabledModules } from "@/lib/modules";
 
 export type StudentImportAuth = {
   admin: SupabaseClient;
@@ -115,6 +116,29 @@ export async function getStudentImportAuth(
   if (!authorizedMembership) {
     throw new UnauthorizedError(
       "Your account does not have an authorized role for student import.",
+    );
+  }
+
+  const { data: school, error: schoolError } = await admin
+    .from("schools")
+    .select("enabled_modules")
+    .eq("id", authorizedMembership.school_id)
+    .maybeSingle();
+
+  if (schoolError) {
+    throw new Error(`Unable to verify school plan: ${schoolError.message}`);
+  }
+  if (!school) {
+    throw new UnauthorizedError("Your school could not be found.");
+  }
+
+  const modules = parseEnabledModules(school.enabled_modules);
+  if (!modules) {
+    throw new Error("School plan configuration could not be verified.");
+  }
+  if (modules.length === 0) {
+    throw new UnauthorizedError(
+      "No subscription plan is currently assigned to this school.",
     );
   }
 

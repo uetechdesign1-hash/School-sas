@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
+import { changeAccountEmail } from "@/lib/auth/change-account-email";
 import { createClient } from "@/lib/supabase/client";
 
 type FormState = {
@@ -117,6 +118,11 @@ export default function StaffEditPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [savedEmail, setSavedEmail] = useState("");
+  const [canChangeEmail, setCanChangeEmail] = useState(false);
+  const [requestingEmail, setRequestingEmail] = useState(false);
+  const [emailError, setEmailError] = useState("");
+  const [emailMessage, setEmailMessage] = useState("");
   const [attendanceModeAvailable, setAttendanceModeAvailable] =
     useState(true);
 
@@ -125,6 +131,7 @@ export default function StaffEditPage() {
       setLoading(true);
       setError("");
       setAttendanceModeAvailable(true);
+      setCanChangeEmail(false);
       setSuccess("");
 
       const supabase = createClient();
@@ -165,6 +172,7 @@ export default function StaffEditPage() {
           "Only school owner or admin can edit staff."
         );
       }
+      setCanChangeEmail(membership.role === "owner");
 
       const staffResult =
         await supabase
@@ -254,6 +262,9 @@ export default function StaffEditPage() {
         status: staff.status || "active",
         photo_url: staff.photo_url || "",
       });
+      setSavedEmail(staff.email?.trim().toLowerCase() || "");
+      setEmailError("");
+      setEmailMessage("");
     } catch (err) {
       console.error("EDIT STAFF LOAD ERROR:", err);
 
@@ -280,11 +291,74 @@ export default function StaffEditPage() {
     }));
   }
 
+  async function requestStaffEmailChange() {
+    setEmailError("");
+    setEmailMessage("");
+
+    if (!staffId) {
+      setEmailError("Staff ID is missing.");
+      return;
+    }
+
+    const newEmail = form.email.trim().toLowerCase();
+    if (newEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newEmail)) {
+      setEmailError("Enter a valid email address.");
+      return;
+    }
+
+    if (newEmail === savedEmail) {
+      setEmailError("Enter a different email address.");
+      return;
+    }
+
+    setRequestingEmail(true);
+    try {
+      const supabase = createClient();
+      const {
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession();
+      if (sessionError) throw sessionError;
+      if (!session) throw new Error("Please sign in again.");
+
+      const result = await changeAccountEmail(session.access_token, {
+        target_type: "staff",
+        staff_id: staffId,
+        email: newEmail,
+      });
+
+      setSavedEmail(newEmail);
+      setForm((current) => ({ ...current, email: newEmail }));
+      setEmailMessage(
+        result.warning ||
+          (result.linked === false
+            ? "Staff contact email updated. This staff member has no linked login."
+            : "Staff login email updated immediately. No confirmation email is sent."),
+      );
+    } catch (requestError) {
+      console.error("REQUEST STAFF EMAIL CHANGE ERROR:", requestError);
+      setEmailError(
+        getStaffErrorMessage(
+          requestError,
+          "Unable to update the staff email.",
+        ),
+      );
+    } finally {
+      setRequestingEmail(false);
+    }
+  }
+
   async function saveChanges() {
     try {
       setSaving(true);
       setError("");
       setSuccess("");
+
+      if (form.email.trim().toLowerCase() !== savedEmail) {
+        throw new Error(
+          "Click Update Staff Email to save the email change before saving other staff details.",
+        );
+      }
 
       if (!form.employee_no.trim()) {
         throw new Error("Employee number is required.");
@@ -367,7 +441,6 @@ export default function StaffEditPage() {
         gender: form.gender || null,
         date_of_birth: form.date_of_birth || null,
         phone: form.phone.trim() || null,
-        email: form.email.trim() || null,
         address: form.address.trim() || null,
         city: form.city.trim() || null,
         joining_date: form.joining_date,
@@ -396,9 +469,7 @@ export default function StaffEditPage() {
         throw updateError;
       }
 
-      setSuccess(
-        "Staff details updated successfully."
-      );
+      setSuccess("Staff details updated successfully.");
 
       setTimeout(() => {
         router.push(
@@ -573,14 +644,46 @@ export default function StaffEditPage() {
               }
             />
 
-            <Field
-              label="Email"
-              type="email"
-              value={form.email}
-              onChange={(v) =>
-                updateField("email", v)
-              }
-            />
+            <div>
+              <Field
+                label="Staff Login Email"
+                type="email"
+                value={form.email}
+                onChange={(v) => updateField("email", v)}
+              />
+              {canChangeEmail ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => void requestStaffEmailChange()}
+                    disabled={
+                      requestingEmail ||
+                      form.email.trim().toLowerCase() === savedEmail
+                    }
+                    className="mt-3 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {requestingEmail ? "Updating..." : "Update Staff Email"}
+                  </button>
+                  <p className="mt-2 text-xs text-slate-500">
+                    Login email changes take effect immediately without a confirmation email.
+                  </p>
+                  {emailError && (
+                    <p role="alert" className="mt-2 text-sm text-red-700">
+                      {emailError}
+                    </p>
+                  )}
+                  {emailMessage && (
+                    <p role="status" className="mt-2 text-sm text-emerald-700">
+                      {emailMessage}
+                    </p>
+                  )}
+                </>
+              ) : (
+                <p className="mt-2 text-xs text-slate-500">
+                  Only the school principal can change a staff login email.
+                </p>
+              )}
+            </div>
 
             <Field
               label="City"

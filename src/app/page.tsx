@@ -188,7 +188,14 @@ export default function HomePage() {
               href="/login"
               className="rounded-xl px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"
             >
-              Login
+              School Login
+            </Link>
+
+            <Link
+              href="/super-admin/login"
+              className="rounded-xl px-4 py-2.5 text-sm font-semibold text-emerald-700 transition hover:bg-emerald-50"
+            >
+              Sales Team Login
             </Link>
 
             <Link
@@ -256,7 +263,7 @@ export default function HomePage() {
                   onClick={closeMobileMenu}
                   className="rounded-xl border border-slate-200 px-4 py-3 text-center text-sm font-semibold"
                 >
-                  Login
+                  School Login
                 </Link>
 
                 <Link
@@ -265,6 +272,14 @@ export default function HomePage() {
                   className="rounded-xl bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 px-4 py-3 text-center text-sm font-semibold text-white shadow-lg shadow-indigo-500/40"
                 >
                   Get Started
+                </Link>
+
+                <Link
+                  href="/super-admin/login"
+                  onClick={closeMobileMenu}
+                  className="col-span-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-center text-sm font-semibold text-emerald-800"
+                >
+                  Sales Team / Super Admin Login
                 </Link>
               </div>
             </nav>
@@ -765,6 +780,20 @@ export default function HomePage() {
               </a>
 
               <Link
+                href="/privacy-policy"
+                className="text-slate-500 transition hover:text-slate-950"
+              >
+                Privacy Policy
+              </Link>
+
+              <Link
+                href="/terms-and-conditions"
+                className="text-slate-500 transition hover:text-slate-950"
+              >
+                Terms &amp; Conditions
+              </Link>
+
+              <Link
                 href="/login"
                 className="font-semibold text-slate-900 transition hover:text-slate-600"
               >
@@ -775,7 +804,7 @@ export default function HomePage() {
                 href="/super-admin/login"
                 className="inline-flex items-center justify-center rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700 hover:-translate-y-0.5"
               >
-                Super Admin Login
+                Sales Team / Super Admin Login
               </Link>
             </div>
           </div>

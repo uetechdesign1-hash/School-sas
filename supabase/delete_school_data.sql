@@ -37,8 +37,6 @@ BEGIN
     -- Optional tables - skip if not exist
     -- These are wrapped individually to handle missing tables
     
-    BEGIN DELETE FROM public.transport_routes WHERE school_id = v_school_id; EXCEPTION WHEN undefined_table THEN END;
-    BEGIN DELETE FROM public.transport_fees WHERE school_id = v_school_id; EXCEPTION WHEN undefined_table THEN END;
     BEGIN DELETE FROM public.library_transactions WHERE school_id = v_school_id; EXCEPTION WHEN undefined_table THEN END;
     BEGIN DELETE FROM public.library_books WHERE school_id = v_school_id; EXCEPTION WHEN undefined_table THEN END;
     BEGIN DELETE FROM public.attendance WHERE school_id = v_school_id; EXCEPTION WHEN undefined_table THEN END;

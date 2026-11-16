@@ -65,6 +65,6 @@ available to their existing core workflows.
 For each `SECURITY DEFINER` function, use a fixed `search_path`, verify
 `auth.uid()` and the target school, and test grants and service-role behavior.
 Review super-admin access, suspended schools, cross-school IDs, child rows,
-and races when modules are disabled. Test fee-only, payroll-only,
-transport-only, and combined plans, including payroll journal posting and
-direct PostgREST/RPC calls.
+and races when modules are disabled. Test no-plan, fees-only, payroll-only,
+and combined subscriptions, including payroll journal posting and direct
+PostgREST/RPC calls.

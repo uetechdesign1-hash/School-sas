@@ -7,6 +7,7 @@ import { createClient } from "@/lib/supabase/client";
 const PUBLIC_PREFIXES = [
   "/",
   "/login",
+  "/forgot-password",
   "/subscription-expired",
   "/super-admin",
 ];
@@ -100,6 +101,21 @@ export default function SchoolAccessGuard({
             setChecking(false);
           }
 
+          return;
+        }
+
+        // Sales representatives use the platform portal and do not need a
+        // school membership. Keep them out of the school access fallback.
+        if (profile?.platform_role === "sales_rep" && profile.is_active === true) {
+          if (pathname === "/sales" || pathname.startsWith("/sales/")) {
+            validatedAccess.current = true;
+            if (!cancelled) {
+              setAllowed(true);
+              setChecking(false);
+            }
+          } else {
+            router.replace("/sales");
+          }
           return;
         }
 

@@ -42,7 +42,6 @@ type Salary = {
   staff_id: string;
   basic_salary: number;
   house_allowance: number;
-  transport_allowance: number;
   medical_allowance: number;
   other_allowance: number;
   allowances: number;
@@ -169,11 +168,6 @@ function normalizeSalary(raw: Record<string, unknown>, staffId: string): Salary 
     "housing_allowance",
     "hra",
   ]);
-  const transport = firstNumber(raw, [
-    "transport_allowance",
-    "transport",
-    "ta",
-  ]);
   const medical = firstNumber(raw, [
     "medical_allowance",
     "medical",
@@ -185,12 +179,12 @@ function normalizeSalary(raw: Record<string, unknown>, staffId: string): Salary 
     "other",
   ]);
 
-  const allowances = house + transport + medical + other;
+  const allowances = house + medical + other;
   const componentGross = basic + allowances;
 
   /*
    * Gross must be the actual salary components:
-   * Basic + House + Transport + Medical + Other Allowance.
+   * Basic + House + Medical + Other Allowance.
    *
    * Do NOT use Math.max(storedGross, componentGross) here. A stale or
    * duplicated stored gross can otherwise make payroll show a higher gross
@@ -224,7 +218,6 @@ function normalizeSalary(raw: Record<string, unknown>, staffId: string): Salary 
     staff_id: staffId,
     basic_salary: basic,
     house_allowance: house,
-    transport_allowance: transport,
     medical_allowance: medical,
     other_allowance: other,
     allowances,
@@ -1999,7 +1992,6 @@ export default function PayrollPage() {
                             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                               <Detail label="Basic" value={money(r.salary.basic_salary)} />
                               <Detail label="House" value={money(r.salary.house_allowance)} />
-                              <Detail label="Transport" value={money(r.salary.transport_allowance)} />
                               <Detail label="Medical" value={money(r.salary.medical_allowance)} />
                               <Detail label="Other Allowance" value={money(r.salary.other_allowance)} />
                               <Detail label="Total Allowances" value={money(r.salary.allowances)} />

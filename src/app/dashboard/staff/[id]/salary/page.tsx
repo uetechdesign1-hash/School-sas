@@ -24,7 +24,6 @@ type SalaryStructure = {
   effective_from: string;
   basic_salary: number;
   house_allowance: number;
-  transport_allowance: number;
   medical_allowance: number;
   other_allowance: number;
   pf_deduction: number;
@@ -39,7 +38,6 @@ type SalaryForm = {
   effective_from: string;
   basic_salary: string;
   house_allowance: string;
-  transport_allowance: string;
   medical_allowance: string;
   other_allowance: string;
   pf_deduction: string;
@@ -55,7 +53,6 @@ const initialForm: SalaryForm = {
 
   basic_salary: "",
   house_allowance: "",
-  transport_allowance: "",
   medical_allowance: "",
   other_allowance: "",
 
@@ -191,7 +188,6 @@ export default function StaffSalaryPage() {
           effective_from,
           basic_salary,
           house_allowance,
-          transport_allowance,
           medical_allowance,
           other_allowance,
           pf_deduction,
@@ -247,10 +243,6 @@ export default function StaffSalaryPage() {
       form.house_allowance,
     );
 
-    const transport = amount(
-      form.transport_allowance,
-    );
-
     const medical = amount(
       form.medical_allowance,
     );
@@ -271,7 +263,6 @@ export default function StaffSalaryPage() {
 
     const totalAllowances =
       house +
-      transport +
       medical +
       otherAllowance;
 
@@ -385,11 +376,6 @@ export default function StaffSalaryPage() {
           house_allowance:
             amount(
               form.house_allowance,
-            ),
-
-          transport_allowance:
-            amount(
-              form.transport_allowance,
             ),
 
           medical_allowance:
@@ -778,19 +764,6 @@ export default function StaffSalaryPage() {
                   onChange={(value) =>
                     updateField(
                       "house_allowance",
-                      value,
-                    )
-                  }
-                />
-
-                <MoneyField
-                  label="Transport Allowance"
-                  value={
-                    form.transport_allowance
-                  }
-                  onChange={(value) =>
-                    updateField(
-                      "transport_allowance",
                       value,
                     )
                   }
@@ -1203,7 +1176,6 @@ function allowancesFromSalary(
 ) {
   return (
     amount(salary.house_allowance) +
-    amount(salary.transport_allowance) +
     amount(salary.medical_allowance) +
     amount(salary.other_allowance)
   );

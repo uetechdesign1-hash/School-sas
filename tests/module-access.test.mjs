@@ -33,7 +33,7 @@ const { isModuleRouteAllowed } = await import("../src/lib/school-context/module-
 const { ModuleGate } = await import("../src/lib/school-context/index.tsx");
 const { POST } = await import("../src/app/api/staff/attendance/offline-sync/route.ts");
 
-test("the page guard does not render blocked or loading module children", () => {
+test("the page guard does not render blocked, unassigned, or loading module children", () => {
   let renders = 0;
   function Page() {
     renders++;
@@ -42,16 +42,24 @@ test("the page guard does not render blocked or loading module children", () => 
   const render = (school) => renderToStaticMarkup(
     React.createElement(ModuleGate, { pathname: "/dashboard/payroll", school }, React.createElement(Page)),
   );
-  const state = { schoolId: "school-1", modules: ["transport"], loading: false, error: null };
+  const state = { schoolId: "school-1", modules: [], loading: false, error: null };
   assert.match(render({ ...state, loading: true }), /Checking module access/);
-  assert.match(render(state), /This module is not included in your plan/);
+  assert.match(render(state), /No subscription plan is currently assigned/);
   assert.match(render({ ...state, error: "School unavailable" }), /School unavailable/);
   assert.equal(renders, 0);
   assert.match(render({ ...state, modules: ["payroll"] }), /module data/);
   assert.equal(renders, 1);
+  assert.match(
+    renderToStaticMarkup(React.createElement(ModuleGate, {
+      pathname: "/dashboard/students/new",
+      school: state,
+    }, React.createElement(Page))),
+    /No subscription plan is currently assigned/,
+  );
+  assert.equal(renders, 1);
 });
 
-test("transport-only schools cannot open fee or payroll pages", () => {
+test("schools with no entitlements cannot open module pages", () => {
   for (const path of [
     "/dashboard/fees/structure",
     "/dashboard/students/123/fees/create",
@@ -67,11 +75,11 @@ test("transport-only schools cannot open fee or payroll pages", () => {
     "/dashboard/staff/attendance",
     "/dashboard/staff/123/salary",
   ]) {
-    assert.equal(isModuleRouteAllowed(path, ["transport"]), false, path);
+    assert.equal(isModuleRouteAllowed(path, []), false, path);
   }
-  assert.equal(isModuleRouteAllowed("/dashboard/transport", ["transport"]), true);
-  assert.equal(isModuleRouteAllowed("/dashboard/students", ["transport"]), true);
-  assert.equal(isModuleRouteAllowed("/accounting/ledger", ["transport"]), true);
+  assert.equal(isModuleRouteAllowed("/dashboard", []), false);
+  assert.equal(isModuleRouteAllowed("/dashboard/profile", []), true);
+  assert.equal(isModuleRouteAllowed("/dashboard/school-settings", []), true);
 });
 
 test("fees-only schools cannot open payroll pages; payroll can use the shared ledger", () => {
@@ -163,8 +171,8 @@ function request() {
   });
 }
 
-test("offline attendance rejects transport-only and fees-only schools before the RPC", async () => {
-  for (const modules of [["transport"], ["fees"]]) {
+test("offline attendance rejects empty and fees-only schools before the RPC", async () => {
+  for (const modules of [[], ["fees"]]) {
     await withSupabase(modules, "school-1", async (requests) => {
       const response = await POST(request());
       assert.equal(response.status, 403);

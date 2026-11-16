@@ -9,7 +9,7 @@ function json(data: unknown, status = 200) {
 
 export async function POST(request: Request) {
   try {
-    const { admin } = await requireSuperAdmin(request);
+    const { admin, authenticated } = await requireSuperAdmin(request);
     const body = await request.json();
 
     const action = String(body?.action || "");
@@ -139,7 +139,7 @@ export async function POST(request: Request) {
         );
       }
 
-      const { error: schoolUpdateError } = await admin
+      const { error: schoolUpdateError } = await authenticated
         .from("schools")
         .update({
           name: String(school.name).trim(),
@@ -326,6 +326,63 @@ export async function POST(request: Request) {
         }
       }
 
+      // Owner logins are stamped with the School ID in their auth metadata
+      // and profile. Collect them as well so a login whose school_users row
+      // is missing (or was removed by an earlier, partial delete) is still
+      // cleaned up instead of lingering in Authentication > Users.
+      const schoolCodeValue = String(school.school_code || school.code || "")
+        .trim();
+
+      if (schoolCodeValue) {
+        const { data: loginProfiles } = await admin
+          .from("user_profiles")
+          .select("id")
+          .ilike("login_id", schoolCodeValue);
+
+        for (const row of loginProfiles || []) {
+          if (row?.id) linkedUserIds.add(String(row.id));
+        }
+
+        for (let page = 1; ; page += 1) {
+          const { data: authPage, error: authPageError } =
+            await admin.auth.admin.listUsers({ page, perPage: 1000 });
+
+          if (authPageError || !authPage) break;
+
+          for (const authUser of authPage.users) {
+            const metaCode = String(
+              authUser.user_metadata?.school_code || "",
+            ).trim();
+
+            if (
+              authUser.app_metadata?.account_type === "school_owner" &&
+              metaCode.toLowerCase() === schoolCodeValue.toLowerCase()
+            ) {
+              linkedUserIds.add(authUser.id);
+            }
+          }
+
+          if (authPage.users.length < 1000) break;
+        }
+      }
+
+      // Phase 2 subscription, MOU, invoice, payment and sales-history rows
+      // have restrictive foreign keys and immutable audit triggers. Remove
+      // them through the server-only transactional cleanup RPC first.
+      const { error: businessCleanupError } = await admin.rpc(
+        "cleanup_school_business_records",
+        { p_school_id: schoolId },
+      );
+      if (businessCleanupError) {
+        return json(
+          {
+            success: false,
+            error: `Unable to delete the school's subscription, billing, or sales records: ${errorText(businessCleanupError, "cleanup failed")}`,
+          },
+          500,
+        );
+      }
+
       // Delete all school data in correct order
       // Using raw SQL for cascade delete since we need to delete from multiple tables
 
@@ -357,8 +414,6 @@ export async function POST(request: Request) {
         // User associations (delete before auth users)
         "school_users",
         // Optional modules
-        "transport_routes",
-        "transport_fees",
         "library_transactions",
         "library_books",
         "attendance",
@@ -426,8 +481,38 @@ export async function POST(request: Request) {
       // "A user with this email address has already been registered".
       // --------------------------------------------------
 
+      const authDeleteErrors: string[] = [];
+
       for (const userId of linkedUserIds) {
         try {
+          const { data: otherMembership, error: otherMembershipError } = await admin
+            .from("school_users")
+            .select("school_id")
+            .eq("user_id", userId)
+            .neq("school_id", schoolId)
+            .limit(1)
+            .maybeSingle();
+          const { data: otherStaffRecord, error: otherStaffError } = await admin
+            .from("staff")
+            .select("school_id")
+            .eq("user_id", userId)
+            .neq("school_id", schoolId)
+            .limit(1)
+            .maybeSingle();
+
+          // A login may be associated with more than one school. Removing one
+          // school must not erase that user's remaining school account.
+          if (otherMembershipError || otherStaffError) {
+            console.error("Unable to verify whether a school login is shared:", {
+              userId,
+              otherMembershipError,
+              otherStaffError,
+            });
+            authDeleteErrors.push(`${userId}: could not verify the login is unshared`);
+            continue;
+          }
+          if (otherMembership || otherStaffRecord) continue;
+
           await admin.from("user_profiles").delete().eq("id", userId);
           await admin.from("profiles").delete().eq("id", userId);
 
@@ -435,23 +520,32 @@ export async function POST(request: Request) {
             userId,
           );
 
-          if (authUserError) {
-            console.log(
-              `Could not delete auth user ${userId}:`,
-              authUserError.message,
-            );
+          // A user that is already gone is not a failure.
+          if (authUserError && authUserError.status !== 404) {
+            console.error(`Could not delete auth user ${userId}:`, authUserError.message);
+            authDeleteErrors.push(`${userId}: ${authUserError.message}`);
           }
         } catch (userError: unknown) {
-          // User might already be deleted or not exist - ignore
-          console.log(
-            `Could not delete auth user ${userId}:`,
-            userError instanceof Error ? userError.message : String(userError),
-          );
+          const message = userError instanceof Error ? userError.message : String(userError);
+          console.error(`Could not delete auth user ${userId}:`, message);
+          authDeleteErrors.push(`${userId}: ${message}`);
         }
       }
 
+      // Keep the school so the delete can be retried rather than reporting
+      // success while logins remain in Supabase Auth.
+      if (authDeleteErrors.length > 0) {
+        return json(
+          {
+            success: false,
+            error: `School data was deleted but these logins could not be removed from Authentication: ${authDeleteErrors.join("; ")}. Press delete again to retry.`,
+          },
+          500,
+        );
+      }
+
       // Profile rows that still carry this School ID as their login id.
-      const schoolCode = String(school.school_code || school.code || "").trim();
+      const schoolCode = schoolCodeValue;
 
       if (schoolCode) {
         await admin.from("user_profiles").delete().eq("login_id", schoolCode);

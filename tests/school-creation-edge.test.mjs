@@ -96,11 +96,17 @@ const [ownerHandler, deployedReplacementHandler] = handlers;
 const ownerBody = {
   schoolName: "School", schoolCode: "TEST001", ownerName: "Owner",
   phone: "1234567890", password: "password123", startsOn: "2026-01-01",
-  expiresOn: "2027-01-01",
+  expiresOn: "2027-01-01", studentLimit: 300, amount: 12500,
+  paymentTerms: "Annual, due within 30 days of invoice.",
+  salesDiscussionConfirmed: true, enabled_modules: ["fees"],
 };
 const replacementBody = {
   school_name: "School", school_code: "TEST001", owner_name: "Owner",
   owner_email: "owner@example.test", owner_password: "password123",
+  enabled_modules: ["fees"], student_limit: 300, amount: 12500,
+  payment_terms: "Annual, due within 30 days of invoice.",
+  sales_discussion_confirmed: true, starts_on: "2026-01-01",
+  expires_on: "2027-01-01",
 };
 function request(body) {
   return new Request("https://school.test/create", {
@@ -110,29 +116,28 @@ function request(body) {
   });
 }
 
-test("both Edge paths validate and save every module combination with the actor JWT", async () => {
+test("both Edge paths validate and save the available plan combinations with the actor JWT", async () => {
   for (const [handler, body] of [[ownerHandler, ownerBody], [deployedReplacementHandler, replacementBody]]) {
     for (const modules of [
-      ["fees"], ["payroll"], ["transport"], ["fees", "payroll"],
-      ["fees", "transport"], ["payroll", "transport"], ["fees", "payroll", "transport"],
+      ["fees"], ["payroll"], ["fees", "payroll"],
     ]) {
       const calls = setup();
       const response = await handler(request({ ...body, enabled_modules: modules }));
       assert.equal(response.status, handler === ownerHandler ? 201 : 200);
       assert.deepEqual(calls.schoolInserts[0].enabled_modules, modules);
-      assert.equal(calls.schoolInserts[0].code, "TEST001");
+      assert.equal(calls.schoolInserts[0].code || calls.schoolInserts[0].school_code, "TEST001");
       assert.ok(calls.clients.some((client) => client.key === "test-public" &&
         client.options.global?.headers.Authorization === "Bearer test-token"));
     }
   }
 });
 
-test("both Edge paths preserve omitted-list defaults and reject invalid selections before writes", async () => {
+test("both Edge paths require a selected plan and reject invalid selections before writes", async () => {
   for (const [handler, body] of [[ownerHandler, ownerBody], [deployedReplacementHandler, replacementBody]]) {
     let calls = setup();
-    assert.ok((await handler(request(body))).ok);
-    assert.deepEqual(calls.schoolInserts[0].enabled_modules, ["fees", "payroll"]);
-    for (const modules of [null, [], ["fees", "fees"], ["unknown"]]) {
+    assert.equal((await handler(request({ ...body, enabled_modules: undefined }))).status, 400);
+    assert.deepEqual(calls.schoolInserts, []);
+    for (const modules of [null, [], ["fees", "fees"], ["transport"], ["unknown"]]) {
       calls = setup();
       assert.equal((await handler(request({ ...body, enabled_modules: modules }))).status, 400);
       assert.deepEqual(calls.schoolInserts, []);
@@ -150,9 +155,39 @@ test("both Edge paths reject unauthorized users before creating records", async 
   }
 });
 
+test("both Edge paths allow an active Sales Representative with an explicit agreement", async () => {
+  for (const [handler, body] of [[ownerHandler, ownerBody], [deployedReplacementHandler, replacementBody]]) {
+    const calls = setup({ role: "sales_rep" });
+    const response = await handler(request(body));
+    assert.equal(response.status, handler === ownerHandler ? 201 : 200);
+    assert.deepEqual(calls.schoolInserts[0].enabled_modules, ["fees"]);
+    assert.equal(calls.schoolInserts[0].subscription_amount, 12500);
+    assert.equal(calls.schoolInserts[0].subscription_payment_terms, "Annual, due within 30 days of invoice.");
+    assert.equal(calls.schoolInserts[0].sales_discussion_confirmed, true);
+  }
+});
+
+test("both Edge paths require explicit price, student strength, terms and discussion confirmation", async () => {
+  for (const [handler, body] of [[ownerHandler, ownerBody], [deployedReplacementHandler, replacementBody]]) {
+    for (const invalid of [
+      { amount: undefined, subscription_amount: undefined },
+      { studentLimit: undefined, student_limit: undefined },
+      { paymentTerms: "", payment_terms: "" },
+      { salesDiscussionConfirmed: false, sales_discussion_confirmed: false },
+    ]) {
+      const requestBody = { ...body, ...invalid };
+      const calls = setup();
+      const response = await handler(request(requestBody));
+      assert.equal(response.status, 400);
+      assert.deepEqual(calls.schoolInserts, []);
+      assert.deepEqual(calls.authCreates, []);
+    }
+  }
+});
+
 test("replacement retains partial school and reports an existing-email conflict without deleting users", async () => {
   const calls = setup({ authCreateError: "User already registered" });
-  const response = await deployedReplacementHandler(request({ ...replacementBody, enabled_modules: ["transport"] }));
+  const response = await deployedReplacementHandler(request({ ...replacementBody, enabled_modules: ["fees"] }));
   const result = await response.json();
   assert.equal(response.status, 500);
   assert.match(result.error, /retained for Super Admin review/);
@@ -162,7 +197,10 @@ test("replacement retains partial school and reports an existing-email conflict 
 
 test("replacement rejects an existing owner before creating a school", async () => {
   const calls = setup({ existingUsers: [{ email: "owner@example.test" }] });
-  const response = await deployedReplacementHandler(request(replacementBody));
+  const response = await deployedReplacementHandler(request({
+    ...replacementBody,
+    enabled_modules: ["fees"],
+  }));
   assert.equal(response.status, 409);
   assert.deepEqual(calls.schoolInserts, []);
   assert.deepEqual(calls.authDeletes, []);
@@ -170,7 +208,7 @@ test("replacement rejects an existing owner before creating a school", async () 
 
 test("legacy rollback does not delete a school with audit records", async () => {
   const calls = setup({ authCreateError: "Auth failure", auditRows: [{ id: "audit-1" }] });
-  const response = await ownerHandler(request({ ...ownerBody, enabled_modules: ["transport"] }));
+  const response = await ownerHandler(request({ ...ownerBody, enabled_modules: ["fees"] }));
   assert.equal(response.status, 500);
   assert.match((await response.json()).error, /preserve audit records/);
   assert.deepEqual(calls.schoolDeletes, []);
@@ -178,6 +216,6 @@ test("legacy rollback does not delete a school with audit records", async () => 
 
 test("legacy code-based owner identity remains unchanged", async () => {
   const calls = setup();
-  assert.equal((await ownerHandler(request(ownerBody))).status, 201);
+  assert.equal((await ownerHandler(request({ ...ownerBody, enabled_modules: ["fees"] }))).status, 201);
   assert.equal(calls.authCreates[0].email, "test001@login.schoolerp.local");
 });
