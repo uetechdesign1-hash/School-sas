@@ -375,16 +375,18 @@ export default function HomePage() {
               </div>
 
               <h1 className="max-w-4xl text-4xl font-bold tracking-[-0.045em] text-slate-950 sm:text-5xl lg:text-[4.25rem] lg:leading-[1.02]">
-                Run your entire school
+                SCB — Smart Campus Board
                 <span className="block bg-gradient-to-r from-blue-600 via-indigo-500 to-violet-500 bg-clip-text text-transparent">
-                  from one platform.
+                  Run your entire school from one platform.
                 </span>
               </h1>
 
               <p className="mt-6 max-w-xl text-base leading-7 text-slate-600 sm:text-lg sm:leading-8">
-                SCB brings school administration, students, staff,
-                attendance, fees, payroll, expenses, accounting and reports
-                together in one simple platform.
+                SCB (Smart Campus Board) is the cloud school management platform at
+                <span className="text-indigo-600 font-medium">scbcloud.in</span>. It brings
+                school administration, students, staff, attendance, fees, payroll, expenses,
+                accounting and reports together in one simple platform so you can run your
+                entire school from scbcloud.in.
               </p>
 
               <div className="mt-8 flex flex-col gap-3 sm:flex-row">
@@ -807,6 +809,59 @@ export default function HomePage() {
                    scbcloud.in@gmail.com
                 </a>
               </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* About SCB */}
+      <section className="border-y border-slate-200 bg-slate-50/70 py-20 sm:py-28">
+        <div className="mx-auto max-w-7xl px-5 sm:px-6 lg:px-8">
+          <div className="grid lg:grid-cols-2 lg:items-center lg:gap-12">
+            <div>
+              <h2 className="text-3xl font-bold tracking-tight text-slate-950 sm:text-4xl">
+                What is SCB — Smart Campus Board?
+              </h2>
+              <p className="mt-5 text-lg leading-8 text-slate-600">
+                SCB (Smart Campus Board) is a complete cloud-based school
+                management platform built for Indian schools. It is accessible at
+                <a
+                  href="https://scbcloud.in"
+                  className="text-indigo-600 hover:underline font-medium"
+                >
+                  scbcloud.in
+                </a>
+                . SCB helps school owners, principals, teachers and staff manage
+                admissions, students, classes, attendance, fees, expenses,
+                payroll and accounting from a single dashboard.
+              </p>
+              <p className="mt-5 text-lg leading-8 text-slate-600">
+                Whether you search for SCB, Smart Campus Board or scbcloud.in,
+                our platform gives every school the tools to run operations
+                online, collect fees digitally, track staff attendance and
+                generate real-time reports — all from the cloud.
+              </p>
+            </div>
+            <div className="mt-12 lg:mt-0 rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
+              <h3 className="text-xl font-bold text-slate-950">Key capabilities</h3>
+              <ul className="mt-4 space-y-3 text-slate-600">
+                <li className="flex items-center gap-2">
+                  <CheckCircle2 className="h-5 w-5 text-emerald-600 shrink-0" />
+                  Student admission &amp; records
+                </li>
+                <li className="flex items-center gap-2">
+                  <CheckCircle2 className="h-5 w-5 text-emerald-600 shrink-0" />
+                  Staff &amp; payroll management
+                </li>
+                <li className="flex items-center gap-2">
+                  <CheckCircle2 className="h-5 w-5 text-emerald-600 shrink-0" />
+                  Fee collection &amp; accounting
+                </li>
+                <li className="flex items-center gap-2">
+                  <CheckCircle2 className="h-5 w-5 text-emerald-600 shrink-0" />
+                  Daily attendance &amp; reports
+                </li>
+              </ul>
             </div>
           </div>
         </div>
