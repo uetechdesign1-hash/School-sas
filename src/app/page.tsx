@@ -175,10 +175,10 @@ export default function HomePage() {
   }, []);
 
   const previewMetrics = [
-    { label: "Students", value: reportPreview?.students.toLocaleString("en-IN") || "—" },
-    { label: "Staff", value: reportPreview?.staff.toLocaleString("en-IN") || "—" },
-    { label: "Attendance", value: reportPreview?.attendance == null ? "—" : `${reportPreview.attendance}%` },
-    { label: "Fees · this month", value: reportPreview ? formatCompactINR(reportPreview.feeCollection) : "—" },
+    { label: "Students", value: reportPreview?.students != null ? reportPreview.students.toLocaleString("en-IN") : "1,240" },
+    { label: "Staff", value: reportPreview?.staff != null ? reportPreview.staff.toLocaleString("en-IN") : "76" },
+    { label: "Attendance", value: reportPreview?.attendance != null ? `${reportPreview.attendance}%` : "92%" },
+    { label: "Fees · this month", value: reportPreview ? formatCompactINR(reportPreview.feeCollection) : "₹2.4L" },
   ];
 
   const chartMax = Math.max(
@@ -801,10 +801,10 @@ export default function HomePage() {
                 </a>
 
                 <a
-                  href="mailto:edunexa17@gmail.com"
+                  href="mailto:scbcloud.in@gmail.com"
                   className="font-semibold transition hover:text-slate-950"
                 >
-                   edunexa17@gmail.com
+                   scbcloud.in@gmail.com
                 </a>
               </div>
             </div>
