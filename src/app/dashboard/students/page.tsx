@@ -366,22 +366,13 @@ export default function StudentsPage() {
       // Keep the raw rows; totals are computed per selected academic year.
       // Bills saved without an academic year belong to the year whose dates
       // contain the bill date.
-      const structureYearById = new Map(structures.map((structure) => [structure.id, structure.academic_year_id]));
       const yearForBill = (bill: {
-        id: string;
         academic_year_id: string | null;
         bill_date?: string | null;
       }) => {
-        const itemYears = new Set(
-          (itemsByBill.get(bill.id) || [])
-            .map((item) => item.fee_structure_id ? structureYearById.get(item.fee_structure_id) : null)
-            .filter((year): year is string => Boolean(year)),
-        );
-        // Fee items retain the academic year of the structure they were billed
-        // from. Prefer that year when a bill header was accidentally tagged to
-        // another year, but only when the bill's linked structures agree.
+        // The academic year on the bill is authoritative. Fee structures can
+        // be reused or linked to carried-forward items from a different year.
         return (
-          (itemYears.size === 1 ? [...itemYears][0] : null) ||
           bill.academic_year_id ||
           loadedYears.find(
             (year) =>
