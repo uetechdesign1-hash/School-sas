@@ -77,10 +77,6 @@ export default function StudentsPage() {
   const [academicYears, setAcademicYears] = useState<AcademicYear[]>([]);
   const [role, setRole] = useState("");
 
-  const [outstandingFees, setOutstandingFees] = useState<Record<string, number>>(
-    {},
-  );
-
   // Fee totals across ALL students of ALL classes (canonical fee_bills source,
   // same as the per-student dashboard boxes and the Fee Ledger).
   // Raw fee rows are kept so every box can be recomputed for the academic
@@ -192,11 +188,9 @@ export default function StudentsPage() {
         sectionsResult,
         yearsResult,
         feeStructuresResult,
-        feeStructureItemsResult,
         feeBillsResult,
         feeBillItemsResult,
         feeConcessionsResult,
-        carryForwardsResult,
       ] = await Promise.all([
         supabase
           .from("students")
@@ -248,12 +242,6 @@ export default function StudentsPage() {
         supabase
           .from("fee_structures")
           .select("id, academic_year_id, class_id, active")
-          .eq("school_id", schoolId)
-          .eq("active", true),
-
-        supabase
-          .from("fee_structure_items")
-          .select("id, fee_structure_id, amount, mandatory")
           .eq("school_id", schoolId),
 
         supabase
@@ -263,7 +251,7 @@ export default function StudentsPage() {
 
         supabase
           .from("fee_bill_items")
-          .select("bill_id, fee_structure_id, amount, net_amount")
+          .select("id, bill_id, fee_structure_id, amount, net_amount")
           .eq("school_id", schoolId),
 
         supabase
@@ -271,11 +259,6 @@ export default function StudentsPage() {
           .select("student_id, bill_id, amount")
           .eq("school_id", schoolId),
 
-        supabase
-          .from("fee_carry_forwards")
-          .select("student_id, to_academic_year_id, amount, status")
-          .eq("school_id", schoolId)
-          .eq("status", "pending"),
       ]);
 
       if (studentsResult.error) {
@@ -298,10 +281,6 @@ export default function StudentsPage() {
         throw feeStructuresResult.error;
       }
 
-      if (feeStructureItemsResult.error) {
-        throw feeStructureItemsResult.error;
-      }
-
       if (feeBillsResult.error) {
         throw feeBillsResult.error;
       }
@@ -314,19 +293,11 @@ export default function StudentsPage() {
         throw feeConcessionsResult.error;
       }
 
-      if (carryForwardsResult.error) {
-        throw carryForwardsResult.error;
-      }
-
       const loadedStudents = (studentsResult.data || []) as Student[];
       const loadedClasses = (classesResult.data || []) as SchoolClass[];
       const loadedSections = (sectionsResult.data || []) as Section[];
       const loadedYears = (yearsResult.data || []) as AcademicYear[];
-
-      const feeMap: Record<string, number> = {};
-
-      const currentYear =
-        loadedYears.find((year) => year.is_current) || null;
+      const currentYear = loadedYears.find((year) => year.is_current) || null;
 
       // Fee Management is the source of truth for the current charge.
       // Only mandatory items are included automatically. Optional items are
@@ -339,13 +310,6 @@ export default function StudentsPage() {
         active: boolean;
       }>;
 
-      const structureItems = (feeStructureItemsResult.data || []) as Array<{
-        id: string;
-        fee_structure_id: string;
-        amount: number;
-        mandatory: boolean;
-      }>;
-
       const bills = (feeBillsResult.data || []) as Array<{
         id: string;
         student_id: string;
@@ -356,117 +320,92 @@ export default function StudentsPage() {
         balance_amount: number;
       }>;
 
-      const concessions = (feeConcessionsResult.data || []) as Array<{
-        student_id: string;
-        bill_id: string | null;
+      const billIds = bills.map((bill) => bill.id);
+      const [allocationResult] = billIds.length
+        ? await Promise.all([
+            supabase
+              .from("fee_payment_allocations")
+              .select("bill_id, fee_bill_item_id, amount")
+              .eq("school_id", schoolId)
+              .in("bill_id", billIds),
+          ])
+        : [{ data: [], error: null }];
+      if (allocationResult.error) throw allocationResult.error;
+
+      const allocationsByItem = new Map<string, number>();
+      for (const allocation of allocationResult.data || []) {
+        if (!allocation.fee_bill_item_id) continue;
+        allocationsByItem.set(
+          allocation.fee_bill_item_id,
+          (allocationsByItem.get(allocation.fee_bill_item_id) || 0) + Number(allocation.amount || 0),
+        );
+      }
+      const itemsByBill = new Map<string, Array<{
+        id: string;
         amount: number;
-      }>;
-
-      const carryForwards = (carryForwardsResult.data || []) as Array<{
-        student_id: string;
-        to_academic_year_id: string;
+        net_amount: number | null;
+        fee_structure_id: string | null;
+      }>>();
+      for (const item of (feeBillItemsResult.data || []) as Array<{
+        id: string;
+        bill_id: string;
         amount: number;
-        status: string;
-      }>;
-
-      const currentStructures = new Map<string, { id: string }>();
-      if (currentYear) {
-        for (const structure of structures) {
-          if (structure.academic_year_id !== currentYear.id) continue;
-          if (!currentStructures.has(structure.class_id)) {
-            currentStructures.set(structure.class_id, { id: structure.id });
-          }
-        }
-      }
-
-      const mandatoryTotalByStructure = new Map<string, number>();
-      for (const item of structureItems) {
-        if (!item.mandatory) continue;
-        mandatoryTotalByStructure.set(
-          item.fee_structure_id,
-          (mandatoryTotalByStructure.get(item.fee_structure_id) || 0) +
-            Math.max(Number(item.amount || 0), 0),
-        );
-      }
-
-      // IMPORTANT: use the bill's canonical paid_amount for the current
-      // academic year. The Fee Ledger displays fee_bills.paid_amount, so the
-      // Students list must use the same source of truth. Counting raw
-      // fee_payments here can miss a payment when its bill linkage is stale,
-      // null, or not present in the currently loaded bill set.
-      /*
-       * CANONICAL OUTSTANDING:
-       * The Student Fee page uses fee_bills.balance_amount after
-       * concessions/payments are recalculated. Do not rebuild the balance
-       * from total_amount - concession - paid_amount here because that can
-       * subtract a concession twice or miss student-specific bill items.
-       *
-       * For students who do not yet have a current-year bill, keep the
-       * existing fee-structure fallback so the Students list can still show
-       * the configured expected fee.
-       */
-      const balanceByStudent = new Map<string, number>();
-
-      for (const bill of bills) {
-        if (!currentYear || bill.academic_year_id !== currentYear.id) continue;
-
-        balanceByStudent.set(
-          bill.student_id,
-          (balanceByStudent.get(bill.student_id) || 0) +
-            Math.max(Number(bill.balance_amount || 0), 0),
-        );
-      }
-
-      for (const student of loadedStudents) {
-        if (student.status !== "active") {
-          feeMap[student.id] = 0;
-          continue;
-        }
-        if (!currentYear || !student.class_id) {
-          feeMap[student.id] = 0;
-          continue;
-        }
-
-        const structure = currentStructures.get(student.class_id);
-        const configuredCurrentFee = structure
-          ? mandatoryTotalByStructure.get(structure.id) || 0
-          : 0;
-
-        const hasCurrentYearBill = bills.some(
-          (bill) =>
-            bill.student_id === student.id &&
-            bill.academic_year_id === currentYear.id,
-        );
-
-        // Outstanding must come only from the actual current-year fee bill.
-        // If no bill is assigned, there is no outstanding amount yet.
-        feeMap[student.id] = hasCurrentYearBill
-          ? Math.max(balanceByStudent.get(student.id) || 0, 0)
-          : 0;
+        net_amount: number | null;
+        fee_structure_id: string | null;
+      }>) {
+        const items = itemsByBill.get(item.bill_id) || [];
+        items.push(item);
+        itemsByBill.set(item.bill_id, items);
       }
 
       setStudents(loadedStudents);
       setClasses(loadedClasses);
       setSections(loadedSections);
       setAcademicYears(loadedYears);
-      setOutstandingFees(feeMap);
 
       // Keep the raw rows; totals are computed per selected academic year.
       // Bills saved without an academic year belong to the year whose dates
       // contain the bill date.
-      const yearForBill = (bill: { academic_year_id: string | null; bill_date?: string | null }) =>
-        bill.academic_year_id ||
-        loadedYears.find(
-          (year) =>
-            bill.bill_date &&
-            String(bill.bill_date) >= year.start_date &&
-            String(bill.bill_date) <= year.end_date,
-        )?.id ||
-        null;
-      const normalizedBills = bills.map((bill) => ({
-        ...bill,
-        academic_year_id: yearForBill(bill as { academic_year_id: string | null; bill_date?: string | null }),
-      }));
+      const structureYearById = new Map(structures.map((structure) => [structure.id, structure.academic_year_id]));
+      const yearForBill = (bill: {
+        id: string;
+        academic_year_id: string | null;
+        bill_date?: string | null;
+      }) => {
+        const itemYears = new Set(
+          (itemsByBill.get(bill.id) || [])
+            .map((item) => item.fee_structure_id ? structureYearById.get(item.fee_structure_id) : null)
+            .filter((year): year is string => Boolean(year)),
+        );
+        // Fee items retain the academic year of the structure they were billed
+        // from. Prefer that year when a bill header was accidentally tagged to
+        // another year, but only when the bill's linked structures agree.
+        return (
+          (itemYears.size === 1 ? [...itemYears][0] : null) ||
+          bill.academic_year_id ||
+          loadedYears.find(
+            (year) =>
+              bill.bill_date &&
+              String(bill.bill_date) >= year.start_date &&
+              String(bill.bill_date) <= year.end_date,
+          )?.id ||
+          null
+        );
+      };
+      const normalizedBills = bills.map((bill) => {
+        const items = itemsByBill.get(bill.id) || [];
+        const balance = items.length
+          ? items.reduce((sum, item) => {
+              const net = Number(item.net_amount ?? item.amount ?? 0);
+              return sum + Math.max(net - (allocationsByItem.get(item.id) || 0), 0);
+            }, 0)
+          : Math.max(Number(bill.balance_amount || 0), 0);
+        return {
+          ...bill,
+          academic_year_id: yearForBill(bill),
+          balance_amount: Number(balance.toFixed(2)),
+        };
+      });
       setYearBills(normalizedBills);
 
       // Class of each student in a past year, taken from the fee structure the
@@ -1350,7 +1289,11 @@ export default function StudentsPage() {
                       ? sectionMap.get(yearClass.section_id)
                       : null;
 
-                    const outstanding = outstandingFees[student.id] || 0;
+                    const outstanding = student.status === "active"
+                      ? yearBills
+                          .filter((bill) => bill.student_id === student.id && bill.academic_year_id === feeYearId)
+                          .reduce((sum, bill) => sum + Math.max(Number(bill.balance_amount || 0), 0), 0)
+                      : 0;
                     const selected = selectedStudentIds.includes(student.id);
 
                     return (

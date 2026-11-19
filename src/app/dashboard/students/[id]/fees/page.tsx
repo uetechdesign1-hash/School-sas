@@ -319,6 +319,8 @@ export default function FeesPage() {
   const [selectedSectionId, setSelectedSectionId] = useState<string | null>(null);
 
   const [bills, setBills] = useState<FeeBill[]>([]);
+  const [academicYears, setAcademicYears] = useState<AcademicYear[]>([]);
+  const [selectedAcademicYearId, setSelectedAcademicYearId] = useState("");
   // billId -> "2025-2026 • Class 1 - A" (class the student had in that bill's year)
   const [billYearClass, setBillYearClass] = useState<Record<string, string>>({});
   const [billItems, setBillItems] = useState<FeeBillItem[]>([]);
@@ -759,6 +761,20 @@ export default function FeesPage() {
         // historical items or payments.
         const loadedBills = (billData || []) as FeeBill[];
         setBills(loadedBills);
+
+        const { data: academicYearData, error: academicYearError } = await supabase
+          .from("academic_years")
+          .select("id, name, start_date, end_date, is_current")
+          .eq("school_id", schoolId)
+          .order("start_date", { ascending: true });
+        if (academicYearError) throw new Error(`Unable to load academic years: ${academicYearError.message}`);
+        const loadedAcademicYears = (academicYearData || []) as AcademicYear[];
+        setAcademicYears(loadedAcademicYears);
+        setSelectedAcademicYearId((current) =>
+          current && loadedAcademicYears.some((year) => year.id === current)
+            ? current
+            : loadedAcademicYears.find((year) => year.is_current)?.id || loadedAcademicYears[loadedAcademicYears.length - 1]?.id || "",
+        );
 
         const billLabels = await loadBillClassLabels(
           supabase,
@@ -2237,17 +2253,15 @@ export default function FeesPage() {
     return map;
   }, [bills, billItems, paidByItemId, selectedStudent?.status]);
 
-  const totalBilled = bills.reduce(
-    (sum, bill) => sum + Number(bill.total_amount || 0),
-    0,
+  const visibleBills = useMemo(
+    () => selectedAcademicYearId
+      ? bills.filter((bill) => bill.academic_year_id === selectedAcademicYearId)
+      : bills,
+    [bills, selectedAcademicYearId],
   );
-
-  const totalPaid = bills.reduce(
-    (sum, bill) => sum + Number(bill.paid_amount || 0),
-    0,
-  );
-
-  const totalOutstanding = bills.reduce(
+  const visibleTotalBilled = visibleBills.reduce((sum, bill) => sum + Number(bill.total_amount || 0), 0);
+  const visibleTotalPaid = visibleBills.reduce((sum, bill) => sum + Number(bill.paid_amount || 0), 0);
+  const visibleTotalOutstanding = visibleBills.reduce(
     (sum, bill) => sum + Number(outstandingByBillId.get(bill.id) ?? bill.balance_amount ?? 0),
     0,
   );
@@ -4060,21 +4074,21 @@ export default function FeesPage() {
             <div className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-3">
               <SummaryCard
                 title="Total Billed"
-                value={formatMoney(totalBilled)}
+                value={formatMoney(visibleTotalBilled)}
                 icon={<IndianRupee size={18} />}
               />
 
               <SummaryCard
                 title="Total Paid"
-                value={formatMoney(totalPaid)}
+                value={formatMoney(visibleTotalPaid)}
                 icon={<Receipt size={18} />}
               />
 
               <SummaryCard
                 title="Outstanding"
-                value={formatMoney(totalOutstanding)}
+                value={formatMoney(visibleTotalOutstanding)}
                 icon={<CreditCard size={18} />}
-                danger={totalOutstanding > 0}
+                danger={visibleTotalOutstanding > 0}
               />
             </div>
 
@@ -4089,6 +4103,20 @@ export default function FeesPage() {
                     Record partial or full payments against each bill. Existing fee categories and payments are preserved; newly created categories can be added to the same bill.
                   </p>
                 </div>
+                <label className="flex items-center gap-2 text-sm font-semibold text-slate-700">
+                  Academic Year
+                  <select
+                    value={selectedAcademicYearId}
+                    onChange={(event) => setSelectedAcademicYearId(event.target.value)}
+                    className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
+                  >
+                    {academicYears.map((year) => (
+                      <option key={year.id} value={year.id}>
+                        {year.name}{year.is_current ? " (Current)" : ""}
+                      </option>
+                    ))}
+                  </select>
+                </label>
               </div>
 
               {loadingLedger ? (
@@ -4099,7 +4127,7 @@ export default function FeesPage() {
                   />
                   Loading ledger...
                 </div>
-              ) : bills.length === 0 ? (
+              ) : visibleBills.length === 0 ? (
                 <div className="p-10 text-center">
                   <div className="font-semibold text-slate-700">
                     No fee bills found
@@ -4133,7 +4161,7 @@ export default function FeesPage() {
                     </thead>
 
                     <tbody>
-                      {bills.map((bill) => (
+                      {visibleBills.map((bill) => (
                         <tr
                           key={bill.id}
                           className="border-b border-slate-100 last:border-b-0"

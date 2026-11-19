@@ -36,6 +36,7 @@ type Subscription = {
 };
 
 type Ownership = { original_acquisition_rep_id: string | null; current_rep_id: string | null; acquired_at: string };
+type SchoolAcademicYear = { id: string; name: string; is_current?: boolean | null };
 type RenewalResult = {
   subscription_id: string;
   mou_id: string;
@@ -48,7 +49,7 @@ type RenewalResult = {
 
 async function load(schoolId: string, isAdmin: boolean) {
   const supabase = createClient();
-  const [sub, mous, confirmations, balances, invoices, payments, reversals, jobs, ownership, reps] = await Promise.all([
+  const [sub, mous, confirmations, balances, invoices, payments, reversals, jobs, ownership, reps, years] = await Promise.all([
     supabase.from("school_subscriptions").select("*").eq("school_id", schoolId).eq("status", "active").not("subscription_plan_id", "is", null).maybeSingle(),
     supabase.from("school_mous").select("*").eq("school_id", schoolId).order("generated_at", { ascending: false }),
     supabase.from("billing_count_confirmations").select("*").eq("school_id", schoolId).order("requested_at", { ascending: false }),
@@ -59,8 +60,9 @@ async function load(schoolId: string, isAdmin: boolean) {
     supabase.from("business_provisioning_jobs").select("*").eq("subject_id", schoolId).eq("job_type", "school_owner").order("created_at", { ascending: false }).limit(1),
     supabase.from("school_sales_ownership").select("*").eq("school_id", schoolId).maybeSingle(),
     isAdmin ? supabase.from("sales_representatives").select("*").order("full_name") : Promise.resolve({ data: [], error: null }),
+    supabase.from("academic_years").select("id,name,is_current").eq("school_id", schoolId).order("start_date", { ascending: false }),
   ]);
-  for (const result of [sub, mous, confirmations, balances, invoices, payments, reversals, jobs, ownership, reps]) {
+  for (const result of [sub, mous, confirmations, balances, invoices, payments, reversals, jobs, ownership, reps, years]) {
     if (result.error) throw result.error;
   }
   return {
@@ -74,6 +76,7 @@ async function load(schoolId: string, isAdmin: boolean) {
     job: ((jobs.data ?? [])[0] as ProvisioningJob | undefined) ?? null,
     ownership: (ownership.data as Ownership | null) ?? null,
     reps: (reps.data ?? []) as SalesRep[],
+    years: (years.data ?? []) as SchoolAcademicYear[],
   };
 }
 
@@ -88,6 +91,7 @@ export function SchoolBusinessPanel({ schoolId, isAdmin }: { schoolId: string; i
   const [renewOpen, setRenewOpen] = useState(false);
   const [finalCount, setFinalCount] = useState("");
   const [finalNote, setFinalNote] = useState("");
+  const [finalAcademicYearId, setFinalAcademicYearId] = useState("");
   const [loginOpen, setLoginOpen] = useState(false);
   const [loginMode, setLoginMode] = useState<"invite" | "password">("invite");
   const [loginPassword, setLoginPassword] = useState("");
@@ -102,11 +106,12 @@ export function SchoolBusinessPanel({ schoolId, isAdmin }: { schoolId: string; i
   if (error) return <ErrorBanner message={error} />;
   if (!data) return null;
 
-  const { sub, mous, confirmations, balances, invoices, payments, reversals, job, ownership, reps } = data;
+  const { sub, mous, confirmations, balances, invoices, payments, reversals, job, ownership, reps, years } = data;
   const invoiceById = new Map(invoices.map((invoice) => [invoice.id, invoice]));
   const repName = (id: string | null) => (id ? reps.find((rep) => rep.user_id === id)?.full_name ?? "Representative" : "Company direct");
   const pendingConfirmation = confirmations.find((c) => c.status === "pending_approval");
   const hasInitial = mous.some((mou) => mou.mou_type === "initial");
+  const selectedAcademicYear = years.find((year) => year.id === finalAcademicYearId);
 
   async function doAction(task: () => Promise<unknown>, message: string) {
     await action.run(task, message);
@@ -221,13 +226,13 @@ export function SchoolBusinessPanel({ schoolId, isAdmin }: { schoolId: string; i
                 Extend 1 year &amp; create MOU
               </button>
             ) : null}
-            <button type="button" className={buttonClass("secondary", true)} disabled={!hasInitial || Boolean(pendingConfirmation)} onClick={() => setFinalOpen(true)}>Confirm billing count</button>
+            <button type="button" className={buttonClass("secondary", true)} disabled={!hasInitial || !years.length || Boolean(pendingConfirmation)} onClick={() => { setFinalAcademicYearId(years.find((year) => year.is_current)?.id ?? years[0]?.id ?? ""); setFinalOpen(true); }}>Create Final MOU</button>
           </div>
         }
       >
         {pendingConfirmation ? (
           <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-            <strong>Final MOU awaiting approval:</strong> initial {pendingConfirmation.initial_student_count} students, school records show {pendingConfirmation.observed_student_count}, confirmed {pendingConfirmation.confirmed_student_count}. Revised amount {formatInr(pendingConfirmation.revised_amount)} (was {formatInr(pendingConfirmation.previous_amount)}).
+            <strong>Final MOU awaiting approval:</strong> {pendingConfirmation.academic_year_name || "Selected academic year"}; initial {pendingConfirmation.initial_student_count} students, school records show {pendingConfirmation.observed_student_count}, confirmed {pendingConfirmation.confirmed_student_count}. Revised amount {formatInr(pendingConfirmation.revised_amount)} (was {formatInr(pendingConfirmation.previous_amount)}).
             {isAdmin ? (
               <div className="mt-2 flex gap-2">
                 <button type="button" className={buttonClass("primary", true)} disabled={action.busy} onClick={() => doAction(() => callRpc(supabase, "decide_billing_count_confirmation", { p_confirmation_id: pendingConfirmation.id, p_approve: true }), "Approved. The Final MOU was generated.")}>Approve & generate Final MOU</button>
@@ -324,17 +329,18 @@ export function SchoolBusinessPanel({ schoolId, isAdmin }: { schoolId: string; i
       <Modal
         open={finalOpen}
         onClose={() => setFinalOpen(false)}
-        title="Confirm billing student count"
+        title="Create Final MOU for an academic year"
         footer={
           <>
             <button type="button" className={buttonClass("secondary")} onClick={() => setFinalOpen(false)}>Cancel</button>
-            <button type="button" className={buttonClass()} disabled={action.busy || !(Number(finalCount) >= 1)} onClick={() => doAction(async () => { await callRpc(supabase, "request_billing_count_confirmation", { p_school_id: schoolId, p_confirmed_student_count: Number(finalCount), p_note: finalNote || null }); setFinalOpen(false); }, "Submitted for Super Admin approval.")}>Submit for approval</button>
+            <button type="button" className={buttonClass()} disabled={action.busy || !finalAcademicYearId || !(Number(finalCount) >= 1)} onClick={() => doAction(async () => { await callRpc(supabase, "request_year_billing_count_confirmation", { p_school_id: schoolId, p_academic_year_id: finalAcademicYearId, p_confirmed_student_count: Number(finalCount), p_note: finalNote || null }); setFinalOpen(false); }, "Submitted for Super Admin approval.")}>Submit for approval</button>
           </>
         }
       >
-        <p className="mb-3 text-sm text-slate-600">Enter the confirmed billing student count after admissions close. The revised amount follows the agreement&apos;s pricing basis and needs Super Admin approval before a Final MOU is generated. The Initial MOU is never changed.</p>
+        <p className="mb-3 text-sm text-slate-600">Create a separate Final MOU for each academic year. The active enrollment count for that year is shown as the school-record count; confirm the billable strength for Super Admin approval.</p>
         <div className="grid gap-4">
-          <Field label="Confirmed student count" required><input className={inputClass} type="number" min={1} value={finalCount} onChange={(e) => setFinalCount(e.target.value)} /></Field>
+          <Field label="Academic year" required><select className={inputClass} value={finalAcademicYearId} onChange={async (e) => { const id = e.target.value; setFinalAcademicYearId(id); setFinalCount(""); if (id) { const { count, error } = await supabase.from("student_enrollments").select("student_id,students!inner(status)", { count: "exact", head: true }).eq("school_id", schoolId).eq("academic_year_id", id).eq("students.status", "active"); if (!error && count !== null) setFinalCount(String(count)); } }}><option value="">Select academic year</option>{years.map((year) => <option key={year.id} value={year.id}>{year.name}{year.is_current ? " (Current)" : ""}</option>)}</select></Field>
+          <Field label={`Active students in ${selectedAcademicYear?.name ?? "selected year"}`} required><input className={inputClass} type="number" min={1} value={finalCount} onChange={(e) => setFinalCount(e.target.value)} /></Field>
           <Field label="Note"><textarea className={inputClass} rows={2} value={finalNote} onChange={(e) => setFinalNote(e.target.value)} /></Field>
         </div>
       </Modal>

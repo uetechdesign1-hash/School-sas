@@ -352,6 +352,8 @@ export type BillingConfirmation = {
   decided_at: string | null;
   decision_note: string | null;
   mou_id: string | null;
+  academic_year_id?: string | null;
+  academic_year_name?: string | null;
 };
 
 export type WebsitePolicy = {

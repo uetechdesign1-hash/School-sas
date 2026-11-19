@@ -55,6 +55,7 @@ export function MousList({ type, isAdmin }: { type: "initial" | "final"; isAdmin
             rowKey={(row) => row.id}
             columns={[
               { header: "School", cell: (row) => <Link className="text-blue-600 hover:underline" href={`${base}/schools/${row.school_id}`}>{data?.names.get(row.school_id) ?? "School"}</Link> },
+              { header: "Academic year", cell: (row) => row.academic_year_name ?? "—" },
               { header: "Initial", cell: (row) => row.initial_student_count, align: "right" },
               { header: "School records", cell: (row) => row.observed_student_count, align: "right" },
               { header: "Confirmed", cell: (row) => row.confirmed_student_count, align: "right" },
