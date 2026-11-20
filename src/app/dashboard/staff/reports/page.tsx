@@ -168,21 +168,10 @@ export default function AttendanceReportsPage() {
 
   const today = new Date();
 
-  const [fromDate, setFromDate] =
-    useState(
-      localDate(
-        new Date(
-          today.getFullYear(),
-          today.getMonth(),
-          1
-        )
-      )
-    );
-
-  const [toDate, setToDate] =
-    useState(
-      localDate(today)
-    );
+  const [month, setMonth] = useState(
+    `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}`
+  );
+  const [selectedStaffId, setSelectedStaffId] = useState("all");
 
   const [search, setSearch] =
     useState("");
@@ -192,6 +181,7 @@ export default function AttendanceReportsPage() {
 
   const [rows, setRows] =
     useState<ReportRow[]>([]);
+  const [staffOptions, setStaffOptions] = useState<Staff[]>([]);
 
   const [schoolName, setSchoolName] =
     useState("School");
@@ -204,7 +194,7 @@ export default function AttendanceReportsPage() {
 
   useEffect(() => {
     void loadReport();
-  }, [fromDate, toDate]);
+  }, [month]);
 
   async function loadReport() {
     try {
@@ -305,6 +295,12 @@ export default function AttendanceReportsPage() {
         throw staffError;
       }
 
+      const staffList = (staffData || []) as Staff[];
+      setStaffOptions(staffList);
+      const [year, monthNumber] = month.split("-").map(Number);
+      const fromDate = `${month}-01`;
+      const toDate = localDate(new Date(year, monthNumber, 0));
+
       const {
         data: attendanceData,
         error: attendanceError,
@@ -350,9 +346,6 @@ export default function AttendanceReportsPage() {
       if (attendanceError) {
         throw attendanceError;
       }
-
-      const staffList =
-        (staffData || []) as Staff[];
 
       const attendanceList =
         (attendanceData ||
@@ -418,6 +411,8 @@ export default function AttendanceReportsPage() {
         !query ||
         text.includes(query);
 
+      const matchesStaff = selectedStaffId === "all" || row.staff.id === selectedStaffId;
+
       const rowStatus =
         row.attendance?.status ||
         "absent";
@@ -429,6 +424,7 @@ export default function AttendanceReportsPage() {
 
       return (
         matchesSearch &&
+        matchesStaff &&
         matchesStatus
       );
     });
@@ -436,11 +432,12 @@ export default function AttendanceReportsPage() {
     rows,
     search,
     statusFilter,
+    selectedStaffId,
   ]);
 
   const stats = useMemo(() => {
     const records =
-      rows.filter(
+      filteredRows.filter(
         (row) =>
           row.attendance !== null
       );
@@ -473,7 +470,7 @@ export default function AttendanceReportsPage() {
           "half_day"
       ).length,
     };
-  }, [rows]);
+  }, [filteredRows]);
 
   function exportCsv() {
     const header = [
@@ -560,7 +557,7 @@ export default function AttendanceReportsPage() {
 
     link.href = url;
     link.download =
-      `staff-attendance-${fromDate}-to-${toDate}.csv`;
+      `staff-attendance-${month}${selectedStaffId === "all" ? "" : `-${selectedStaffId}`}.csv`;
 
     document.body.appendChild(link);
     link.click();
@@ -584,7 +581,7 @@ export default function AttendanceReportsPage() {
   }
 
   return (
-    <main className="min-h-screen bg-slate-50 p-4 md:p-8">
+    <main className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50/50 to-violet-50/50 p-4 md:p-8">
 
       <div className="mx-auto max-w-7xl">
 
@@ -648,18 +645,25 @@ export default function AttendanceReportsPage() {
           <div className="grid gap-4 md:grid-cols-4">
 
             <Field
-              label="From"
-              type="date"
-              value={fromDate}
-              onChange={setFromDate}
+              label="Month"
+              type="month"
+              value={month}
+              onChange={setMonth}
             />
 
-            <Field
-              label="To"
-              type="date"
-              value={toDate}
-              onChange={setToDate}
-            />
+            <div>
+              <label className="text-xs font-bold text-slate-500">Staff member</label>
+              <select
+                value={selectedStaffId}
+                onChange={(event) => setSelectedStaffId(event.target.value)}
+                className="mt-2 h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700"
+              >
+                <option value="all">All staff</option>
+                {staffOptions.map((member) => (
+                  <option key={member.id} value={member.id}>{staffName(member)}{member.employee_no ? ` · ${member.employee_no}` : ""}</option>
+                ))}
+              </select>
+            </div>
 
             <Field
               label="Search"

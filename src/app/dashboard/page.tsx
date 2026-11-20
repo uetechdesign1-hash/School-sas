@@ -15,6 +15,7 @@ import {
   Check,
   ChevronRight,
   Download,
+  FilePlus2,
   GraduationCap,
   IndianRupee,
   Landmark,
@@ -116,42 +117,58 @@ const QUICK_ACTIONS: QuickActionProps[] = [
     icon: <CalendarDays size={20} />,
   },
   {
-    title: "Fees",
-    description: "Bills and fee collections",
-    href: "/dashboard/fees",
-    icon: <IndianRupee size={20} />,
-  },
-  {
-    title: "Attendance",
-    description: "Record daily attendance",
-    href: "/dashboard/attendance",
-    icon: <CalendarCheck size={20} />,
-  },
-  {
-    title: "Expenses",
-    description: "Track school expenses",
-    href: "/dashboard/expenses",
-    icon: <ReceiptText size={20} />,
-  },
-
-  // OTHER
-  {
     title: "Staff",
     description: "Manage school staff",
     href: "/dashboard/staff",
     icon: <Users size={20} />,
   },
   {
+    title: "Attendance Report",
+    description: "View monthly staff attendance reports",
+    href: "/dashboard/staff/reports",
+    icon: <CalendarCheck size={20} />,
+  },
+];
+
+const FEE_ACTIONS: QuickActionProps[] = [
+  {
+    title: "Add Fee Structure",
+    description: "Create and manage fee structures",
+    href: "/dashboard/fees/structure",
+    icon: <FilePlus2 size={20} />,
+  },
+  {
+    title: "Assign Fee",
+    description: "Assign fees to classes and students",
+    href: "/dashboard/fees/assign",
+    icon: <Users size={20} />,
+  },
+  {
+    title: "Fees",
+    description: "Bills and fee collections",
+    href: "/dashboard/fees",
+    icon: <IndianRupee size={20} />,
+  },
+];
+
+const COLLECTION_ACTIONS: QuickActionProps[] = [
+  {
+    title: "Fee Collection",
+    description: "Record a student fee payment",
+    href: ACCOUNTING_ROUTES.collectFee,
+    icon: <IndianRupee size={20} />,
+  },
+  {
+    title: "Payments",
+    description: "Record school payments",
+    href: ACCOUNTING_ROUTES.payment,
+    icon: <Wallet size={20} />,
+  },
+  {
     title: "Payroll",
     description: "Manage monthly staff payroll",
     href: "/dashboard/payroll",
     icon: <Banknote size={20} />,
-  },
-  {
-    title: "Reports",
-    description: "School reports",
-    href: "/dashboard/reports",
-    icon: <BarChart3 size={20} />,
   },
 ];
 
@@ -163,6 +180,7 @@ export default function DashboardPage() {
     error: modulesError,
   } = useSchoolContext();
   const hasFees = !modulesError && modules.includes("fees");
+  const hasPayroll = !modulesError && modules.includes("payroll");
   const [school, setSchool] = useState<School | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
 
@@ -883,6 +901,34 @@ export default function DashboardPage() {
           </div>
         </section>
 
+        {/* FEE MANAGEMENT */}
+        {hasFees && <section className="mt-8 rounded-3xl border border-violet-200 bg-gradient-to-br from-violet-50 via-white to-fuchsia-50 p-5 shadow-sm sm:p-6">
+          <div className="mb-4">
+            <p className="text-xs font-bold uppercase tracking-wide text-violet-600">Fees</p>
+            <h2 className="mt-1 text-xl font-bold text-slate-900">Fee Management</h2>
+            <p className="mt-1 text-sm text-slate-500">Set up fee structures, assign fees and manage bills.</p>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {FEE_ACTIONS.filter((action) => isModuleRouteAllowed(action.href, modules)).map((action) => (
+              <QuickAction key={action.href} {...action} />
+            ))}
+          </div>
+        </section>}
+
+        {/* COLLECTIONS & PAYMENTS */}
+        {(hasFees || hasPayroll) && <section className="mt-8 rounded-3xl border border-emerald-200 bg-gradient-to-br from-emerald-50 via-white to-cyan-50 p-5 shadow-sm sm:p-6">
+          <div className="mb-4">
+            <p className="text-xs font-bold uppercase tracking-wide text-emerald-600">Finance</p>
+            <h2 className="mt-1 text-xl font-bold text-slate-900">Collections &amp; Payments</h2>
+            <p className="mt-1 text-sm text-slate-500">Fee collection, school payments and payroll.</p>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {COLLECTION_ACTIONS.filter((action) => isModuleRouteAllowed(action.href, modules)).map((action) => (
+              <QuickAction key={action.href} {...action} />
+            ))}
+          </div>
+        </section>}
+
         {/* ACCOUNTING CONTROL CENTER */}
         {hasFees && <section className="mt-8 rounded-3xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -896,7 +942,7 @@ export default function DashboardPage() {
               </h2>
 
               <p className="mt-1 text-sm text-slate-500">
-                Manage accounts, opening balance, cash, bank and final accounts.
+                Manage expenses, reports, accounts, cash, bank and final accounts.
               </p>
             </div>
 
@@ -938,24 +984,10 @@ export default function DashboardPage() {
               />
 
               <AccountingShortcut
-                href={ACCOUNTING_ROUTES.collectFee}
-                icon={<IndianRupee size={19} />}
-                title="Collect Fee"
-                description="Record a student fee payment"
-              />
-
-              <AccountingShortcut
                 href={ACCOUNTING_ROUTES.receipt}
                 icon={<ReceiptText size={19} />}
                 title="Fee Receipts"
                 description="View and manage recorded receipts"
-              />
-
-              <AccountingShortcut
-                href={ACCOUNTING_ROUTES.payment}
-                icon={<Banknote size={19} />}
-                title="Payment"
-                description="Record school payments"
               />
 
               <AccountingShortcut
@@ -978,6 +1010,11 @@ export default function DashboardPage() {
                 title="Vendor Purchases"
                 description="Manage vendor bills and payments"
               />
+            </AccountingGroup>
+
+            <AccountingGroup title="School Finance & Reports">
+              <AccountingShortcut href="/dashboard/expenses" icon={<ReceiptText size={19} />} title="Expenses" description="Track school expenses" />
+              <AccountingShortcut href="/dashboard/reports" icon={<BarChart3 size={19} />} title="Reports" description="School reports and summaries" />
             </AccountingGroup>
 
             <AccountingGroup title="Reports & Final Accounts">

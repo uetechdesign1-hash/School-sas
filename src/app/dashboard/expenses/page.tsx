@@ -3,6 +3,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import * as XLSX from "xlsx";
+import { jsPDF } from "jspdf";
 import {
   AlertCircle,
   Banknote,
@@ -96,6 +98,7 @@ type VendorPayment = {
   notes: string | null;
   journal_entry_id: string | null;
   created_at: string;
+  payment_splits?: Array<{ account_id: string; amount: number }>;
 };
 
 type Allocation = {
@@ -142,6 +145,7 @@ type Expense = {
   created_at: string;
   canonical_journal_entry_id?: string | null;
   expense_account_id?: string | null;
+  payment_splits?: Array<{ account_id: string; amount: number }>;
 };
 
 type Entry = {
@@ -165,10 +169,6 @@ const DIGI_SCHOOL_ID = "54ab324b-a707-4516-9b33-6721d97163ec";
 const today = () => new Date().toISOString().slice(0, 10);
 const currentMonth = () => new Date().toISOString().slice(0, 7);
 const currentMonthStart = () => `${currentMonth()}-01`;
-const currentMonthEnd = () => {
-  const [year, month] = currentMonth().split("-").map(Number);
-  return new Date(year, month, 0).toISOString().slice(0, 10);
-};
 
 function money(n: number) {
   return new Intl.NumberFormat("en-IN", {
@@ -190,14 +190,6 @@ function dateText(v: string) {
         month: "short",
         year: "numeric",
       });
-}
-
-function csv(v: unknown) {
-  const s = String(v ?? "");
-
-  return /[",\n]/.test(s)
-    ? `"${s.replace(/"/g, '""')}"`
-    : s;
 }
 
 function round2(n: number) {
@@ -226,7 +218,7 @@ export default function ExpensesPage() {
   const [success, setSuccess] = useState("");
 
   const [fromDate, setFromDate] = useState(currentMonthStart());
-  const [toDate, setToDate] = useState(currentMonthEnd());
+  const [toDate, setToDate] = useState(today());
   const [search, setSearch] = useState("");
   const [accountFilter, setAccountFilter] = useState("");
   const [expenseAccountFilter, setExpenseAccountFilter] = useState("");
@@ -423,7 +415,7 @@ export default function ExpensesPage() {
 
     const expenseRows = (expenseRes.data || []) as Expense[];
     const expenseIds = expenseRows.map((expense) => expense.id);
-    let linkedExpenses = new Map<string, { journalId: string; accountId: string | null }>();
+    let linkedExpenses = new Map<string, { journalId: string; accountId: string | null; paymentSplits: Array<{ account_id: string; amount: number }> }>();
     if (expenseIds.length) {
       const { data: events, error: eventError } = await supabase
         .from("accounting_events")
@@ -439,22 +431,37 @@ export default function ExpensesPage() {
       if (lineError) throw lineError;
       for (const event of eventRows) {
         const debitLine = (lines || []).find((line) => String(line.journal_entry_id) === String(event.journal_entry_id) && Number(line.debit || 0) > 0);
-        linkedExpenses.set(String(event.source_record_id), { journalId: String(event.journal_entry_id), accountId: debitLine?.account_id || null });
+        const creditLines = (lines || []).filter((line) => String(line.journal_entry_id) === String(event.journal_entry_id) && Number(line.credit || 0) > 0);
+        linkedExpenses.set(String(event.source_record_id), {
+          journalId: String(event.journal_entry_id),
+          accountId: debitLine?.account_id || null,
+          paymentSplits: creditLines.map((line) => ({ account_id: String(line.account_id), amount: Number(line.credit || 0) })),
+        });
       }
     }
     setExpenses(expenseRows.map((expense) => ({
       ...expense,
       canonical_journal_entry_id: linkedExpenses.get(expense.id)?.journalId || null,
       expense_account_id: linkedExpenses.get(expense.id)?.accountId || null,
+      payment_splits: linkedExpenses.get(expense.id)?.paymentSplits || [],
     })));
 
     setVendors(
       (vendorRes.data || []) as Vendor[],
     );
 
-    setVendorPayments(
-      (paymentRes.data || []) as VendorPayment[],
-    );
+    const vendorPaymentRows = (paymentRes.data || []) as VendorPayment[];
+    const vendorJournalIds = vendorPaymentRows.map((payment) => payment.journal_entry_id).filter((value): value is string => Boolean(value));
+    const vendorCreditLines = vendorJournalIds.length
+      ? await supabase.from("journal_lines").select("journal_entry_id,account_id,credit").eq("school_id", id).in("journal_entry_id", vendorJournalIds)
+      : { data: [], error: null };
+    if (vendorCreditLines.error) throw vendorCreditLines.error;
+    setVendorPayments(vendorPaymentRows.map((payment) => ({
+      ...payment,
+      payment_splits: (vendorCreditLines.data || [])
+        .filter((line) => line.journal_entry_id === payment.journal_entry_id && Number(line.credit || 0) > 0)
+        .map((line) => ({ account_id: String(line.account_id), amount: Number(line.credit || 0) })),
+    })));
 
     setBills(
       (billRes.data || []) as PurchaseBill[],
@@ -618,7 +625,8 @@ export default function ExpensesPage() {
       const accOk =
         !accountFilter ||
         e.paid_from_account_id ===
-          accountFilter;
+          accountFilter ||
+        e.payment_splits?.some((split) => split.account_id === accountFilter);
 
       if (!accOk) {
         return false;
@@ -659,7 +667,8 @@ export default function ExpensesPage() {
       const accOk =
         !accountFilter ||
         p.paid_from_account_id ===
-          accountFilter;
+          accountFilter ||
+        p.payment_splits?.some((split) => split.account_id === accountFilter);
 
       if (!accOk) {
         return false;
@@ -704,32 +713,26 @@ export default function ExpensesPage() {
     let bank = 0;
     let other = 0;
 
-    const add = (amount: number, paidFromId: string | null) => {
+    const add = (amount: number, paidFromId: string | null, splits: Array<{ account_id: string; amount: number }> = []) => {
       const a = Number(amount || 0);
 
       total += a;
 
-      const type = paidFromId
-        ? accountMap.get(
-            paidFromId,
-          )?.account_type
-        : "";
-
-      if (type === "cash") {
-        cash += a;
-      } else if (type === "bank") {
-        bank += a;
-      } else {
-        other += a;
+      const legs = splits.length ? splits : [{ account_id: paidFromId || "", amount: a }];
+      for (const leg of legs) {
+        const type = accountMap.get(leg.account_id)?.account_type;
+        if (type === "cash") cash += Number(leg.amount || 0);
+        else if (type === "bank") bank += Number(leg.amount || 0);
+        else other += Number(leg.amount || 0);
       }
     };
 
     for (const e of filtered) {
-      add(Number(e.amount || 0), e.paid_from_account_id);
+      add(Number(e.amount || 0), e.paid_from_account_id, e.payment_splits);
     }
 
     for (const p of filteredVendorPayments) {
-      add(Number(p.amount || 0), p.paid_from_account_id);
+      add(Number(p.amount || 0), p.paid_from_account_id, p.payment_splits);
     }
 
     return {
@@ -2089,73 +2092,119 @@ export default function ExpensesPage() {
     }
   }
 
-  function exportCsv() {
+  function buildExportRows() {
+    const getDate = (value: string) => {
+      const [year, month, day] = value.slice(0, 10).split("-");
+      return `${day}-${month}-${year}`;
+    };
+    const getLegAmounts = (amount: number, accountId: string | null, splits: Array<{ account_id: string; amount: number }> = []) => {
+      const legs = splits.length ? splits : [{ account_id: accountId || "", amount }];
+      const cash = legs.reduce((sum, leg) => accountMap.get(leg.account_id)?.account_type?.toLowerCase() === "cash" ? sum + Number(leg.amount || 0) : sum, 0);
+      const bank = legs.reduce((sum, leg) => accountMap.get(leg.account_id)?.account_type?.toLowerCase() === "bank" ? sum + Number(leg.amount || 0) : sum, 0);
+      return { cash: round2(cash), bank: round2(bank) };
+    };
     const rows = [
-      [
-        "Type",
-        "Date",
-        "Vendor / Paid To",
-        "Paid From",
-        "Amount",
-        "Reference / Invoice",
-        "Description",
-      ],
-      ...filtered.map((e) => [
-        "Expense",
-        e.expense_date,
-        e.vendor_name || "",
-        e.paid_from_account_id
-          ? accountMap.get(
-              e.paid_from_account_id,
-            )?.name || ""
-          : "",
-        Number(
-          e.amount || 0,
-        ).toFixed(2),
-        e.invoice_number || "",
-        e.description || "",
-      ]),
-      ...filteredVendorPayments.map((p) => [
-        "Vendor Payment",
-        p.payment_date,
-        vendorMap.get(p.vendor_id)?.name || "",
-        p.paid_from_account_id
-          ? accountMap.get(
-              p.paid_from_account_id,
-            )?.name || ""
-          : "",
-        Number(
-          p.amount || 0,
-        ).toFixed(2),
-        p.reference_number || "",
-        p.notes || "",
-      ]),
+      ...filtered.map((expense) => {
+        const legs = getLegAmounts(Number(expense.amount || 0), expense.paid_from_account_id, expense.payment_splits);
+        const title = expense.vendor_name || (expense.expense_account_id ? accountMap.get(expense.expense_account_id)?.name : null) || "Expense";
+        const details = expense.description || expense.invoice_number || "";
+        return {
+          sortDate: expense.expense_date,
+          Date: getDate(expense.expense_date),
+          "Expense Type": "Expense",
+          "Vendor / Description": [title, details].filter(Boolean).join(" / "),
+          Cash: legs.cash,
+          Bank: legs.bank,
+          Total: round2(Number(expense.amount || 0)),
+        };
+      }),
+      ...filteredVendorPayments.map((payment) => {
+        const legs = getLegAmounts(Number(payment.amount || 0), payment.paid_from_account_id, payment.payment_splits);
+        return {
+          sortDate: payment.payment_date,
+          Date: getDate(payment.payment_date),
+          "Expense Type": "Vendor Payment",
+          "Vendor / Description": [vendorMap.get(payment.vendor_id)?.name || "Vendor payment", payment.notes].filter(Boolean).join(" / "),
+          Cash: legs.cash,
+          Bank: legs.bank,
+          Total: round2(Number(payment.amount || 0)),
+        };
+      }),
+    ].sort((a, b) => a.sortDate.localeCompare(b.sortDate));
+    return rows;
+  }
+
+  function exportExcel() {
+    const rows = buildExportRows().map(({ sortDate: _sortDate, ...row }) => row);
+    const worksheet = XLSX.utils.json_to_sheet(rows, {
+      header: ["Date", "Expense Type", "Vendor / Description", "Cash", "Bank", "Total"],
+    });
+    worksheet["!cols"] = [{ wch: 14 }, { wch: 18 }, { wch: 52 }, { wch: 16 }, { wch: 16 }, { wch: 16 }];
+    worksheet["!autofilter"] = { ref: `A1:F${Math.max(rows.length + 1, 1)}` };
+    for (let row = 2; row <= rows.length + 1; row += 1) {
+      for (const col of ["D", "E", "F"]) {
+        const cell = worksheet[`${col}${row}`];
+        if (cell) cell.z = '#,##0.00';
+      }
+    }
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Expenses");
+    XLSX.writeFile(workbook, `expenses-${fromDate || "start"}-to-${toDate || today()}.xlsx`);
+  }
+
+  function exportPdf() {
+    const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
+    const rows = buildExportRows();
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const margin = 28;
+    const columns = [
+      { title: "Date", width: 72 },
+      { title: "Expense Type", width: 96 },
+      { title: "Vendor / Description", width: 354 },
+      { title: "Cash", width: 84 },
+      { title: "Bank", width: 84 },
+      { title: "Total", width: 84 },
     ];
-
-    const blob = new Blob(
-      [
-        rows
-          .map((r) =>
-            r.map(csv).join(","),
-          )
-          .join("\n"),
-      ],
-      {
-        type: "text/csv;charset=utf-8",
-      },
-    );
-
-    const url =
-      URL.createObjectURL(blob);
-
-    const a =
-      document.createElement("a");
-
-    a.href = url;
-    a.download = `expenses-${fromDate || "all"}-to-${toDate || "all"}.csv`;
-    a.click();
-
-    URL.revokeObjectURL(url);
+    const drawHeader = (continued: boolean) => {
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(16);
+      doc.text("Expenses", margin, 30);
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(9);
+      doc.text(`${schoolName} · ${fromDate || "Start"} to ${toDate || today()}${continued ? " · continued" : ""}`, margin, 45);
+      let x = margin;
+      const y = 60;
+      doc.setFillColor(235, 241, 250);
+      doc.rect(margin, y - 12, columns.reduce((sum, col) => sum + col.width, 0), 20, "F");
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(8);
+      columns.forEach((col) => { doc.text(col.title, x + 4, y); x += col.width; });
+      doc.setFont("helvetica", "normal");
+      return y + 18;
+    };
+    let y = drawHeader(false);
+    for (const row of rows) {
+      const descriptionLines = doc.splitTextToSize(row["Vendor / Description"] || "", columns[2].width - 8) as string[];
+      const lineCount = Math.max(1, descriptionLines.length);
+      const rowHeight = Math.max(22, lineCount * 10 + 8);
+      if (y + rowHeight > pageHeight - margin) {
+        doc.addPage();
+        y = drawHeader(true);
+      }
+      doc.setDrawColor(220, 226, 235);
+      doc.line(margin, y + rowHeight - 4, pageWidth - margin, y + rowHeight - 4);
+      let x = margin + 4;
+      doc.setFontSize(8);
+      doc.text(row.Date, x, y + 8); x += columns[0].width;
+      doc.text(row["Expense Type"], x + 4, y + 8); x += columns[1].width;
+      doc.text(descriptionLines, x + 4, y + 8); x += columns[2].width;
+      doc.text(`INR ${row.Cash.toFixed(2)}`, x + 4, y + 8); x += columns[3].width;
+      doc.text(`INR ${row.Bank.toFixed(2)}`, x + 4, y + 8); x += columns[4].width;
+      doc.text(`INR ${row.Total.toFixed(2)}`, x + 4, y + 8);
+      y += rowHeight;
+    }
+    doc.save(`expenses-${fromDate || "start"}-to-${toDate || today()}.pdf`);
   }
 
   if (loading) {
@@ -2210,11 +2259,19 @@ export default function ExpensesPage() {
               </button>
 
               <button
-                onClick={exportCsv}
+                onClick={exportExcel}
                 className="inline-flex items-center gap-2 rounded-lg border bg-white px-4 py-2.5 text-sm font-semibold hover:bg-slate-50"
               >
                 <Download size={16} />
-                Export
+                Export Excel
+              </button>
+
+              <button
+                onClick={exportPdf}
+                className="inline-flex items-center gap-2 rounded-lg border bg-white px-4 py-2.5 text-sm font-semibold hover:bg-slate-50"
+              >
+                <FileText size={16} />
+                Export PDF
               </button>
 
               <button

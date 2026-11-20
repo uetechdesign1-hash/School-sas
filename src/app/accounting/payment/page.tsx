@@ -261,6 +261,12 @@ export default function PaymentPage() {
   const [paidFromAccountId, setPaidFromAccountId] =
     useState("");
 
+  const [collectionType, setCollectionType] = useState<"single" | "split">("single");
+  const [cashSplitAccountId, setCashSplitAccountId] = useState("");
+  const [bankSplitAccountId, setBankSplitAccountId] = useState("");
+  const [cashSplitAmount, setCashSplitAmount] = useState("");
+  const [bankSplitAmount, setBankSplitAmount] = useState("");
+
   const [expenseAccountId, setExpenseAccountId] =
     useState("");
 
@@ -1760,6 +1766,11 @@ export default function PaymentPage() {
     setPaidFromAccountId(
       cash?.id || ""
     );
+    setCollectionType("single");
+    setCashSplitAccountId(cash?.id || "");
+    setBankSplitAccountId(accounts.find((account) => account.account_type === "bank")?.id || "");
+    setCashSplitAmount("");
+    setBankSplitAmount("");
 
     setExpenseAccountId("");
 
@@ -1849,6 +1860,7 @@ export default function PaymentPage() {
   async function saveSalaryPaymentEdit(
     numericAmount: number,
     paidFrom: Account,
+    paymentSplits: Array<{ accountId: string; amount: number }> = [],
   ) {
     if (!schoolId || !editingId || !payrollRunId || !payrollMonth || !selectedPayrollStaffId) {
       setError("The linked payroll details are incomplete. Cancel and reopen this salary payment.");
@@ -1900,7 +1912,7 @@ export default function PaymentPage() {
         `Salary payment - ${staff.name} - ${formatPayrollMonthLabel(payrollMonth)}`,
         `Payroll run: ${payrollRunId}`,
         `Payroll employee: ${staff.employee_id}`,
-        `Payment method: ${paymentMethod}`,
+        `Payment method: ${collectionType === "split" ? "Split Cash + Bank" : paymentMethod}`,
         `Reference: ${reference}`,
         notes.trim() ? `Notes: ${notes.trim()}` : "",
       ].filter(Boolean).join(" | ");
@@ -1928,13 +1940,13 @@ export default function PaymentPage() {
 
         const { data: lines, error: linesError } = await supabase
           .from("journal_lines")
-          .select("id, debit, credit")
+          .select("id, debit, credit, fiscal_year_id")
           .eq("school_id", schoolId)
           .eq("journal_entry_id", editingId);
         if (linesError) throw linesError;
         const debitLine = (lines || []).find((line) => Number(line.debit || 0) > 0);
-        const creditLine = (lines || []).find((line) => Number(line.credit || 0) > 0);
-        if (!debitLine || !creditLine) throw new Error("The salary journal is incomplete.");
+        const creditLines = (lines || []).filter((line) => Number(line.credit || 0) > 0);
+        if (!debitLine || !creditLines.length) throw new Error("The salary journal is incomplete.");
 
         const { error: debitUpdateError } = await supabase
           .from("journal_lines")
@@ -1943,12 +1955,23 @@ export default function PaymentPage() {
           .eq("id", debitLine.id);
         if (debitUpdateError) throw debitUpdateError;
 
+        const desiredCredits = paymentSplits.length ? paymentSplits : [{ accountId: paidFrom.id, amount: numericAmount }];
         const { error: creditUpdateError } = await supabase
           .from("journal_lines")
-          .update({ account_id: paidFrom.id, debit: 0, credit: numericAmount, description: journalDescription })
-          .eq("school_id", schoolId)
-          .eq("id", creditLine.id);
+          .update({ account_id: desiredCredits[0].accountId, debit: 0, credit: desiredCredits[0].amount, description: journalDescription })
+          .eq("school_id", schoolId).eq("id", creditLines[0].id);
         if (creditUpdateError) throw creditUpdateError;
+        if (creditLines.length > 1) {
+          const { error } = await supabase.from("journal_lines").delete().in("id", creditLines.slice(1).map((line) => line.id)).eq("school_id", schoolId);
+          if (error) throw error;
+        }
+        if (desiredCredits.length > 1) {
+          const { error } = await supabase.from("journal_lines").insert(desiredCredits.slice(1).map((split) => ({
+            school_id: schoolId, fiscal_year_id: lines?.[0]?.fiscal_year_id, journal_entry_id: editingId,
+            account_id: split.accountId, debit: 0, credit: split.amount, description: journalDescription,
+          })));
+          if (error) throw error;
+        }
       } else {
         const { error: transactionUpdateError } = await supabase
           .from("transactions")
@@ -2036,7 +2059,24 @@ export default function PaymentPage() {
       return;
     }
 
-    if (!paidFromAccountId) {
+    const paymentSplits = collectionType === "split"
+      ? [
+          { accountId: cashSplitAccountId, amount: roundToTwo(Number(cashSplitAmount || 0)) },
+          { accountId: bankSplitAccountId, amount: roundToTwo(Number(bankSplitAmount || 0)) },
+        ]
+      : [];
+    const selectedPaidFromId = collectionType === "split" ? cashSplitAccountId : paidFromAccountId;
+
+    if (collectionType === "split" && (
+      !cashSplitAccountId || !bankSplitAccountId ||
+      paymentSplits.some((split) => split.amount <= 0) ||
+      Math.abs(paymentSplits.reduce((sum, split) => sum + split.amount, 0) - roundToTwo(numericAmount)) > 0.005
+    )) {
+      setError("Enter positive Cash and Bank amounts that add up to the payment total.");
+      return;
+    }
+
+    if (!selectedPaidFromId) {
       setError(
         "Select the Cash or Bank account from which the payment is made.",
       );
@@ -2044,7 +2084,7 @@ export default function PaymentPage() {
     }
 
     const paidFrom = accounts.find(
-      (account) => account.id === paidFromAccountId,
+      (account) => account.id === selectedPaidFromId,
     );
 
     if (!paidFrom) {
@@ -2059,6 +2099,13 @@ export default function PaymentPage() {
       setError("Pay From must be a Cash or Bank account.");
       return;
     }
+    if (collectionType === "split" && (
+      paidFrom.account_type !== "cash" ||
+      accounts.find((account) => account.id === bankSplitAccountId)?.account_type !== "bank"
+    )) {
+      setError("Select a Cash account and a Bank account for the split payment.");
+      return;
+    }
 
     if (!payrollMode && !particulars.trim()) {
       setError("Enter payment particulars.");
@@ -2071,7 +2118,7 @@ export default function PaymentPage() {
     }
 
     if (editingId && paymentType === "salary") {
-      await saveSalaryPaymentEdit(numericAmount, paidFrom);
+      await saveSalaryPaymentEdit(numericAmount, paidFrom, paymentSplits);
       return;
     }
 
@@ -2336,7 +2383,7 @@ export default function PaymentPage() {
 
       const descriptionParts = [
         particulars.trim(),
-        `Payment method: ${paymentMethod}`,
+        `Payment method: ${collectionType === "split" ? "Split Cash + Bank" : paymentMethod}`,
       ];
 
       if (payrollMode) {
@@ -2373,7 +2420,7 @@ export default function PaymentPage() {
           .update({
             expense_date: paymentDate,
             amount: numericAmount,
-            paid_from_account_id: paidFromAccountId,
+            paid_from_account_id: selectedPaidFromId,
             description: particulars.trim(),
             invoice_number: referenceNumber.trim() || null,
           })
@@ -2391,24 +2438,36 @@ export default function PaymentPage() {
 
           const { data: lines, error: linesError } = await supabase
             .from("journal_lines")
-            .select("id,debit,credit")
+            .select("id,debit,credit,fiscal_year_id")
             .eq("journal_entry_id", editingId)
             .eq("school_id", schoolId);
           if (linesError) throw linesError;
           const debitLine = (lines || []).find((line) => Number(line.debit || 0) > 0);
-          const creditLine = (lines || []).find((line) => Number(line.credit || 0) > 0);
-          if (!debitLine || !creditLine) throw new Error("The existing accounting entry is incomplete.");
+          const creditLines = (lines || []).filter((line) => Number(line.credit || 0) > 0);
+          if (!debitLine || !creditLines.length) throw new Error("The existing accounting entry is incomplete.");
 
           const { error: debitUpdateError } = await supabase
             .from("journal_lines")
             .update({ account_id: debitAccountId, debit: numericAmount, credit: 0, description })
             .eq("id", debitLine.id).eq("school_id", schoolId);
           if (debitUpdateError) throw debitUpdateError;
+          const desiredCredits = paymentSplits.length ? paymentSplits : [{ accountId: selectedPaidFromId, amount: numericAmount }];
           const { error: creditUpdateError } = await supabase
             .from("journal_lines")
-            .update({ account_id: paidFromAccountId, debit: 0, credit: numericAmount, description })
-            .eq("id", creditLine.id).eq("school_id", schoolId);
+            .update({ account_id: desiredCredits[0].accountId, debit: 0, credit: desiredCredits[0].amount, description })
+            .eq("id", creditLines[0].id).eq("school_id", schoolId);
           if (creditUpdateError) throw creditUpdateError;
+          if (creditLines.length > 1) {
+            const { error } = await supabase.from("journal_lines").delete().in("id", creditLines.slice(1).map((line) => line.id)).eq("school_id", schoolId);
+            if (error) throw error;
+          }
+          if (desiredCredits.length > 1) {
+            const { error } = await supabase.from("journal_lines").insert(desiredCredits.slice(1).map((split) => ({
+              school_id: schoolId, fiscal_year_id: lines?.[0]?.fiscal_year_id, journal_entry_id: editingId,
+              account_id: split.accountId, debit: 0, credit: split.amount, description,
+            })));
+            if (error) throw error;
+          }
         } else {
           const { error: txnUpdateError } = await supabase
             .from("transactions")
@@ -2421,16 +2480,28 @@ export default function PaymentPage() {
             .eq("transaction_id", editingId).eq("school_id", schoolId);
           if (linesError) throw linesError;
           const debitLine = (lines || []).find((line) => Number(line.debit || 0) > 0);
-          const creditLine = (lines || []).find((line) => Number(line.credit || 0) > 0);
-          if (!debitLine || !creditLine) throw new Error("The existing accounting transaction is incomplete.");
+          const creditLines = (lines || []).filter((line) => Number(line.credit || 0) > 0);
+          if (!debitLine || !creditLines.length) throw new Error("The existing accounting transaction is incomplete.");
           const { error: debitUpdateError } = await supabase.from("transaction_entries")
             .update({ account_id: debitAccountId, debit: numericAmount, credit: 0, description })
             .eq("id", debitLine.id).eq("school_id", schoolId);
           if (debitUpdateError) throw debitUpdateError;
+          const desiredCredits = paymentSplits.length ? paymentSplits : [{ accountId: selectedPaidFromId, amount: numericAmount }];
           const { error: creditUpdateError } = await supabase.from("transaction_entries")
-            .update({ account_id: paidFromAccountId, debit: 0, credit: numericAmount, description })
-            .eq("id", creditLine.id).eq("school_id", schoolId);
+            .update({ account_id: desiredCredits[0].accountId, debit: 0, credit: desiredCredits[0].amount, description })
+            .eq("id", creditLines[0].id).eq("school_id", schoolId);
           if (creditUpdateError) throw creditUpdateError;
+          if (creditLines.length > 1) {
+            const { error } = await supabase.from("transaction_entries").delete().in("id", creditLines.slice(1).map((line) => line.id)).eq("school_id", schoolId);
+            if (error) throw error;
+          }
+          if (desiredCredits.length > 1) {
+            const { error } = await supabase.from("transaction_entries").insert(desiredCredits.slice(1).map((split) => ({
+              school_id: schoolId, transaction_id: editingId,
+              account_id: split.accountId, debit: 0, credit: split.amount, description,
+            })));
+            if (error) throw error;
+          }
         }
 
         setSuccess("Payment updated. The existing expense and accounting entry were kept linked.");
@@ -2498,7 +2569,7 @@ export default function PaymentPage() {
           expense_category_id: expenseCategory.id,
           expense_date: paymentDate,
           amount: numericAmount,
-          paid_from_account_id: paidFromAccountId,
+          paid_from_account_id: selectedPaidFromId,
           transaction_id: null, // canonical journal only - no legacy transaction
           vendor_name: payrollMode && paymentStaff
             ? paymentStaff.name
@@ -2537,7 +2608,8 @@ export default function PaymentPage() {
           entryDate: paymentDate,
           sourceRecordId: createdExpenseId,
           salaryPayableAccountId: debitAccountId,
-          paymentAccountId: paidFromAccountId,
+          paymentAccountId: selectedPaidFromId,
+          paymentAccountSplits: paymentSplits,
           amount: numericAmount,
           createdBy: userData.user?.id || null,
           entryDescription: paymentNarration,
@@ -2550,7 +2622,8 @@ export default function PaymentPage() {
           entryDate: paymentDate,
           sourceRecordId: createdExpenseId,
           expenseAccountId: debitAccountId,
-          paymentAccountId: paidFromAccountId,
+          paymentAccountId: selectedPaidFromId,
+          paymentAccountSplits: paymentSplits,
           amount: numericAmount,
           createdBy: userData.user?.id || null,
           entryDescription: paymentNarration,
@@ -2809,7 +2882,23 @@ export default function PaymentPage() {
       return;
     }
 
-    if (!paidFromAccountId) {
+    const paymentSplits = collectionType === "split"
+      ? [
+          { accountId: cashSplitAccountId, amount: roundToTwo(Number(cashSplitAmount || 0)) },
+          { accountId: bankSplitAccountId, amount: roundToTwo(Number(bankSplitAmount || 0)) },
+        ]
+      : [];
+    const vendorPaidFromId = collectionType === "split" ? cashSplitAccountId : paidFromAccountId;
+    if (collectionType === "split" && (
+      !cashSplitAccountId || !bankSplitAccountId ||
+      paymentSplits.some((split) => split.amount <= 0) ||
+      Math.abs(paymentSplits.reduce((sum, split) => sum + split.amount, 0) - numericAmount) > 0.005
+    )) {
+      setError("Enter positive Cash and Bank amounts that add up to the payment total.");
+      return;
+    }
+
+    if (!vendorPaidFromId) {
       setError(
         "Select the Cash or Bank account from which the payment is made.",
       );
@@ -2817,7 +2906,7 @@ export default function PaymentPage() {
     }
 
     const paidFrom = accounts.find(
-      (account) => account.id === paidFromAccountId,
+      (account) => account.id === vendorPaidFromId,
     );
 
     if (!paidFrom) {
@@ -2833,6 +2922,14 @@ export default function PaymentPage() {
       return;
     }
 
+    if (collectionType === "split" && (
+      paidFrom.account_type !== "cash" ||
+      accounts.find((account) => account.id === bankSplitAccountId)?.account_type !== "bank"
+    )) {
+      setError("Select a Cash account and a Bank account for the split payment.");
+      return;
+    }
+
     if (!paymentDate) {
       setError("Select payment date.");
       return;
@@ -2845,14 +2942,29 @@ export default function PaymentPage() {
 
     try {
       const { data, error: rpcError } = await supabase.rpc(
-        "record_vendor_payment",
-        {
+        collectionType === "split" ? "record_vendor_payment_split" : "record_vendor_payment",
+        collectionType === "split" ? {
           p_school_id: schoolId,
           p_vendor_id: vendorPaymentId,
           p_request_id: requestId,
           p_payment_date: paymentDate,
           p_amount: numericAmount,
-          p_paid_from_account_id: paidFromAccountId,
+          p_cash_account_id: cashSplitAccountId,
+          p_bank_account_id: bankSplitAccountId,
+          p_cash_amount: paymentSplits[0].amount,
+          p_bank_amount: paymentSplits[1].amount,
+          p_bill_id: vendorBillId,
+          p_payment_method: "split_cash_bank",
+          p_reference_number: referenceNumber.trim() || null,
+          p_particulars: particulars.trim() || null,
+          p_notes: notes.trim() || null,
+        } : {
+          p_school_id: schoolId,
+          p_vendor_id: vendorPaymentId,
+          p_request_id: requestId,
+          p_payment_date: paymentDate,
+          p_amount: numericAmount,
+          p_paid_from_account_id: vendorPaidFromId,
           p_bill_id: vendorBillId,
           p_payment_method: paymentMethod,
           p_reference_number: referenceNumber.trim() || null,
@@ -3112,6 +3224,13 @@ export default function PaymentPage() {
       setPaymentDate(expense.expense_date || payment.transaction_date);
       setPaymentMethod(getPaymentMethod(payment.description, accounts.find((account) => account.id === paidFromAccountId)!));
       setPaidFromAccountId(expense.paid_from_account_id || paidFromAccountId);
+      const creditLegs = payment.entries.filter((entry) => Number(entry.credit || 0) > 0);
+      const cashLeg = creditLegs.find((entry) => accounts.find((account) => account.id === entry.account_id)?.account_type === "cash");
+      const bankLeg = creditLegs.find((entry) => accounts.find((account) => account.id === entry.account_id)?.account_type === "bank");
+      if (cashLeg && bankLeg) {
+        setCollectionType("split"); setCashSplitAccountId(cashLeg.account_id); setBankSplitAccountId(bankLeg.account_id);
+        setCashSplitAmount(String(cashLeg.credit)); setBankSplitAmount(String(bankLeg.credit));
+      } else setCollectionType("single");
       setExpenseAccountId("");
       setAmount(amountValue.toFixed(2));
       setParticulars(`Salary - ${staffItem.name} - ${formatPayrollMonthLabel(payrollMonth)}`);
@@ -3203,6 +3322,13 @@ export default function PaymentPage() {
     setPaidFromAccountId(
       paidFrom.id
     );
+    const creditLegs = payment.entries.filter((entry) => Number(entry.credit || 0) > 0);
+    const cashLeg = creditLegs.find((entry) => accounts.find((account) => account.id === entry.account_id)?.account_type === "cash");
+    const bankLeg = creditLegs.find((entry) => accounts.find((account) => account.id === entry.account_id)?.account_type === "bank");
+    if (cashLeg && bankLeg) {
+      setCollectionType("split"); setCashSplitAccountId(cashLeg.account_id); setBankSplitAccountId(bankLeg.account_id);
+      setCashSplitAmount(String(cashLeg.credit)); setBankSplitAmount(String(bankLeg.credit));
+    } else setCollectionType("single");
 
     setExpenseAccountId(expense.id);
 
@@ -3979,6 +4105,39 @@ export default function PaymentPage() {
                   </select>
                 </div>
 
+                <div className="md:col-span-2 lg:col-span-4">
+                  <label className="mb-2 block text-sm font-medium text-slate-700">Payment source</label>
+                  <div className="flex flex-wrap gap-2">
+                    <button type="button" onClick={() => setCollectionType("single")} className={`rounded-lg border px-4 py-2 text-sm font-semibold ${collectionType === "single" ? "border-blue-500 bg-blue-50 text-blue-700" : "border-slate-200 text-slate-600"}`}>Single Payment</button>
+                    <button type="button" onClick={() => setCollectionType("split")} className={`rounded-lg border px-4 py-2 text-sm font-semibold ${collectionType === "split" ? "border-blue-500 bg-blue-50 text-blue-700" : "border-slate-200 text-slate-600"}`}>Split — Cash + Bank</button>
+                  </div>
+                </div>
+
+                {collectionType === "split" ? <>
+                  <div>
+                    <label className="mb-1 block text-sm font-medium text-slate-700">Cash account</label>
+                    <select value={cashSplitAccountId} onChange={(e) => setCashSplitAccountId(e.target.value)} className="w-full rounded-lg border bg-white px-3 py-2.5">
+                      <option value="">Select Cash account</option>
+                      {cashBankAccounts.filter((account) => account.account_type === "cash").map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-sm font-medium text-slate-700">Cash amount</label>
+                    <input type="number" min="0" step="0.01" value={cashSplitAmount} onChange={(e) => setCashSplitAmount(e.target.value)} className="w-full rounded-lg border px-3 py-2.5" placeholder="0.00" />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-sm font-medium text-slate-700">Bank account</label>
+                    <select value={bankSplitAccountId} onChange={(e) => setBankSplitAccountId(e.target.value)} className="w-full rounded-lg border bg-white px-3 py-2.5">
+                      <option value="">Select Bank account</option>
+                      {cashBankAccounts.filter((account) => account.account_type === "bank").map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-sm font-medium text-slate-700">Bank amount</label>
+                    <input type="number" min="0" step="0.01" value={bankSplitAmount} onChange={(e) => setBankSplitAmount(e.target.value)} className="w-full rounded-lg border px-3 py-2.5" placeholder="0.00" />
+                  </div>
+                </> : <div>
+
                 <div>
                   <label className="mb-1 block text-sm font-medium text-slate-700">
                     Pay From
@@ -4018,6 +4177,7 @@ export default function PaymentPage() {
                     )}
                   </select>
                 </div>
+                </div>}
 
                 {paymentType !==
                   "vendor" && (

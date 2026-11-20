@@ -2961,21 +2961,21 @@ export default function VendorPurchasesPage() {
     );
   }
 
-  const tabs: { key: Tab; label: string; icon: React.ReactNode }[] = [
-    { key: "outstanding", label: "Outstanding Payables", icon: <Wallet size={15} /> },
-    { key: "bills", label: "Purchase Bills", icon: <FileText size={15} /> },
-    { key: "payments", label: "Vendor Payments", icon: <Banknote size={15} /> },
-    { key: "returns", label: "Purchase Returns", icon: <Receipt size={15} /> },
-    { key: "vendors", label: "Vendors", icon: <Users size={15} /> },
-    { key: "ledger", label: "Vendor Ledger", icon: <Landmark size={15} /> },
-    { key: "inventory", label: "Inventory & Sale Prices", icon: <Truck size={15} /> },
+  const tabs: { key: Tab; label: string; description: string; icon: React.ReactNode }[] = [
+    { key: "outstanding", label: "Outstanding", description: "Bills still due", icon: <Wallet size={17} /> },
+    { key: "bills", label: "Purchase Bills", description: "Review supplier bills", icon: <FileText size={17} /> },
+    { key: "payments", label: "Vendor Payments", description: "Track payments made", icon: <Banknote size={17} /> },
+    { key: "returns", label: "Purchase Returns", description: "Returned items and credits", icon: <Receipt size={17} /> },
+    { key: "vendors", label: "Vendors", description: "Manage supplier details", icon: <Users size={17} /> },
+    { key: "ledger", label: "Vendor Ledger", description: "Account activity", icon: <Landmark size={17} /> },
+    { key: "inventory", label: "Inventory & Prices", description: "Stock and sale prices", icon: <Truck size={17} /> },
   ];
 
   return (
     <main className="min-h-screen bg-slate-50">
-      <div className="border-b bg-white">
+      <div className="border-b border-slate-200 bg-gradient-to-br from-white via-emerald-50/40 to-sky-50/60">
         <div className="mx-auto max-w-7xl px-6 py-6">
-          <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
             <div>
               <h1 className="flex items-center gap-2 text-2xl font-bold text-slate-900">
                 <Truck size={24} className="text-emerald-600" />
@@ -2987,60 +2987,53 @@ export default function VendorPurchasesPage() {
               </p>
             </div>
 
-            <div className="flex flex-wrap items-center gap-3">
+            <div className="grid w-full gap-2 sm:grid-cols-2 xl:max-w-[780px] xl:grid-cols-3">
               <button
                 onClick={() => void refresh()}
                 disabled={refreshing}
-                className="inline-flex items-center gap-2 rounded-lg border bg-white px-4 py-2.5 text-sm font-semibold hover:bg-slate-50 disabled:opacity-50"
+                title="Reload vendor, bill, payment and payable information"
+                className="group flex min-h-[76px] items-start gap-3 rounded-xl border border-slate-200 bg-white p-3 text-left shadow-sm transition hover:border-slate-300 hover:shadow disabled:opacity-50"
               >
-                <RefreshCw
-                  size={16}
-                  className={refreshing ? "animate-spin" : ""}
-                />
-                Refresh
+                <span className="rounded-lg bg-slate-100 p-2 text-slate-600"><RefreshCw size={17} className={refreshing ? "animate-spin" : ""} /></span>
+                <span><span className="block text-sm font-bold text-slate-800">Refresh data</span><span className="mt-1 block text-xs leading-4 text-slate-500">Reload the latest records</span></span>
               </button>
 
               <button
                 onClick={openAddVendor}
-                className="inline-flex items-center gap-2 rounded-lg border bg-white px-4 py-2.5 text-sm font-semibold hover:bg-slate-50"
+                title="Create a supplier profile for bills and payments"
+                className="group flex min-h-[76px] items-start gap-3 rounded-xl border border-sky-200 bg-white p-3 text-left shadow-sm transition hover:border-sky-300 hover:shadow"
               >
-                <Users size={16} />
-                Add Vendor
+                <span className="rounded-lg bg-sky-50 p-2 text-sky-700"><Users size={17} /></span>
+                <span><span className="block text-sm font-bold text-slate-800">Add vendor</span><span className="mt-1 block text-xs leading-4 text-slate-500">Create a supplier profile</span></span>
               </button>
 
               <button
                 onClick={openBillModal}
-                className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-emerald-700"
+                title="Enter a supplier bill and add its line items"
+                className="group flex min-h-[76px] items-start gap-3 rounded-xl border border-emerald-200 bg-white p-3 text-left shadow-sm transition hover:border-emerald-300 hover:shadow"
               >
-                <Plus size={17} />
-                New Bill
+                <span className="rounded-lg bg-emerald-50 p-2 text-emerald-700"><Plus size={18} /></span>
+                <span><span className="block text-sm font-bold text-slate-800">New purchase bill</span><span className="mt-1 block text-xs leading-4 text-slate-500">Record items and payable amount</span></span>
               </button>
 
               <button
                 onClick={openPaymentModal}
-                className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-blue-700"
+                title="Record money paid to a vendor and allocate it to bills"
+                className="group flex min-h-[76px] items-start gap-3 rounded-xl border border-blue-200 bg-white p-3 text-left shadow-sm transition hover:border-blue-300 hover:shadow"
               >
-                <Banknote size={17} />
-                Record Payment
+                <span className="rounded-lg bg-blue-50 p-2 text-blue-700"><Banknote size={18} /></span>
+                <span><span className="block text-sm font-bold text-slate-800">Record payment</span><span className="mt-1 block text-xs leading-4 text-slate-500">Pay a vendor against bills</span></span>
               </button>
 
-              <div className="flex gap-2">
-                <Link
-                  href="/dashboard/expenses"
-                  className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-50"
-                >
-                  <Receipt size={15} />
-                  Expenses
-                </Link>
+              <Link href="/dashboard/expenses" title="Review day-to-day school expenses" className="flex min-h-[76px] items-start gap-3 rounded-xl border border-orange-200 bg-white p-3 shadow-sm transition hover:border-orange-300 hover:shadow">
+                <span className="rounded-lg bg-orange-50 p-2 text-orange-700"><Receipt size={17} /></span>
+                <span><span className="block text-sm font-bold text-slate-800">Expenses</span><span className="mt-1 block text-xs leading-4 text-slate-500">View other school outflows</span></span>
+              </Link>
 
-                <Link
-                  href="/accounting/payment"
-                  className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-50"
-                >
-                  <Banknote size={15} />
-                  Payment
-                </Link>
-              </div>
+              <Link href="/accounting/payment" title="Open the general school payments register" className="flex min-h-[76px] items-start gap-3 rounded-xl border border-violet-200 bg-white p-3 shadow-sm transition hover:border-violet-300 hover:shadow">
+                <span className="rounded-lg bg-violet-50 p-2 text-violet-700"><Landmark size={17} /></span>
+                <span><span className="block text-sm font-bold text-slate-800">Payments</span><span className="mt-1 block text-xs leading-4 text-slate-500">Open all payment records</span></span>
+              </Link>
             </div>
           </div>
 
@@ -3074,19 +3067,21 @@ export default function VendorPurchasesPage() {
             />
           </div>
 
-          <div className="mt-6 flex flex-wrap gap-2">
+          <div className="mt-6 grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-7">
             {tabs.map((t) => (
               <button
                 key={t.key}
                 onClick={() => setTab(t.key)}
-                className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold ${
+                aria-pressed={tab === t.key}
+                title={t.description}
+                className={`flex min-h-[66px] items-start gap-2 rounded-xl border p-3 text-left transition ${
                   tab === t.key
-                    ? "bg-slate-900 text-white"
-                    : "border bg-white text-slate-600 hover:bg-slate-50"
+                    ? "border-slate-800 bg-slate-900 text-white shadow-sm"
+                    : "border-slate-200 bg-white text-slate-700 hover:border-emerald-200 hover:bg-emerald-50/50"
                 }`}
               >
-                {t.icon}
-                {t.label}
+                <span className={tab === t.key ? "mt-0.5 text-emerald-300" : "mt-0.5 text-emerald-700"}>{t.icon}</span>
+                <span className="min-w-0"><span className="block text-xs font-bold leading-4">{t.label}</span><span className={`mt-1 block text-[10px] leading-3 ${tab === t.key ? "text-slate-300" : "text-slate-500"}`}>{t.description}</span></span>
               </button>
             ))}
           </div>
@@ -3156,6 +3151,7 @@ export default function VendorPurchasesPage() {
 
               <button
                 onClick={() => exportActiveTab("pdf")}
+                title="Download the currently selected section as a PDF"
                 className="inline-flex items-center gap-1.5 rounded-lg border bg-white px-3.5 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
               >
                 <FileText size={15} />
@@ -3164,6 +3160,7 @@ export default function VendorPurchasesPage() {
 
               <button
                 onClick={() => exportActiveTab("excel")}
+                title="Download the currently selected section as an Excel workbook"
                 className="inline-flex items-center gap-1.5 rounded-lg border bg-white px-3.5 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
               >
                 <FileSpreadsheet size={15} />
@@ -3172,6 +3169,7 @@ export default function VendorPurchasesPage() {
 
               <button
                 onClick={() => exportActiveTab("csv")}
+                title="Download the currently selected section as a CSV file"
                 className="inline-flex items-center gap-1.5 rounded-lg border bg-white px-3.5 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
               >
                 <Download size={15} />
@@ -3302,6 +3300,7 @@ export default function VendorPurchasesPage() {
                           <div className="flex items-center justify-end gap-2">
                             <button
                               onClick={() => void openBillView(bill)}
+                              title="See bill items, payments and accounting details"
                               className="inline-flex items-center gap-1 rounded-lg border px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50"
                             >
                               <Eye size={14} />
@@ -3310,6 +3309,7 @@ export default function VendorPurchasesPage() {
 
                             <button
                               onClick={() => openEditBill(bill)}
+                              title="Change the vendor, dates or bill items"
                               className="inline-flex items-center gap-1 rounded-lg border px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50"
                             >
                               <Pencil size={14} />
@@ -3422,8 +3422,8 @@ export default function VendorPurchasesPage() {
                               View
                             </button>
 
-                            <button onClick={() => openPurchaseReturn(bill)} disabled={!bill.journal_entry_id || !bill.items.some((item) => Number(item.quantity) > (returnedQtyByBillItem[item.id] || 0))} className="rounded-lg border border-amber-300 px-3 py-1.5 text-xs font-semibold text-amber-800 disabled:opacity-40">Return</button>
-                            <button onClick={() => { setReturnsViewBillId(bill.id); setShowReturnsModal(true); }} className="rounded-lg border px-3 py-1.5 text-xs font-semibold text-slate-600">Return history</button>
+                            <button title="Record items returned to the vendor and adjust the bill payable" onClick={() => openPurchaseReturn(bill)} disabled={!bill.journal_entry_id || !bill.items.some((item) => Number(item.quantity) > (returnedQtyByBillItem[item.id] || 0))} className="rounded-lg border border-amber-300 px-3 py-1.5 text-xs font-semibold text-amber-800 disabled:opacity-40">Return</button>
+                            <button title="Review returns already recorded for this bill" onClick={() => { setReturnsViewBillId(bill.id); setShowReturnsModal(true); }} className="rounded-lg border px-3 py-1.5 text-xs font-semibold text-slate-600">Return history</button>
 
                             <button
                               onClick={() => openEditBill(bill)}
@@ -3435,6 +3435,7 @@ export default function VendorPurchasesPage() {
 
                             <button
                               onClick={() => setDeleteBillTarget(bill)}
+                              title="Delete this bill and its linked accounting entry"
                               className="inline-flex items-center gap-1 rounded-lg border border-red-200 px-3 py-1.5 text-xs font-semibold text-red-600 hover:bg-red-50"
                             >
                               <Trash2 size={14} />
@@ -3710,6 +3711,7 @@ filteredReturns.map((ret) => {
                             <div className="flex items-center gap-2">
                               <button
                                 onClick={() => setDetailVendor(vendor)}
+                                title="See contact information, bills and balances for this vendor"
                                 className="inline-flex items-center gap-1 rounded-lg border px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50"
                               >
                                 <Eye size={14} />
@@ -3718,6 +3720,7 @@ filteredReturns.map((ret) => {
 
                               <button
                                 onClick={() => openEditVendor(vendor)}
+                                title="Change this vendor's contact and account details"
                                 className="inline-flex items-center gap-1 rounded-lg border px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50"
                               >
                                 Edit
@@ -3830,6 +3833,7 @@ filteredReturns.map((ret) => {
                             <div className="flex items-center gap-2">
                               <button
                                 onClick={() => openEditPayment(payment)}
+                                title="Change this payment's date, amount or account"
                                 className="inline-flex items-center gap-1 rounded-lg border px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50"
                               >
                                 <Pencil size={14} />
@@ -3838,6 +3842,7 @@ filteredReturns.map((ret) => {
 
                               <button
                                 onClick={() => setDeletePaymentTarget(payment)}
+                                title="Delete this payment, release its bill allocation and reverse its accounting entry"
                                 className="inline-flex items-center gap-1 rounded-lg border border-red-200 px-3 py-1.5 text-xs font-semibold text-red-600 hover:bg-red-50"
                               >
                                 <Trash2 size={14} />
@@ -4340,6 +4345,7 @@ filteredReturns.map((ret) => {
                           <div className="flex items-center justify-end gap-1">
                             <button
                               onClick={() => setViewReturn(ret)}
+                                title="See the returned items and accounting details"
                               className="inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50"
                             >
                               <Eye size={12} />
@@ -4348,6 +4354,7 @@ filteredReturns.map((ret) => {
 
                             <button
                               onClick={() => openEditReturn(ret)}
+                                title="Change return details or settlement method"
                               className="inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50"
                             >
                               <Pencil size={12} />
@@ -4356,6 +4363,7 @@ filteredReturns.map((ret) => {
 
                             <button
                               onClick={() => setDeleteReturnTarget(ret)}
+                                title="Delete this return and reverse its accounting entry"
                               className="inline-flex items-center gap-1 rounded-lg border border-red-200 px-2 py-1 text-xs font-semibold text-red-600 hover:bg-red-50"
                             >
                               <Trash2 size={12} />

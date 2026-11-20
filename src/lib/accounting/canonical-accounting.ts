@@ -522,6 +522,7 @@ export async function postSalaryPaymentJournal(
     sourceRecordId?: string | null;
     salaryPayableAccountId: string;
     paymentAccountId: string;
+    paymentAccountSplits?: Array<{ accountId: string; amount: number }>;
     amount: number;
     createdBy?: string | null;
     /*
@@ -555,12 +556,9 @@ export async function postSalaryPaymentJournal(
         credit: 0,
         description: `${entryDescription} - salary payable cleared`,
       },
-      {
-        accountId: input.paymentAccountId,
-        debit: 0,
-        credit: Number(input.amount || 0),
-        description: entryDescription,
-      },
+      ...(input.paymentAccountSplits?.length
+        ? input.paymentAccountSplits.map((split) => ({ accountId: split.accountId, debit: 0, credit: Number(split.amount || 0), description: entryDescription }))
+        : [{ accountId: input.paymentAccountId, debit: 0, credit: Number(input.amount || 0), description: entryDescription }]),
     ],
   });
 }
@@ -574,6 +572,7 @@ export async function postExpenseJournal(
     sourceRecordId?: string | null;
     expenseAccountId: string;
     paymentAccountId: string;
+    paymentAccountSplits?: Array<{ accountId: string; amount: number }>;
     amount: number;
     createdBy?: string | null;
     vendorName?: string | null;
@@ -620,12 +619,9 @@ export async function postExpenseJournal(
         credit: 0,
         description: entryDescription,
       },
-      {
-        accountId: input.paymentAccountId,
-        debit: 0,
-        credit: Number(input.amount || 0),
-        description: entryDescription,
-      },
+      ...(input.paymentAccountSplits?.length
+        ? input.paymentAccountSplits.map((split) => ({ accountId: split.accountId, debit: 0, credit: Number(split.amount || 0), description: entryDescription }))
+        : [{ accountId: input.paymentAccountId, debit: 0, credit: Number(input.amount || 0), description: entryDescription }]),
     ],
   });
 }
